@@ -51,7 +51,7 @@ class BaseLLMClient(ABC):
 
     새로운 provider를 추가하려면:
     1. 이 클래스를 상속
-    2. chat() 과 stream() 을 구현
+    2. chat(), stream() 과 is_available() 을 구현
     3. llm/registry에 등록
 
     Example:
@@ -93,6 +93,11 @@ class BaseLLMClient(ABC):
     @abstractmethod
     def is_available(self) -> bool:
         """LLM 서버가 현재 연결 가능한지 확인"""
+        pass
+
+    @abstractmethod
+    def list_models(self) -> list[str]:
+        """현재 이용 가능한 모델 목록 반환"""
         pass
 
     def build_messages(
