@@ -5,7 +5,7 @@ Ollama 로컬 LLM 연동 클라이언트.
 base.py의 BaseLLMClient를 구현함.
 
 사전 준비:
-    pip install ollama
+    uv add ollama
     ollama pull qwen2.5-coder:7b
 """
 
@@ -14,7 +14,7 @@ from typing import Generator
 try:
     import ollama
 except ImportError:
-    raise ImportError("ollama 패키지가 없어요. 실행: pip install ollama")
+    raise ImportError("ollama 패키지가 없어요. 실행: uv add ollama")
 
 from .base import BaseLLMClient, LLMConfig, LLMResponse, Message
 
