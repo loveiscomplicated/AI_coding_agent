@@ -39,7 +39,7 @@ class LLMConfig:
     """LLM 설정값"""
 
     model: str
-    temperature: float = 0.0
+    temperature: None | float = 0.0
     max_tokens: int = 4096
     system_prompt: str = ""
     extra: dict = field(default_factory=dict)  # provider별 추가 옵션

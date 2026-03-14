@@ -51,7 +51,7 @@ class OpenaiClient(BaseLLMClient):
     def chat(self, messages: list[Message]) -> LLMResponse:
         """동기 방식 채팅"""
         response = self._client.responses.create(
-            model=self.config.model,
+            model=self.config.model,  # ex) gpt-5-pro, gpt-5-nano-2025-08-07
             instructions=self.config.system_prompt,
             input=[m.to_dict() for m in messages if m.role != "system"],
             max_output_tokens=self.config.max_tokens,
