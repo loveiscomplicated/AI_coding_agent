@@ -16,11 +16,13 @@ LLM 클라이언트 팩토리.
 from .base import BaseLLMClient, LLMConfig, LLMResponse, Message
 from .ollama_client import OllamaClient
 from .openai_client import OpenaiClient
+from .claude_client import ClaudeClient
 
 # 나중에 provider 추가할 때 여기에 등록하면 됨
 _PROVIDERS: dict[str, type[BaseLLMClient]] = {
     "ollama": OllamaClient,
     "openai": OpenaiClient,
+    "claude": ClaudeClient,
     # "lmstudio": LMStudioClient,
 }
 
