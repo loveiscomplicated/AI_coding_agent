@@ -1,7 +1,7 @@
 """
 llm/openai_client.py
 
-Openai 로컬 LLM 연동 클라이언트.
+Openai LLM 연동 클라이언트.
 base.py의 BaseLLMClient를 구현함.
 
 사전 준비:
@@ -29,10 +29,12 @@ load_dotenv()
 
 class OpenaiClient(BaseLLMClient):
     """
-    Openai 로컬 LLM 클라이언트
+    Openai API 사용 클라이언트
 
     사용 예시:
-        config = LLMConfig(model="", temperature=0.0)
+        # temperature fixed to 1.0.
+        # no support for temperature in openai's latest model anymore
+        config = LLMConfig(model="", temperature=1.0)
         client = OpenaiClient(config)
         response = client.chat([Message("user", "hello")])
         print(response.content)
@@ -55,7 +57,7 @@ class OpenaiClient(BaseLLMClient):
             instructions=self.config.system_prompt,
             input=[m.to_dict() for m in messages if m.role != "system"],
             max_output_tokens=self.config.max_tokens,
-            temperature=self.config.temperature,
+            temperature=1.0,  # no support for temperature in openai's latest model anymore
         )
 
         return LLMResponse(
@@ -66,12 +68,13 @@ class OpenaiClient(BaseLLMClient):
         )
 
     def stream(self, messages: list[Message]) -> Generator[str, None, None]:
+        """스트리밍 방식 채팅 — CLI에서 실시간 출력할 때 사용"""
         stream = self._client.responses.create(
             model=self.config.model,
             instructions=self.config.system_prompt,
             input=[m.to_dict() for m in messages if m.role != "system"],  # type: ignore
             max_output_tokens=self.config.max_tokens,
-            temperature=self.config.temperature,
+            temperature=1.0,  # no support for temperature in openai's latest model anymore
             stream=True,
         )  # type: ignore
         for event in stream:
@@ -79,6 +82,7 @@ class OpenaiClient(BaseLLMClient):
                 yield event.delta
 
     def is_available(self) -> bool:
+        """Openai API에서 사용 가능한 모델이 있는지 확인"""
         try:
             models = self._client.models.list()
             available = [m.id for m in models.data]
