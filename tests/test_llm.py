@@ -21,14 +21,27 @@ config_dict = {
         model="qwen2.5-coder:7b",
         temperature=0.0,
         system_prompt="You are a helpful coding assistant. Be concise.",
-    ),  # example model
+    ),
     "openai": LLMConfig(
         model="gpt-5-nano-2025-08-07",
+        # passing temperature is blocked in OpenaiClient and fixed to 1.0 in the internal logic
+        # no support for temperature in openai's latest model anymore
         temperature=None,
         system_prompt="You are a helpful coding assistant. Be concise.",
-    ),  # example model
+    ),
+    "claude": LLMConfig(
+        model="claude-sonnet-4-6",
+        temperature=0.0,
+        system_prompt="You are a helpful coding assistant. Be concise.",
+    ),
 }
-provider_dict = {"ollama": "ollama", "openai": "openai"}
+provider_dict = {"ollama": "ollama", "openai": "openai", "claude": "claude"}
+
+
+def client_builder(model_name):
+    config = config_dict[model_name]
+    client = create_client(provider=provider_dict[model_name], config=config)
+    return client
 
 
 def test_connection(model_name: str):
@@ -36,8 +49,7 @@ def test_connection(model_name: str):
     print("=" * 50)
     print(f"1. {model_name} 연결 테스트")
 
-    config = config_dict[model_name]
-    client = create_client(provider=provider_dict[model_name], config=config)
+    client = client_builder(model_name)
 
     if client.is_available():
         print(f"   ✅ {model_name} 연결 성공, 모델 확인됨")
@@ -55,8 +67,7 @@ def test_chat(model_name: str):
     """단순 채팅 테스트"""
     print("\n2. 채팅 테스트")
 
-    config = config_dict[model_name]
-    client = create_client(provider=provider_dict[model_name], config=config)
+    client = client_builder(model_name)
 
     messages = client.build_messages(
         "파이썬으로 'hello world'를 출력하는 코드 한 줄만 써줘"
@@ -72,8 +83,7 @@ def test_stream(model_name: str):
     """스트리밍 테스트"""
     print("\n3. 스트리밍 테스트")
 
-    config = config_dict[model_name]
-    client = create_client(provider=provider_dict[model_name], config=config)
+    client = client_builder(model_name)
 
     messages = client.build_messages("1부터 5까지 숫자를 출력하는 파이썬 코드 짜줘")
 
@@ -84,7 +94,7 @@ def test_stream(model_name: str):
 
 
 if __name__ == "__main__":
-    model_list = ["ollama", "openai"]
+    model_list = ["ollama", "openai", "claude"]
     for model_name in model_list:
         if test_connection(model_name):
             test_chat(model_name)
