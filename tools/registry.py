@@ -118,21 +118,44 @@ TOOL_REGISTRY: dict[str, dict] = {
 # ── TOOLS_SCHEMA 자동 생성 ────────────────────────────────────────────────────
 
 
-def _build_tools_schema(registry: dict) -> list[dict]:
+def _build_tools_schema(registry: dict, provider: str = "anthropic") -> list[dict]:
     """
-    TOOL_REGISTRY → Anthropic / OpenAI tool_use 형식의 TOOLS_SCHEMA 자동 생성.
+    TOOL_REGISTRY → Anthropic / OpenAI / Ollama tool_use 형식의 TOOLS_SCHEMA 자동 생성.
 
-    생성 형식 (Anthropic):
+    Anthropic 형식:
     {
         "name": "read_file",
         "description": "...",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "..."}
-            },
+            "properties": {"path": {"type": "string", "description": "..."}},
             "required": ["path"]
         }
+    }
+
+    OpenAI 형식:
+    {
+        "type": "function",
+        "name": "read_file",
+        "description": "...",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "..."}},
+            "required": ["path"]
+        }
+    Ollama 형식
+    {
+        "type": "function",
+        "function": {                    # ← OpenAI와 차이점: "function" 키로 한 번 더 감쌈
+            "name": "read_file",
+            "description": "...",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "..."}},
+                "required": ["path"]
+            }
+        }
+    }
     }
     """
     schema: list[dict] = []
@@ -155,22 +178,51 @@ def _build_tools_schema(registry: dict) -> list[dict]:
             if p_required:
                 required.append(param_name)
 
-        schema.append(
-            {
-                "name": tool_name,
-                "description": meta["description"],
-                "input_schema": {
-                    "type": "object",
-                    "properties": properties,
-                    **({"required": required} if required else {}),
-                },
-            }
-        )
-
+        params_schema = {
+            "type": "object",
+            "properties": properties,
+            **({"required": required} if required else {}),
+        }
+        if provider == "anthropic":
+            schema.append(
+                {
+                    "name": tool_name,
+                    "description": meta["description"],
+                    "input_schema": params_schema,
+                }
+            )
+        elif provider == "openai":
+            schema.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": meta["description"],
+                        "parameters": params_schema,
+                    },
+                }
+            )
+        elif provider == "ollama":
+            schema.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": meta["description"],
+                        "parameters": params_schema,
+                    },
+                }
+            )
+        else:
+            raise ValueError(
+                f"지원하지 않는 provider: {provider!r} (anthropic | openai | ollama)"
+            )
     return schema
 
 
-TOOLS_SCHEMA: list[dict] = _build_tools_schema(TOOL_REGISTRY)
+TOOLS_SCHEMA_ANTHROPIC: list[dict] = _build_tools_schema(TOOL_REGISTRY, "anthropic")
+TOOLS_SCHEMA_OPENAI: list[dict] = _build_tools_schema(TOOL_REGISTRY, "openai")
+TOOLS_SCHEMA_OLLAMA: list[dict] = _build_tools_schema(TOOL_REGISTRY, "ollama")
 
 
 # ── 호출 인터페이스 ───────────────────────────────────────────────────────────

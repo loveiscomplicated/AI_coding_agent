@@ -13,24 +13,22 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from enum import Enum
+
 from typing import Any
 
-from tools.registry import TOOLS_SCHEMA, call_tool
+from tools.registry import (
+    TOOLS_SCHEMA_ANTHROPIC,
+    TOOLS_SCHEMA_OPENAI,
+    TOOLS_SCHEMA_OLLAMA,
+    call_tool,
+)
+
+from llm.base import Message, LLMResponse, BaseLLMClient, StopReason
 
 logger = logging.getLogger(__name__)
 
 
 # ── 타입 정의 ─────────────────────────────────────────────────────────────────
-
-
-class StopReason(str, Enum):
-    END_TURN = "end_turn"  # LLM이 스스로 종료
-    MAX_ITER = "max_iterations"  # 반복 한도 초과
-    TOOL_ERROR = "tool_error"  # 도구 오류로 강제 종료
-    LLM_ERROR = "llm_error"  # LLM 호출 실패
-
-
 @dataclass
 class ToolCall:
     """LLM이 요청한 도구 호출 하나"""
@@ -66,7 +64,7 @@ class LoopResult:
     answer: str
     stop_reason: StopReason
     iterations: list[LoopIteration] = field(default_factory=list)
-    messages: list[dict] = field(default_factory=list)
+    messages: list[Message] = field(default_factory=list)
 
     @property
     def succeeded(self) -> bool:
@@ -98,19 +96,19 @@ class ReactLoop:
         on_tool_call=None,  # Callable[[ToolCall], None] — CLI 훅
         on_tool_result=None,  # Callable[[ToolResult], None] — CLI 훅
     ):
-        self.llm = llm
+        self.llm: BaseLLMClient = llm
         self.max_iterations = max_iterations
         self.tool_timeout_s = tool_timeout_s
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
+        self.TOOLS_SCHEMA = self.get_tools_schema()
 
     # ── 공개 인터페이스 ────────────────────────────────────────────────────────
 
     def run(
         self,
         user_message: str,
-        system_prompt: str | None = None,
-        history: list[dict] | None = None,
+        history: list[Message] | None = None,
     ) -> LoopResult:
         """
         ReAct 루프를 돌려 최종 응답을 반환합니다.
@@ -123,7 +121,9 @@ class ReactLoop:
         Returns:
             LoopResult — answer, stop_reason, 반복 기록 포함
         """
-        messages = self._build_initial_messages(user_message, history)
+        messages: list[Message] = self.llm.build_messages(
+            user_input=user_message, history=history
+        )
         iterations: list[LoopIteration] = []
 
         for i in range(self.max_iterations):
@@ -132,10 +132,9 @@ class ReactLoop:
 
             # ── Reason: LLM 호출 ──────────────────────────────────────────────
             try:
-                response = self.llm.chat(
+                response: LLMResponse = self.llm.chat(
                     messages=messages,
-                    tools=TOOLS_SCHEMA,
-                    system=system_prompt or _DEFAULT_SYSTEM,
+                    tools=self.TOOLS_SCHEMA,
                 )
             except Exception as exc:
                 logger.error("LLM 호출 실패: %s", exc)
@@ -172,8 +171,7 @@ class ReactLoop:
                 )
 
             # assistant 턴을 히스토리에 추가
-            messages.append({"role": "assistant", "content": response.content})
-
+            messages.append(Message(role="assistant", content=response.content))
             # ── Observe: 도구 실행 ────────────────────────────────────────────
             tool_results: list[ToolResult] = []
             hard_stop = False
@@ -195,9 +193,9 @@ class ReactLoop:
 
             # tool_results를 다음 user 턴으로 추가
             messages.append(
-                {
-                    "role": "user",
-                    "content": [
+                Message(
+                    role="user",
+                    content=[
                         {
                             "type": "tool_result",
                             "tool_use_id": tr.tool_use_id,
@@ -206,7 +204,7 @@ class ReactLoop:
                         }
                         for tr in tool_results
                     ],
-                }
+                )
             )
 
             elapsed = (time.perf_counter() - t0) * 1000
@@ -240,17 +238,6 @@ class ReactLoop:
         )
 
     # ── 내부 헬퍼 ─────────────────────────────────────────────────────────────
-
-    def _build_initial_messages(
-        self,
-        user_message: str,
-        history: list[dict] | None,
-    ) -> list[dict]:
-        """히스토리 + 새 유저 메시지로 초기 messages 배열 구성"""
-        messages = list(history or [])
-        messages.append({"role": "user", "content": user_message})
-        return messages
-
     def _execute_tool(self, tc: ToolCall) -> ToolResult:
         """
         단일 도구를 실행하고 ToolResult를 반환합니다.
@@ -280,6 +267,20 @@ class ReactLoop:
             msg = f"도구 실행 중 예외 [{tc.name}]: {type(exc).__name__}: {exc}"
             logger.error(msg, exc_info=True)
             return ToolResult(tool_use_id=tc.id, content=msg, is_error=True)
+
+    def get_tools_schema(self):
+        llm_client = type(self.llm).__name__
+        schema_dict = {
+            "OpenaiClient": TOOLS_SCHEMA_OPENAI,
+            "ClaudeClient": TOOLS_SCHEMA_ANTHROPIC,
+            "OllamaClient": TOOLS_SCHEMA_OLLAMA,
+        }
+        TOOLS_SCHEMA = schema_dict.get(llm_client, None)
+        if TOOLS_SCHEMA is None:
+            raise ValueError(
+                f"지원하지 않는 LLMClient: {llm_client!r} (OpenaiClient | ClaudeClient)"
+            )
+        return TOOLS_SCHEMA
 
 
 # ── 모듈 수준 헬퍼 ────────────────────────────────────────────────────────────
@@ -326,17 +327,3 @@ def _is_fatal_error(error_message: str) -> bool:
     ]
     lower = error_message.lower()
     return any(kw in lower for kw in fatal_keywords)
-
-
-# ── 기본 시스템 프롬프트 ──────────────────────────────────────────────────────
-
-_DEFAULT_SYSTEM = """\
-당신은 로컬 파일 시스템에서 작동하는 코딩 에이전트입니다.
-
-작업 원칙:
-- 파일을 읽기 전에 내용을 가정하지 마세요. 반드시 read_file로 먼저 확인하세요.
-- 파일 수정 시 edit_file을 우선 사용하세요. write_file은 새 파일 생성에만 씁니다.
-- 한 번의 응답에서 여러 도구를 병렬로 호출해도 됩니다.
-- 오류가 발생하면 원인을 분석하고 다른 방법으로 재시도하세요.
-- 최종 답변에는 어떤 작업을 했는지 간결하게 요약하세요.
-"""

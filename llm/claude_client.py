@@ -14,6 +14,7 @@ from typing import Generator
 
 try:
     import anthropic
+    from anthropic import omit
 except ImportError:
     raise ImportError("anthropic 패키지가 없어요. 실행: uv add anthropic")
 
@@ -45,27 +46,31 @@ class ClaudeClient(BaseLLMClient):
             )
         self._client = anthropic.Anthropic(api_key=api_key)
 
-    def chat(self, messages: list[Message]) -> LLMResponse:
+    def chat(self, messages: list[Message], **kwargs) -> LLMResponse:
         """동기 방식 채팅"""
         response = self._client.messages.create(
             model=self.config.model,  # ex) claude-haiku-4-5
             system=self.config.system_prompt,
             messages=[m.to_dict() for m in messages if m.role != "system"],  # type: ignore
+            tools=kwargs.get("tools", omit),
             max_tokens=self.config.max_tokens,
             temperature=self.config.temperature,  # type: ignore
         )
         return LLMResponse(
-            content=response.content[0].text,
+            content=response.content,  # list of TextBlock / ToolUseBlock
             model=response.model,
+            stop_reason=response.stop_reason,  # "end_turn" | "tool_use" | ...
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
         )
 
-    def stream(self, messages: list[Message]) -> Generator[str, None, None]:
+    def stream(self, messages: list[Message], **kwargs) -> Generator[str, None, None]:
+        """스트리밍 방식 채팅 — CLI에서 실시간 출력할 때 사용"""
         with self._client.messages.stream(
             model=self.config.model,
             system=self.config.system_prompt,
             messages=[m.to_dict() for m in messages if m.role != "system"],  # type: ignore
+            tools=kwargs.get("TOOLS_SCHEMA", omit),
             max_tokens=self.config.max_tokens,
             temperature=self.config.temperature,  # type: ignore
         ) as stream:
