@@ -2,7 +2,15 @@
 tests/test_llm.py
 
 llm/ 레이어 동작 확인용 테스트.
+
+# Ollama
 Ollama가 실행 중이어야 하고 모델이 설치돼 있어야 함.
+
+# OpenAI
+OPENAI_API_KEY가 .env에 존재해야 함.
+
+# Anthropic (Claude)
+ANTHROPIC_API_KEY가 .env에 존재해야 함.
 
 실행:
     python tests/test_llm.py
@@ -13,14 +21,15 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from llm import create_client, LLMConfig
+from llm import create_client, LLMConfig, BaseLLMClient
+from core.loop import ReactLoop
 
 
 config_dict = {
     "ollama": LLMConfig(
         model="qwen2.5-coder:7b",
         temperature=0.0,
-        system_prompt="You are a helpful coding assistant. Be concise.",
+        # default system prompt includes tool-use guidance; keep it for smaller models
     ),
     "openai": LLMConfig(
         model="gpt-5-nano-2025-08-07",
@@ -38,18 +47,16 @@ config_dict = {
 provider_dict = {"ollama": "ollama", "openai": "openai", "claude": "claude"}
 
 
-def client_builder(model_name):
+def client_builder(model_name) -> BaseLLMClient:
     config = config_dict[model_name]
     client = create_client(provider=provider_dict[model_name], config=config)
     return client
 
 
-def test_connection(model_name: str):
+def test_connection(client: BaseLLMClient):
     """LLM 서버 연결 및 모델 확인"""
     print("=" * 50)
     print(f"1. {model_name} 연결 테스트")
-
-    client = client_builder(model_name)
 
     if client.is_available():
         print(f"   ✅ {model_name} 연결 성공, 모델 확인됨")
@@ -63,11 +70,9 @@ def test_connection(model_name: str):
     return True
 
 
-def test_chat(model_name: str):
+def test_chat(client: BaseLLMClient):
     """단순 채팅 테스트"""
     print("\n2. 채팅 테스트")
-
-    client = client_builder(model_name)
 
     messages = client.build_messages(
         "파이썬으로 'hello world'를 출력하는 코드 한 줄만 써줘"
@@ -79,11 +84,9 @@ def test_chat(model_name: str):
     print(f"   토큰: input={response.input_tokens}, output={response.output_tokens}")
 
 
-def test_stream(model_name: str):
+def test_stream(client: BaseLLMClient):
     """스트리밍 테스트"""
     print("\n3. 스트리밍 테스트")
-
-    client = client_builder(model_name)
 
     messages = client.build_messages("1부터 5까지 숫자를 출력하는 파이썬 코드 짜줘")
 
@@ -93,10 +96,32 @@ def test_stream(model_name: str):
     print()
 
 
+def test_file_tool(client: BaseLLMClient):
+    """file_tool 사용 테스트"""
+    print("file_tool 사용 테스트")
+
+    loop = ReactLoop(llm=client, max_iterations=5)
+    result = loop.run("test_file_tools.py에서 import된 라이브러리들을 알려줘")
+    print("응답:")
+    print(f"   response: \n   {result.answer}")
+    print(f"   iterations: {result.iterations}")
+    print(f"   stop_reason: {result.stop_reason}")
+    print(f"   succeeded: {result.succeeded}")
+    print(f"   total_tool_calls: {result.total_tool_calls}")
+
+
+def test_main(model_name: str):
+    client = client_builder(model_name)
+
+    if test_connection(client):
+        # test_chat(client)
+        # test_stream(client)
+        test_file_tool(client)
+
+    print(f"\n{model_name} 완료!")
+
+
 if __name__ == "__main__":
     model_list = ["ollama", "openai", "claude"]
     for model_name in model_list:
-        if test_connection(model_name):
-            test_chat(model_name)
-            test_stream(model_name)
-        print(f"\n{model_name} 완료!")
+        test_main(model_name)

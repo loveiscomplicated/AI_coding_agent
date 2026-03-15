@@ -13,7 +13,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from tools.registry import TOOL_REGISTRY, TOOLS_SCHEMA, call_tool
+from tools.registry import TOOL_REGISTRY, TOOLS_SCHEMA_ANTHROPIC as TOOLS_SCHEMA, call_tool
 
 
 # ── TOOLS_SCHEMA 구조 ──────────────────────────────────────────────────────

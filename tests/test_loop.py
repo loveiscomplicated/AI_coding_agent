@@ -19,6 +19,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+from llm.base import Message
 from core.loop import (
     LoopResult,
     ReactLoop,
@@ -71,8 +72,29 @@ class _SequentialMockLLM:
     def __init__(self, responses: list):
         self._responses = iter(responses)
 
-    def chat(self, messages, tools, system):
+    def build_messages(self, user_input, history=None):
+        msgs = []
+        for h in (history or []):
+            # dict 형식과 Message 객체 모두 허용
+            msgs.append(
+                Message(role=h["role"], content=h["content"])
+                if isinstance(h, dict)
+                else h
+            )
+        msgs.append(Message(role="user", content=user_input))
+        return msgs
+
+    def chat(self, messages, **kwargs):
         return next(self._responses)
+
+
+# ── autouse 픽스처: get_tools_schema 패치 ────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def patch_get_tools_schema(monkeypatch):
+    """테스트용 Mock LLM은 registry에 없으므로 스키마 조회를 빈 리스트로 패치"""
+    monkeypatch.setattr(ReactLoop, "get_tools_schema", lambda self: [])
 
 
 # ── _is_fatal_error ────────────────────────────────────────────────────────
@@ -307,8 +329,8 @@ class TestReactLoopRun:
         result = loop.run("테스트 입력")
 
         first_msg = result.messages[0]
-        assert first_msg["role"] == "user"
-        assert first_msg["content"] == "테스트 입력"
+        assert first_msg.role == "user"
+        assert first_msg.content == "테스트 입력"
 
     def test_history_prepended_to_messages(self):
         llm = _SequentialMockLLM([_text_response("ok")])
@@ -320,8 +342,8 @@ class TestReactLoopRun:
 
         result = loop.run("새 질문", history=history)
 
-        assert result.messages[0]["content"] == "이전 질문"
-        assert result.messages[2]["content"] == "새 질문"
+        assert result.messages[0].content == "이전 질문"
+        assert result.messages[2].content == "새 질문"
 
     def test_tool_result_appended_as_user_turn(self, tmp_path):
         """tool_result 가 user 턴으로 messages에 추가되어야 함"""
@@ -340,9 +362,9 @@ class TestReactLoopRun:
 
         # messages: [user, assistant(tool_use), user(tool_result), ...]
         tool_result_msg = result.messages[2]
-        assert tool_result_msg["role"] == "user"
-        assert tool_result_msg["content"][0]["type"] == "tool_result"
-        assert tool_result_msg["content"][0]["tool_use_id"] == "id1"
+        assert tool_result_msg.role == "user"
+        assert tool_result_msg.content[0]["type"] == "tool_result"
+        assert tool_result_msg.content[0]["tool_use_id"] == "id1"
 
     # ── 반복 제어 ──────────────────────────────────────────────────────────
 
@@ -416,7 +438,7 @@ class TestReactLoopRun:
         assert result.stop_reason == StopReason.END_TURN
         assert result.succeeded is True
         # tool_result에 is_error=True 가 기록되어야 함
-        tool_result_content = result.messages[2]["content"][0]
+        tool_result_content = result.messages[2].content[0]
         assert tool_result_content["is_error"] is True
 
     def test_unknown_tool_name_returns_error_result(self):
@@ -432,7 +454,7 @@ class TestReactLoopRun:
         result = loop.run("없는 도구 써줘")
 
         assert result.succeeded is True
-        tool_result_content = result.messages[2]["content"][0]
+        tool_result_content = result.messages[2].content[0]
         assert tool_result_content["is_error"] is True
 
     def test_tool_use_response_without_tool_blocks(self):
@@ -482,37 +504,3 @@ class TestReactLoopRun:
         assert len(results_received) == 1
         assert results_received[0].is_error is False
         assert "result_data" in results_received[0].content
-
-
-# ── _build_initial_messages ────────────────────────────────────────────────
-
-
-class TestBuildInitialMessages:
-    def test_no_history(self):
-        llm = MagicMock()
-        loop = ReactLoop(llm=llm)
-
-        msgs = loop._build_initial_messages("hello", None)
-
-        assert msgs == [{"role": "user", "content": "hello"}]
-
-    def test_with_history(self):
-        llm = MagicMock()
-        loop = ReactLoop(llm=llm)
-        history = [{"role": "user", "content": "prev"}]
-
-        msgs = loop._build_initial_messages("new", history)
-
-        assert msgs[0] == {"role": "user", "content": "prev"}
-        assert msgs[1] == {"role": "user", "content": "new"}
-
-    def test_history_not_mutated(self):
-        """원본 history 리스트가 변경되지 않아야 함"""
-        llm = MagicMock()
-        loop = ReactLoop(llm=llm)
-        history = [{"role": "user", "content": "original"}]
-        original_len = len(history)
-
-        loop._build_initial_messages("new msg", history)
-
-        assert len(history) == original_len
