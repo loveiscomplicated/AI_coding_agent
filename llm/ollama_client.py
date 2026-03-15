@@ -69,14 +69,35 @@ def _parse_text_tool_call(text: str) -> dict | None:
     return None
 
 
-def _to_ollama_messages(messages: list[Message]) -> list[dict]:
+# 도구 결과를 컨텍스트에 그대로 넣으면 작은 모델 컨텍스트 윈도우를 금방 채움.
+# 문자 수 기준으로 약 4000자(≈1000 토큰) 제한.
+_MAX_TOOL_OUTPUT_CHARS = 4000
+_TRUNCATION_NOTICE = "\n...(출력이 길어 잘렸습니다. 특정 범위가 필요하면 read_file_lines를 사용하세요.)"
+
+
+def _truncate(content: str) -> str:
+    if len(content) > _MAX_TOOL_OUTPUT_CHARS:
+        return content[:_MAX_TOOL_OUTPUT_CHARS] + _TRUNCATION_NOTICE
+    return content
+
+
+def _to_ollama_messages(
+    messages: list[Message],
+    native_tool_role: bool = True,
+) -> list[dict]:
     """
     정규화된 Message 리스트 → Ollama 메시지 형식으로 변환.
 
     - assistant 메시지의 tool_use 블록 → tool_calls 필드
-    - user 메시지의 tool_result 블록 → role="tool" 메시지 (name 포함)
+    - user 메시지의 tool_result 블록 →
+        native_tool_role=True : role="tool" (네이티브 지원 모델용, 기본값)
+        native_tool_role=False: role="user" 텍스트 포함 (소형 모델 폴백)
+
+    Args:
+        native_tool_role: True면 Ollama 네이티브 tool 메시지 사용.
+                          False면 user 메시지로 래핑 (7b처럼 tool role을 무시하는 모델용).
     """
-    # tool_use_id → tool_name 역방향 조회 맵 (result에 name 필드 포함을 위해)
+    # tool_use_id → tool_name 역방향 조회 맵
     id_to_name: dict[str, str] = {}
     for msg in messages:
         if msg.role == "assistant" and isinstance(msg.content, list):
@@ -108,15 +129,25 @@ def _to_ollama_messages(messages: list[Message]) -> list[dict]:
         elif msg.role == "user":
             tool_results = [b for b in msg.content if b.get("type") == "tool_result"]
             if tool_results:
-                # role="tool"은 소형 모델에서 잘 무시되므로,
-                # 도구 결과를 user 메시지 텍스트로 포함해 신뢰성을 높임
-                parts = []
-                for tr in tool_results:
-                    name = id_to_name.get(tr["tool_use_id"], "tool")
-                    status = "오류" if tr.get("is_error") else "결과"
-                    parts.append(f"[{name} {status}]\n{tr['content']}")
-                combined = "\n\n".join(parts)
-                result.append({"role": "user", "content": combined})
+                if native_tool_role:
+                    # 네이티브 tool 메시지 형식 (14b 이상 권장)
+                    for tr in tool_results:
+                        tool_msg: dict = {
+                            "role": "tool",
+                            "content": _truncate(tr["content"]),
+                        }
+                        name = id_to_name.get(tr["tool_use_id"])
+                        if name:
+                            tool_msg["name"] = name
+                        result.append(tool_msg)
+                else:
+                    # 소형 모델 폴백: user 메시지 텍스트로 래핑
+                    parts = []
+                    for tr in tool_results:
+                        name = id_to_name.get(tr["tool_use_id"], "tool")
+                        status = "오류" if tr.get("is_error") else "결과"
+                        parts.append(f"[{name} {status}]\n{_truncate(tr['content'])}")
+                    result.append({"role": "user", "content": "\n\n".join(parts)})
             else:
                 text = "\n".join(b.get("text", "") for b in msg.content)
                 result.append({"role": "user", "content": text})
@@ -133,22 +164,33 @@ class OllamaClient(BaseLLMClient):
 
     사용 예시:
         config = LLMConfig(model="qwen2.5-coder:7b", temperature=0.0)
-        client = OllamaClient(config)
+        client = OllamaClient(config, native_tool_role=False)  # 7b 소형 모델
         response = client.chat([Message("user", "hello")])
         print(response.content)
+
+    Args:
+        native_tool_role: True(기본값)이면 Ollama 네이티브 role="tool" 메시지 사용.
+                          False이면 role="user" 텍스트 래핑 폴백 (7b처럼 tool role을 무시하는 모델용).
     """
 
-    def __init__(self, config: LLMConfig, host: str = "http://localhost:11434"):
+    def __init__(
+        self,
+        config: LLMConfig,
+        host: str = "http://localhost:11434",
+        native_tool_role: bool = True,
+    ):
         super().__init__(config)
         self.host = host
+        self.native_tool_role = native_tool_role
         self._client = ollama.Client(host=host)
 
     def chat(self, messages: list[Message], **kwargs) -> LLMResponse:
         """동기 방식 채팅"""
         response = self._client.chat(
             model=self.config.model,
-            messages=_to_ollama_messages(messages),  # type: ignore[arg-type]
+            messages=_to_ollama_messages(messages, self.native_tool_role),  # type: ignore[arg-type]
             options={
+                "num_ctx": 16384,  # 컨텍스트 오버플로우 방지 기본값 (config.extra로 재정의 가능)
                 "temperature": self.config.temperature,
                 "num_predict": self.config.max_tokens,
                 **self.config.extra,

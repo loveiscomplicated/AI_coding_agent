@@ -27,7 +27,7 @@ from core.loop import ReactLoop
 
 config_dict = {
     "ollama": LLMConfig(
-        model="qwen2.5-coder:7b",
+        model="qwen2.5-coder:14b",  # 7b로 변경 시 client_kwargs_dict도 함께 수정
         temperature=0.0,
         # default system prompt includes tool-use guidance; keep it for smaller models
     ),
@@ -46,10 +46,17 @@ config_dict = {
 }
 provider_dict = {"ollama": "ollama", "openai": "openai", "claude": "claude"}
 
+# OllamaClient 전용 추가 kwargs.
+# native_tool_role: 14b 이상은 True(기본값), 7b처럼 tool role을 무시하는 소형 모델은 False.
+_ollama_client_kwargs: dict = {
+    "native_tool_role": True,  # 14b: True / 7b로 바꿀 땐 False
+}
+
 
 def client_builder(model_name) -> BaseLLMClient:
     config = config_dict[model_name]
-    client = create_client(provider=provider_dict[model_name], config=config)
+    extra = _ollama_client_kwargs if model_name == "ollama" else {}
+    client = create_client(provider=provider_dict[model_name], config=config, **extra)
     return client
 
 
