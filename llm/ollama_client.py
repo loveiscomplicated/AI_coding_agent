@@ -25,6 +25,7 @@ def _strip_special_tokens(text: str) -> str:
     <|im_start|>, <|im_end|> 등 채팅 포맷 특수 토큰 및 마크다운 코드 블록 제거.
     """
     import re
+
     # <|...|> 형태 특수 토큰 제거
     text = re.sub(r"<\|[^|>]+\|>", "", text)
     # ```json ... ``` 코드 블록에서 내용 추출
@@ -72,7 +73,9 @@ def _parse_text_tool_call(text: str) -> dict | None:
 # 도구 결과를 컨텍스트에 그대로 넣으면 작은 모델 컨텍스트 윈도우를 금방 채움.
 # 문자 수 기준으로 약 4000자(≈1000 토큰) 제한.
 _MAX_TOOL_OUTPUT_CHARS = 4000
-_TRUNCATION_NOTICE = "\n...(출력이 길어 잘렸습니다. 특정 범위가 필요하면 read_file_lines를 사용하세요.)"
+_TRUNCATION_NOTICE = (
+    "\n...(출력이 길어 잘렸습니다. 특정 범위가 필요하면 read_file_lines를 사용하세요.)"
+)
 
 
 def _truncate(content: str) -> str:
@@ -205,30 +208,36 @@ class OllamaClient(BaseLLMClient):
         tool_calls = msg.get("tool_calls") or []
 
         for i, tc in enumerate(tool_calls):
-            blocks.append({
-                "type": "tool_use",
-                "id": f"call_{i}",
-                "name": tc["function"]["name"],
-                "input": tc["function"]["arguments"],
-            })
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": f"call_{i}",
+                    "name": tc["function"]["name"],
+                    "input": tc["function"]["arguments"],
+                }
+            )
 
         if not tool_calls and raw_content:
             # structured tool_calls 미지원 모델이 JSON 텍스트로 도구 호출을 출력하는 경우 폴백
             parsed = _parse_text_tool_call(raw_content)
             if parsed:
-                blocks.append({
-                    "type": "tool_use",
-                    "id": "call_0",
-                    "name": parsed["name"],
-                    "input": parsed["arguments"],
-                })
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": "call_0",
+                        "name": parsed["name"],
+                        "input": parsed["arguments"],
+                    }
+                )
             else:
                 blocks.append({"type": "text", "text": raw_content})
 
         return LLMResponse(
             content=blocks,
             model=response.get("model", self.config.model),
-            stop_reason="tool_use" if blocks and blocks[0]["type"] == "tool_use" else "end_turn",
+            stop_reason=(
+                "tool_use" if blocks and blocks[0]["type"] == "tool_use" else "end_turn"
+            ),
             input_tokens=response.get("prompt_eval_count", 0),
             output_tokens=response.get("eval_count", 0),
         )
