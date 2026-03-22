@@ -3,16 +3,7 @@
 import os
 import re
 from pathlib import Path
-from typing import Optional
-from dataclasses import dataclass
-
-
-@dataclass
-class ToolResult:
-    success: bool
-    output: str
-    error: Optional[str] = None
-
+from .schemas import ToolResult
 
 # ── 읽기 ──────────────────────────────────────────
 
