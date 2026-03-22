@@ -131,6 +131,20 @@ def test_shell_tool(client: BaseLLMClient):
     print(f"   total_tool_calls: {result.total_tool_calls}")
 
 
+def test_code_tool(client: BaseLLMClient):
+    """code_tool 사용 테스트"""
+    print("code_tool 사용 테스트")
+
+    loop = ReactLoop(llm=client, max_iterations=5)
+    result = loop.run("tools/code_tools.py의 함수 구조를 파악하고 각 함수가 어떤 역할인지 설명해줘")
+    print("응답:")
+    print(f"   response: \n   {result.answer}")
+    print(f"   iterations: {result.iterations}")
+    print(f"   stop_reason: {result.stop_reason}")
+    print(f"   succeeded: {result.succeeded}")
+    print(f"   total_tool_calls: {result.total_tool_calls}")
+
+
 def test_main(model_name: str):
     client = client_builder(model_name)
 
@@ -138,7 +152,8 @@ def test_main(model_name: str):
         # test_chat(client)
         # test_stream(client)
         # test_file_tool(client)
-        test_shell_tool(client)
+        # test_shell_tool(client)
+        test_code_tool(client)
 
     print(f"\n{model_name} 완료!")
 
