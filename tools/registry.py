@@ -19,6 +19,7 @@ from tools.file_tools import (
     write_file,
 )
 from tools.shell_tools import execute_command
+from tools.code_tools import get_imports, get_outline, get_function_src
 
 # ── 타입 별칭 ─────────────────────────────────────────────────────────────────
 # 각 파라미터 항목: (type, description, required, default)
@@ -111,6 +112,35 @@ TOOL_REGISTRY: dict[str, dict] = {
         "params": {
             "path": ("string", "대상 파일 경로", True, None),
             "content": ("string", "추가할 내용", True, None),
+        },
+    },
+    "get_imports": {
+        "fn": get_imports,
+        "description": "Python 파일의 모든 import 문을 줄 번호와 함께 추출",
+        "params": {
+            "path": ("string", "분석할 Python 파일 경로", True, None),
+        },
+    },
+    "get_outline": {
+        "fn": get_outline,
+        "description": (
+            "Python 파일의 함수·클래스 구조 요약. "
+            "이름, 줄 번호, 인자, docstring 첫 줄을 보여줌. "
+            "파일 전체를 읽기 전에 구조 파악용으로 사용하세요."
+        ),
+        "params": {
+            "path": ("string", "분석할 Python 파일 경로", True, None),
+        },
+    },
+    "get_function_src": {
+        "fn": get_function_src,
+        "description": (
+            "Python 파일에서 특정 함수·메서드의 소스코드만 추출. "
+            "파일 전체를 읽지 않고 필요한 함수만 볼 때 사용하세요."
+        ),
+        "params": {
+            "path": ("string", "Python 파일 경로", True, None),
+            "function_name": ("string", "찾을 함수 또는 메서드 이름", True, None),
         },
     },
     "execute_command": {
