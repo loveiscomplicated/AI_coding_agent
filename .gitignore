@@ -144,3 +144,4 @@ core/__pycache__
 tests/__pycache__
 tools/__pycache__
 memory/__pycache__
+cli/__pycache__
