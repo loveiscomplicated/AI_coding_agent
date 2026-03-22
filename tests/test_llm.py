@@ -117,13 +117,28 @@ def test_file_tool(client: BaseLLMClient):
     print(f"   total_tool_calls: {result.total_tool_calls}")
 
 
+def test_shell_tool(client: BaseLLMClient):
+    """execute_command 도구 사용 테스트"""
+    print("shell_tool 사용 테스트")
+
+    loop = ReactLoop(llm=client, max_iterations=5)
+    result = loop.run("현재 디렉토리의 파일 목록을 ls 명령어로 알려줘")
+    print("응답:")
+    print(f"   response: \n   {result.answer}")
+    print(f"   iterations: {result.iterations}")
+    print(f"   stop_reason: {result.stop_reason}")
+    print(f"   succeeded: {result.succeeded}")
+    print(f"   total_tool_calls: {result.total_tool_calls}")
+
+
 def test_main(model_name: str):
     client = client_builder(model_name)
 
     if test_connection(client):
         # test_chat(client)
         # test_stream(client)
-        test_file_tool(client)
+        # test_file_tool(client)
+        test_shell_tool(client)
 
     print(f"\n{model_name} 완료!")
 
