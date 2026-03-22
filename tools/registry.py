@@ -18,6 +18,7 @@ from tools.file_tools import (
     search_in_file,
     write_file,
 )
+from tools.shell_tools import execute_command
 
 # ── 타입 별칭 ─────────────────────────────────────────────────────────────────
 # 각 파라미터 항목: (type, description, required, default)
@@ -112,6 +113,19 @@ TOOL_REGISTRY: dict[str, dict] = {
             "content": ("string", "추가할 내용", True, None),
         },
     },
+    "execute_command": {
+        "fn": execute_command,
+        "description": (
+            "셸 명령어 실행. command는 토큰 단위로 분리된 문자열 배열 "
+            "(예: [\"ls\", \"-la\", \"/tmp\"]). "
+            "셸 인젝션 방지를 위해 shell=True를 사용하지 않습니다."
+        ),
+        "params": {
+            "command": ("array", "실행할 명령어 토큰 배열 (예: [\"python\", \"main.py\"])", True, None),
+            "input_": ("string", "표준 입력으로 전달할 문자열", False, None),
+            "timeout": ("number", "타임아웃 (초 단위). 초과 시 오류 반환", False, None),
+        },
+    },
 }
 
 
@@ -167,12 +181,14 @@ def _build_tools_schema(registry: dict, provider: str = "anthropic") -> list[dic
         for param_name, (p_type, p_desc, p_required, p_default) in meta[
             "params"
         ].items():
-            prop: dict[str, str] = {
+            prop: dict = {
                 "type": p_type,
                 "description": (
                     p_desc if p_required else f"{p_desc} (기본값: {p_default!r})"
                 ),
             }
+            if p_type == "array":
+                prop["items"] = {"type": "string"}
             properties[param_name] = prop
 
             if p_required:

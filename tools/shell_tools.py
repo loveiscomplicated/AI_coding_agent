@@ -24,7 +24,6 @@ def execute_command(
             timeout=timeout,
             check=True,
         )
-        print(result)
         return ToolResult(success=True, output=str(result.stdout))
 
     except subprocess.CalledProcessError as e:
