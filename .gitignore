@@ -137,12 +137,31 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# App settings
 settings.json
-llm/__pycache__
 settings.local.json
-core/__pycache__
-tests/__pycache__
-tools/__pycache__
-memory/__pycache__
-cli/__pycache__
-__pycache__
+
+# Python bytecode (all directories)
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+
+# Python package build artifacts
+*.egg-info/
+*.egg
+build/
+dist/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Runtime data
+data/sessions.db
+data/*.db
+
+# macOS
+.DS_Store

@@ -22,6 +22,7 @@ from rich.console import Console
 
 from cli.commands import Action, CommandResult, handle
 from cli import interface as ui
+from cli.interface import _print_diff, ApprovalHandler
 from llm.base import Message
 from memory import SessionManager
 
@@ -413,3 +414,272 @@ class TestCommandUnknown:
     def test_unknown_command_shows_error(self, mgr, session, captured):
         handle("/unknown_cmd", mgr, session)
         assert "✗" in get_output(captured)
+
+
+# ── interface: _print_diff ────────────────────────────────────────────────────
+
+
+class TestPrintDiff:
+    def test_added_lines_present(self, captured):
+        _print_diff("before\n", "before\nadded\n", "f.py")
+        out = get_output(captured)
+        assert "added" in out
+
+    def test_removed_lines_present(self, captured):
+        _print_diff("before\nremoved\n", "before\n", "f.py")
+        out = get_output(captured)
+        assert "removed" in out
+
+    def test_no_change_shows_indicator(self, captured):
+        _print_diff("same\n", "same\n", "f.py")
+        assert "변경 없음" in get_output(captured)
+
+    def test_file_path_in_header(self, captured):
+        _print_diff("a\n", "b\n", "myfile.py")
+        assert "myfile.py" in get_output(captured)
+
+    def test_empty_before_shows_all_added(self, captured):
+        _print_diff("", "new content\n", "new.py")
+        out = get_output(captured)
+        assert "new content" in out
+
+    def test_empty_after_shows_all_removed(self, captured):
+        _print_diff("old content\n", "", "old.py")
+        out = get_output(captured)
+        assert "old content" in out
+
+    def test_multiline_diff(self, captured):
+        before = "line1\nline2\nline3\n"
+        after  = "line1\nLINE2\nline3\n"
+        _print_diff(before, after, "m.py")
+        out = get_output(captured)
+        assert "LINE2" in out
+        assert "line2" in out
+
+
+# ── interface: ask_tool_approval ──────────────────────────────────────────────
+
+
+@dataclass
+class _FakeTC:
+    name: str
+    input: dict
+
+
+class TestApprovalHandler:
+    """ApprovalHandler 는 _prompt_session.prompt 를 패치해서 테스트한다."""
+
+    def _make(self):
+        return ApprovalHandler()
+
+    def _call(self, handler, tc, answer: str) -> bool:
+        with patch("cli.interface._prompt_session") as mock_session:
+            mock_session.prompt.return_value = answer
+            return handler(tc)
+
+    # edit_file — 승인
+    def test_edit_file_approved(self, tmp_path, captured):
+        f = tmp_path / "a.py"
+        f.write_text("def foo(): pass\n", encoding="utf-8")
+        tc = _FakeTC("edit_file", {"path": str(f), "old_str": "foo", "new_str": "bar"})
+        assert self._call(self._make(), tc, "y") is True
+
+    # edit_file — 거부
+    def test_edit_file_denied(self, tmp_path, captured):
+        f = tmp_path / "b.py"
+        f.write_text("x = 1\n", encoding="utf-8")
+        tc = _FakeTC("edit_file", {"path": str(f), "old_str": "x", "new_str": "z"})
+        assert self._call(self._make(), tc, "n") is False
+
+    # write_file — 기존 파일 덮어쓰기 (diff 표시)
+    def test_write_file_existing_shows_diff(self, tmp_path, captured):
+        f = tmp_path / "c.py"
+        f.write_text("old\n", encoding="utf-8")
+        tc = _FakeTC("write_file", {"path": str(f), "content": "new\n"})
+        with patch("cli.interface._prompt_session") as mock_session:
+            mock_session.prompt.return_value = "y"
+            self._make()(tc)
+        out = get_output(captured)
+        assert "old" in out or "new" in out
+
+    # write_file — 새 파일 생성
+    def test_write_file_new_shows_content(self, tmp_path, captured):
+        path = str(tmp_path / "brand_new.py")
+        tc = _FakeTC("write_file", {"path": path, "content": "print('hello')\n"})
+        with patch("cli.interface._prompt_session") as mock_session:
+            mock_session.prompt.return_value = ""
+            self._make()(tc)
+        out = get_output(captured)
+        assert "print" in out
+
+    # append_to_file
+    def test_append_to_file_shows_content(self, captured):
+        tc = _FakeTC("append_to_file", {"path": "log.txt", "content": "appended line\n"})
+        with patch("cli.interface._prompt_session") as mock_session:
+            mock_session.prompt.return_value = "y"
+            self._make()(tc)
+        assert "appended line" in get_output(captured)
+
+    # execute_command — 거부 + 명령어 표시
+    def test_execute_command_shows_cmd(self, captured):
+        tc = _FakeTC("execute_command", {"command": "rm -rf /"})
+        with patch("cli.interface._prompt_session") as mock_session:
+            mock_session.prompt.return_value = "n"
+            result = self._make()(tc)
+        out = get_output(captured)
+        assert "rm -rf /" in out
+        assert result is False
+
+    # 알 수 없는 도구
+    def test_unknown_tool_shows_args(self, captured):
+        tc = _FakeTC("mystery_tool", {"key": "value"})
+        with patch("cli.interface._prompt_session") as mock_session:
+            mock_session.prompt.return_value = "y"
+            result = self._make()(tc)
+        out = get_output(captured)
+        assert "mystery_tool" in out
+        assert result is True
+
+    # 빈 Enter → True (기본 승인)
+    def test_empty_enter_is_approved(self, tmp_path, captured):
+        f = tmp_path / "d.py"
+        f.write_text("pass\n", encoding="utf-8")
+        tc = _FakeTC("edit_file", {"path": str(f), "old_str": "pass", "new_str": "..."})
+        assert self._call(self._make(), tc, "") is True
+
+    # "yes" → True
+    def test_yes_is_approved(self, tmp_path, captured):
+        f = tmp_path / "e.py"
+        f.write_text("x\n", encoding="utf-8")
+        tc = _FakeTC("edit_file", {"path": str(f), "old_str": "x", "new_str": "y"})
+        assert self._call(self._make(), tc, "yes") is True
+
+    # "N" → False
+    def test_uppercase_N_is_denied(self, tmp_path, captured):
+        f = tmp_path / "f.py"
+        f.write_text("x\n", encoding="utf-8")
+        tc = _FakeTC("edit_file", {"path": str(f), "old_str": "x", "new_str": "y"})
+        assert self._call(self._make(), tc, "N") is False
+
+    # KeyboardInterrupt → False
+    def test_keyboard_interrupt_returns_false(self, captured):
+        tc = _FakeTC("write_file", {"path": "x.py", "content": ""})
+        with patch("cli.interface._prompt_session") as mock_session:
+            mock_session.prompt.side_effect = KeyboardInterrupt
+            result = self._make()(tc)
+        assert result is False
+
+    # EOFError → False
+    def test_eof_returns_false(self, captured):
+        tc = _FakeTC("append_to_file", {"path": "x.txt", "content": "line"})
+        with patch("cli.interface._prompt_session") as mock_session:
+            mock_session.prompt.side_effect = EOFError
+            result = self._make()(tc)
+        assert result is False
+
+    # 파일 읽기 실패해도 크래시 없이 동작
+    def test_edit_file_unreadable_path_no_crash(self, captured):
+        tc = _FakeTC("edit_file", {
+            "path": "/nonexistent/path/file.py",
+            "old_str": "foo",
+            "new_str": "bar",
+        })
+        with patch("cli.interface._prompt_session") as mock_session:
+            mock_session.prompt.return_value = "y"
+            result = self._make()(tc)
+        assert isinstance(result, bool)
+
+    # "a" → True + 이후 같은 도구는 자동 승인
+    def test_always_approve_skips_prompt_next_time(self, tmp_path, captured):
+        f = tmp_path / "g.py"
+        f.write_text("x\n", encoding="utf-8")
+        tc = _FakeTC("edit_file", {"path": str(f), "old_str": "x", "new_str": "y"})
+        handler = self._make()
+
+        # 첫 번째 호출 — "a" 입력
+        with patch("cli.interface._prompt_session") as mock_session:
+            mock_session.prompt.return_value = "a"
+            result1 = handler(tc)
+
+        # 두 번째 호출 — prompt가 불리지 않아야 함
+        with patch("cli.interface._prompt_session") as mock_session:
+            result2 = handler(tc)
+            mock_session.prompt.assert_not_called()
+
+        assert result1 is True
+        assert result2 is True
+
+    # "always" (영어) → 항상 승인
+    def test_always_english_keyword(self, tmp_path, captured):
+        f = tmp_path / "h.py"
+        f.write_text("a\n", encoding="utf-8")
+        tc = _FakeTC("edit_file", {"path": str(f), "old_str": "a", "new_str": "b"})
+        handler = self._make()
+        assert self._call(handler, tc, "always") is True
+        # 이후 자동 승인 확인
+        with patch("cli.interface._prompt_session") as mock_session:
+            handler(tc)
+            mock_session.prompt.assert_not_called()
+
+    # 도구 종류별로 독립적인 항상 승인 (write_file을 always해도 edit_file은 여전히 묻는다)
+    def test_always_approve_is_per_tool(self, tmp_path, captured):
+        f = tmp_path / "i.py"
+        f.write_text("a\n", encoding="utf-8")
+        handler = self._make()
+
+        # write_file → always
+        tc_write = _FakeTC("write_file", {"path": str(f), "content": "b\n"})
+        with patch("cli.interface._prompt_session") as mock_session:
+            mock_session.prompt.return_value = "a"
+            handler(tc_write)
+
+        # edit_file → 여전히 묻는다
+        tc_edit = _FakeTC("edit_file", {"path": str(f), "old_str": "a", "new_str": "b"})
+        with patch("cli.interface._prompt_session") as mock_session:
+            mock_session.prompt.return_value = "y"
+            handler(tc_edit)
+            mock_session.prompt.assert_called_once()  # 프롬프트가 불려야 함
+
+    # 자동 승인 메시지가 출력된다
+    def test_auto_approve_prints_message(self, tmp_path, captured):
+        f = tmp_path / "j.py"
+        f.write_text("x\n", encoding="utf-8")
+        tc = _FakeTC("edit_file", {"path": str(f), "old_str": "x", "new_str": "z"})
+        handler = self._make()
+        handler._always.add("edit_file")  # 직접 주입
+
+        with patch("cli.interface._prompt_session"):
+            handler(tc)
+
+        assert "자동 승인" in get_output(captured)
+
+
+# ── interface: AgentCompleter ─────────────────────────────────────────────────
+
+
+class TestAgentCompleter:
+    def _complete(self, text: str) -> list[str]:
+        from cli.interface import AgentCompleter
+        from prompt_toolkit.document import Document
+        completer = AgentCompleter()
+        doc = Document(text, len(text))
+        completions = list(completer.get_completions(doc, None))
+        return [c.text for c in completions]
+
+    def test_slash_completes_help(self):
+        results = self._complete("/he")
+        assert any("lp" in r for r in results)
+
+    def test_slash_all_commands_from_root(self):
+        results = self._complete("/")
+        # 슬래시 명령어가 모두 포함돼야 함
+        full = ["/h" in r or r.startswith("help") for r in results]
+        assert len(results) >= 5
+
+    def test_no_completions_for_plain_text(self):
+        results = self._complete("hello world")
+        assert results == []
+
+    def test_no_completions_for_empty(self):
+        results = self._complete("")
+        assert results == []

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from cli import interface as ui
 
 if TYPE_CHECKING:
+    from core.undo import ChangeTracker
     from memory.session import Session, SessionManager
 
 
@@ -50,6 +51,7 @@ def handle(
     raw: str,
     mgr: SessionManager,
     session: Session,
+    tracker: ChangeTracker | None = None,
 ) -> CommandResult | None:
     """
     슬래시 명령어를 처리합니다.
@@ -81,6 +83,8 @@ def handle(
             return _rename(mgr, session, title=arg)
         case "/delete":
             return _delete(mgr, session)
+        case "/undo":
+            return _undo(tracker, undo_all=arg.strip().lower() == "all")
         case "/exit" | "/quit":
             return CommandResult(action=Action.EXIT)
         case _:
@@ -101,6 +105,8 @@ def _help() -> CommandResult:
         ("/load <id>",     "세션 ID 앞자리로 세션 불러오기"),
         ("/rename <제목>", "현재 세션 제목 변경"),
         ("/delete",        "현재 세션 삭제 후 새 세션 시작"),
+        ("/undo",          "마지막 파일 변경 되돌리기"),
+        ("/undo all",      "이번 세션의 모든 파일 변경 되돌리기"),
         ("/exit",          "종료"),
         ("",               ""),
     ]
@@ -167,6 +173,33 @@ def _rename(mgr: SessionManager, session: Session, title: str) -> CommandResult:
     mgr.rename(session.session_id, title)
     session.title = title
     ui.print_info(f"세션 제목 변경: '{title}'")
+    return CommandResult(action=Action.NONE)
+
+
+def _undo(tracker: ChangeTracker | None, undo_all: bool = False) -> CommandResult:
+    if tracker is None:
+        ui.print_error("undo 기능을 사용할 수 없습니다.")
+        return CommandResult(action=Action.NONE)
+
+    if tracker.stack_size == 0:
+        ui.print_info("되돌릴 변경사항이 없습니다.")
+        return CommandResult(action=Action.NONE)
+
+    if undo_all:
+        results = tracker.undo_all()
+        for path, ok in results:
+            if ok:
+                ui.print_info(f"  복구됨: {path}")
+            else:
+                ui.print_error(f"  복구 실패: {path}")
+        ui.print_info(f"총 {len(results)}개 변경사항 되돌림 완료.")
+    else:
+        path, ok = tracker.undo_last()
+        if ok:
+            ui.print_info(f"복구됨: {path}")
+        else:
+            ui.print_error(f"복구 실패: {path}")
+
     return CommandResult(action=Action.NONE)
 
 

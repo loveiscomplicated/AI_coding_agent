@@ -42,30 +42,47 @@ def _parse_text_tool_call(text: str) -> dict | None:
 
     지원 형식:
         {"name": "tool_name", "arguments": {...}}
+        {"function": {"name": "tool_name", "arguments": {...}}}  # OpenAI/Ollama 래핑 형식
 
     특수 토큰(<|im_start|> 등), 마크다운 코드 블록, 주변 텍스트가 있어도 처리함.
     """
     cleaned = _strip_special_tokens(text)
 
-    # 1차: 정리된 텍스트 전체를 JSON으로 파싱
-    try:
-        data = json.loads(cleaned)
-        if isinstance(data, dict) and "name" in data and "arguments" in data:
+    def _as_tool(data: dict) -> dict | None:
+        if "name" in data and "arguments" in data:
             return data
-    except (json.JSONDecodeError, ValueError):
-        pass
+        # {"function": {"name": ..., "arguments": ...}} 래핑 형식
+        fn = data.get("function")
+        if isinstance(fn, dict) and "name" in fn and "arguments" in fn:
+            return fn
+        return None
 
-    # 2차: 텍스트 내에서 { ... } JSON 객체를 추출
-    start = cleaned.find("{")
-    if start != -1:
-        end = cleaned.rfind("}")
-        if end > start:
-            try:
-                data = json.loads(cleaned[start : end + 1])
-                if isinstance(data, dict) and "name" in data and "arguments" in data:
-                    return data
-            except (json.JSONDecodeError, ValueError):
-                pass
+    # 괄호 깊이 추적으로 텍스트 내 모든 최상위 JSON 객체 후보 수집
+    candidates: list[str] = []
+    i = 0
+    while i < len(cleaned):
+        if cleaned[i] == "{":
+            depth = 0
+            for j in range(i, len(cleaned)):
+                if cleaned[j] == "{":
+                    depth += 1
+                elif cleaned[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidates.append(cleaned[i : j + 1])
+                        i = j
+                        break
+        i += 1
+
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+            if isinstance(data, dict):
+                result = _as_tool(data)
+                if result:
+                    return result
+        except (json.JSONDecodeError, ValueError):
+            pass
 
     return None
 
@@ -263,12 +280,9 @@ class OllamaClient(BaseLLMClient):
     def is_available(self) -> bool:
         """Ollama 서버가 실행 중인지 + 모델이 있는지 확인"""
         try:
-            models = self._client.list()
-            available = [m["model"] for m in models.get("models", [])]
-
-            # 모델명 prefix 매칭 (qwen2.5-coder:7b → qwen2.5-coder:7b 체크)
+            available = [m.model for m in self._client.list().models]
             return any(
-                self.config.model in m or m.startswith(self.config.model)
+                self.config.model == m or m.startswith(self.config.model)
                 for m in available
             )
         except Exception:
@@ -277,7 +291,6 @@ class OllamaClient(BaseLLMClient):
     def list_models(self) -> list[str]:
         """현재 Ollama에 설치된 모델 목록 반환"""
         try:
-            models = self._client.list()
-            return [m["model"] for m in models.get("models", [])]
+            return [m.model for m in self._client.list().models]
         except Exception:
             return []

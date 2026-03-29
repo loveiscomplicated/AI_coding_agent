@@ -310,3 +310,97 @@ class TestSessionManagerGetHistory:
 
         assert isinstance(history, list)
         assert all(isinstance(m, Message) for m in history)
+
+
+# ── 추가 엣지 케이스 ────────────────────────────────────────────────────────────
+
+
+class TestDbEdgeCases:
+    def test_create_duplicate_session_raises(self, db_path):
+        mem_db.init_db(db_path)
+        mem_db.create_session("dup-id", db_path=db_path)
+
+        with pytest.raises(Exception):
+            mem_db.create_session("dup-id", db_path=db_path)
+
+    def test_rename_nonexistent_session_no_crash(self, db_path):
+        mem_db.init_db(db_path)
+        # 존재하지 않는 세션 rename → 크래시 없이 조용히 처리
+        mem_db.rename_session("ghost-id", "제목", db_path=db_path)
+
+    def test_delete_nonexistent_session_no_crash(self, db_path):
+        mem_db.init_db(db_path)
+        mem_db.delete_session("ghost-id", db_path=db_path)
+
+    def test_add_message_to_nonexistent_session(self, db_path):
+        """외래키 제약이 있는 경우 예외, 없는 경우 조용히 무시."""
+        mem_db.init_db(db_path)
+        try:
+            mem_db.add_message("ghost-id", "user", "hi", db_path=db_path)
+        except Exception:
+            pass  # 외래키 제약 또는 오류 모두 허용
+
+    def test_list_sessions_empty_db(self, db_path):
+        mem_db.init_db(db_path)
+        assert mem_db.list_sessions(db_path=db_path) == []
+
+    def test_large_content_stored_and_retrieved(self, db_path):
+        mem_db.init_db(db_path)
+        mem_db.create_session("s1", db_path=db_path)
+        large_content = "x" * 100_000
+        mem_db.add_message("s1", "user", large_content, db_path=db_path)
+
+        msgs = mem_db.get_messages("s1", db_path=db_path)
+        assert msgs[0]["content"] == large_content
+
+    def test_unicode_content_stored_and_retrieved(self, db_path):
+        mem_db.init_db(db_path)
+        mem_db.create_session("s1", db_path=db_path)
+        content = "한국어 메시지 🎉"
+        mem_db.add_message("s1", "user", content, db_path=db_path)
+
+        msgs = mem_db.get_messages("s1", db_path=db_path)
+        assert msgs[0]["content"] == content
+
+
+class TestSessionManagerEdgeCases:
+    def test_load_nonexistent_returns_none(self, mgr):
+        assert mgr.load("nonexistent-id") is None
+
+    def test_rename_nonexistent_no_crash(self, mgr):
+        mgr.rename("ghost-id", "새 제목")
+
+    def test_delete_nonexistent_no_crash(self, mgr):
+        mgr.delete("ghost-id")
+
+    def test_get_history_nonexistent_session(self, mgr):
+        history = mgr.get_history("ghost-id")
+        assert history == []
+
+    def test_append_many_empty_list(self, mgr, session):
+        mgr.append_many(session.session_id, [])
+        assert mgr.get_history(session.session_id) == []
+
+    def test_new_sessions_have_unique_ids(self, mgr):
+        s1 = mgr.new()
+        s2 = mgr.new()
+        assert s1.session_id != s2.session_id
+
+    def test_list_all_ordered_by_recency(self, mgr):
+        import time
+        s1 = mgr.new(title="첫 번째")
+        time.sleep(0.01)
+        s2 = mgr.new(title="두 번째")
+        # s2에 메시지 추가해서 updated_at 갱신
+        mgr.append(s2.session_id, Message(role="user", content="갱신"))
+
+        summaries = mgr.list_all()
+        assert summaries[0].session_id == s2.session_id
+
+    def test_multiple_messages_preserved_in_order(self, mgr, session):
+        texts = [f"메시지{i}" for i in range(10)]
+        for t in texts:
+            mgr.append(session.session_id, Message(role="user", content=t))
+
+        history = mgr.get_history(session.session_id)
+        assert [m.content for m in history] == texts

@@ -14,7 +14,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-from typing import Any
+from typing import Any, Callable
 
 from tools.registry import (
     TOOLS_SCHEMA_ANTHROPIC,
@@ -26,6 +26,9 @@ from tools.registry import (
 from llm.base import Message, LLMResponse, BaseLLMClient, StopReason
 
 logger = logging.getLogger(__name__)
+
+# 실행 전 사용자 승인이 필요한 도구 목록
+_APPROVAL_REQUIRED = {"write_file", "edit_file", "append_to_file", "execute_command", "git_commit"}
 
 
 # ── 타입 정의 ─────────────────────────────────────────────────────────────────
@@ -65,6 +68,8 @@ class LoopResult:
     stop_reason: StopReason
     iterations: list[LoopIteration] = field(default_factory=list)
     messages: list[Message] = field(default_factory=list)
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
 
     @property
     def succeeded(self) -> bool:
@@ -73,6 +78,10 @@ class LoopResult:
     @property
     def total_tool_calls(self) -> int:
         return sum(len(it.tool_calls) for it in self.iterations)
+
+    @property
+    def total_tokens(self) -> int:
+        return self.total_input_tokens + self.total_output_tokens
 
 
 # ── 메인 루프 ─────────────────────────────────────────────────────────────────
@@ -93,14 +102,18 @@ class ReactLoop:
         llm,  # BaseLLM 구현체
         max_iterations: int = 10,
         tool_timeout_s: float = 30.0,  # 도구 실행 타임아웃 (초)
-        on_tool_call=None,  # Callable[[ToolCall], None] — CLI 훅
-        on_tool_result=None,  # Callable[[ToolResult], None] — CLI 훅
+        on_tool_call=None,     # Callable[[ToolCall], None] — CLI 훅
+        on_tool_result=None,   # Callable[[ToolResult], None] — CLI 훅
+        on_tool_approval=None, # Callable[[ToolCall], bool] — 승인 요청 훅
+        on_token: Callable[[str], None] | None = None,  # 스트리밍 콜백
     ):
         self.llm: BaseLLMClient = llm
         self.max_iterations = max_iterations
         self.tool_timeout_s = tool_timeout_s
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
+        self.on_tool_approval = on_tool_approval
+        self.on_token = on_token
         self.TOOLS_SCHEMA = self.get_tools_schema()
 
     # ── 공개 인터페이스 ────────────────────────────────────────────────────────
@@ -125,6 +138,8 @@ class ReactLoop:
             user_input=user_message, history=history
         )
         iterations: list[LoopIteration] = []
+        total_input_tokens: int = 0
+        total_output_tokens: int = 0
 
         for i in range(self.max_iterations):
             t0 = time.perf_counter()
@@ -145,15 +160,41 @@ class ReactLoop:
                     messages=messages,
                 )
 
+            # 토큰 누적 (LLMResponse 에 input_tokens/output_tokens 가 있을 때)
+            if hasattr(response, "input_tokens"):
+                total_input_tokens += response.input_tokens or 0
+            if hasattr(response, "output_tokens"):
+                total_output_tokens += response.output_tokens or 0
+
             # ── 종료 조건: 도구 없이 텍스트만 반환 ───────────────────────────
             if response.stop_reason == "end_turn":
-                final_text = _extract_text(response.content)
+                # on_token 이 설정된 경우 stream() 을 사용해 토큰 전달
+                if self.on_token is not None:
+                    try:
+                        chunks = list(self.llm.stream(messages, tools=self.TOOLS_SCHEMA))
+                        for chunk in chunks:
+                            self.on_token(chunk)
+                        final_text = "".join(chunks)
+                    except Exception as exc:
+                        logger.error("스트림 호출 실패: %s", exc)
+                        return LoopResult(
+                            answer=f"스트림 오류가 발생했습니다: {exc}",
+                            stop_reason=StopReason.LLM_ERROR,
+                            iterations=iterations,
+                            messages=messages,
+                            total_input_tokens=total_input_tokens,
+                            total_output_tokens=total_output_tokens,
+                        )
+                else:
+                    final_text = _extract_text(response.content)
                 logger.debug("루프 종료 — end_turn (총 %d회 반복)", i + 1)
                 return LoopResult(
                     answer=final_text,
                     stop_reason=StopReason.END_TURN,
                     iterations=iterations,
                     messages=messages,
+                    total_input_tokens=total_input_tokens,
+                    total_output_tokens=total_output_tokens,
                 )
 
             # ── Act: tool_use 블록 수집 ───────────────────────────────────────
@@ -168,6 +209,8 @@ class ReactLoop:
                     stop_reason=StopReason.END_TURN,
                     iterations=iterations,
                     messages=messages,
+                    total_input_tokens=total_input_tokens,
+                    total_output_tokens=total_output_tokens,
                 )
 
             # assistant 턴을 히스토리에 추가
@@ -179,6 +222,20 @@ class ReactLoop:
             for tc in tool_calls:
                 if self.on_tool_call:
                     self.on_tool_call(tc)
+
+                # 승인이 필요한 도구는 사용자 확인 후 실행
+                if self.on_tool_approval and tc.name in _APPROVAL_REQUIRED:
+                    approved = self.on_tool_approval(tc)
+                    if not approved:
+                        tr = ToolResult(
+                            tool_use_id=tc.id,
+                            content="사용자가 실행을 취소했습니다.",
+                            is_error=True,
+                        )
+                        tool_results.append(tr)
+                        if self.on_tool_result:
+                            self.on_tool_result(tr)
+                        continue
 
                 tr = self._execute_tool(tc)
                 tool_results.append(tr)
@@ -226,6 +283,8 @@ class ReactLoop:
                     stop_reason=StopReason.TOOL_ERROR,
                     iterations=iterations,
                     messages=messages,
+                    total_input_tokens=total_input_tokens,
+                    total_output_tokens=total_output_tokens,
                 )
 
         # ── 최대 반복 초과 ────────────────────────────────────────────────────
@@ -235,6 +294,8 @@ class ReactLoop:
             stop_reason=StopReason.MAX_ITER,
             iterations=iterations,
             messages=messages,
+            total_input_tokens=total_input_tokens,
+            total_output_tokens=total_output_tokens,
         )
 
     # ── 내부 헬퍼 ─────────────────────────────────────────────────────────────

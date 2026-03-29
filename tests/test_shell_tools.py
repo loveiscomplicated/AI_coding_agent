@@ -117,3 +117,44 @@ class TestExecuteCommand:
             assert result.success is False
             # 에러 메시지 내용이 그대로 들어있는지 확인
             assert error_msg in str(result.error)
+
+    # 8. non-zero exit code → success=False, stderr 캡처
+    def test_nonzero_exit_code(self):
+        result = execute_command(["ls", "/nonexistent_path_xyz"])
+
+        assert result.success is False
+        assert result.error is not None
+
+    # 9. stdin 입력 전달
+    def test_stdin_input(self):
+        result = execute_command(["cat"], input_="hello from stdin\n")
+
+        assert result.success is True
+        assert "hello from stdin" in result.output
+
+    # 10. stdout이 비어있는 명령
+    def test_empty_stdout(self, tmp_path):
+        py = tmp_path / "silent.py"
+        py.write_text("x = 1 + 1", encoding="utf-8")
+        result = execute_command(["python3", str(py)])
+
+        assert result.success is True
+        assert result.output == ""
+
+    # 11. 명령 성공 시 error=None
+    def test_success_has_no_error(self):
+        result = execute_command(["echo", "ok"])
+
+        assert result.success is True
+        assert result.error is None
+
+    # 12. stderr가 있는 실패 명령의 에러 메시지 캡처
+    def test_stderr_captured_on_failure(self, tmp_path):
+        py = tmp_path / "err.py"
+        py.write_text("import sys; sys.stderr.write('custom_error\\n'); sys.exit(1)",
+                      encoding="utf-8")
+
+        result = execute_command(["python3", str(py)])
+
+        assert result.success is False
+        assert "custom_error" in str(result.error)

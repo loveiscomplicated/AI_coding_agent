@@ -20,6 +20,7 @@ from tools.file_tools import (
 )
 from tools.shell_tools import execute_command
 from tools.code_tools import get_imports, get_outline, get_function_src
+from tools.git_tools import git_status, git_diff, git_log, git_add, git_commit
 
 # ── 타입 별칭 ─────────────────────────────────────────────────────────────────
 # 각 파라미터 항목: (type, description, required, default)
@@ -154,6 +155,45 @@ TOOL_REGISTRY: dict[str, dict] = {
             "command": ("array", "실행할 명령어 토큰 배열 (예: [\"python\", \"main.py\"])", True, None),
             "input_": ("string", "표준 입력으로 전달할 문자열", False, None),
             "timeout": ("number", "타임아웃 (초 단위). 초과 시 오류 반환", False, None),
+        },
+    },
+    "git_status": {
+        "fn": git_status,
+        "description": "git 워킹 트리 상태 확인 (git status)",
+        "params": {
+            "repo_path": ("string", "git 저장소 경로 (기본값: '.')", False, "."),
+        },
+    },
+    "git_diff": {
+        "fn": git_diff,
+        "description": "변경 사항 diff 확인 (git diff). staged=true 이면 스테이징된 변경만 표시.",
+        "params": {
+            "repo_path": ("string", "git 저장소 경로 (기본값: '.')", False, "."),
+            "staged": ("boolean", "스테이징된 변경만 표시 여부", False, False),
+        },
+    },
+    "git_log": {
+        "fn": git_log,
+        "description": "최근 커밋 로그 확인 (git log --oneline)",
+        "params": {
+            "repo_path": ("string", "git 저장소 경로 (기본값: '.')", False, "."),
+            "n": ("integer", "표시할 커밋 수", False, 10),
+        },
+    },
+    "git_add": {
+        "fn": git_add,
+        "description": "파일을 스테이징 영역에 추가 (git add)",
+        "params": {
+            "repo_path": ("string", "git 저장소 경로 (기본값: '.')", False, "."),
+            "paths": ("array", "스테이징할 파일 경로 목록 (예: [\"src/main.py\"])", True, None),
+        },
+    },
+    "git_commit": {
+        "fn": git_commit,
+        "description": "스테이징된 변경사항을 커밋 (git commit -m)",
+        "params": {
+            "repo_path": ("string", "git 저장소 경로 (기본값: '.')", False, "."),
+            "message": ("string", "커밋 메시지", True, None),
         },
     },
 }

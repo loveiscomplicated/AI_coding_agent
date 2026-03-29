@@ -504,3 +504,186 @@ class TestReactLoopRun:
         assert len(results_received) == 1
         assert results_received[0].is_error is False
         assert "result_data" in results_received[0].content
+
+
+# ── on_tool_approval 콜백 ──────────────────────────────────────────────────
+
+
+class TestOnToolApproval:
+    """승인 콜백 동작 검증"""
+
+    # 승인 시 도구가 실제로 실행돼야 한다
+    def test_approval_granted_executes_tool(self, tmp_path):
+        f = tmp_path / "target.txt"
+        f.write_text("before", encoding="utf-8")
+
+        approved_tools: list[str] = []
+
+        def approve(tc: ToolCall) -> bool:
+            approved_tools.append(tc.name)
+            return True  # 항상 승인
+
+        llm = _SequentialMockLLM(
+            [
+                _tool_response("id1", "write_file", {"path": str(f), "content": "after"}),
+                _text_response("완료"),
+            ]
+        )
+        loop = ReactLoop(llm=llm, on_tool_approval=approve)
+
+        result = loop.run("파일 써줘")
+
+        assert result.succeeded is True
+        assert "write_file" in approved_tools
+        assert f.read_text(encoding="utf-8") == "after"
+
+    # 거부 시 도구가 실행되지 않아야 한다
+    def test_approval_denied_skips_tool(self, tmp_path):
+        f = tmp_path / "protected.txt"
+        f.write_text("original", encoding="utf-8")
+
+        llm = _SequentialMockLLM(
+            [
+                _tool_response("id1", "write_file", {"path": str(f), "content": "modified"}),
+                _text_response("취소됐어요"),
+            ]
+        )
+        loop = ReactLoop(llm=llm, on_tool_approval=lambda tc: False)
+
+        result = loop.run("파일 써줘")
+
+        assert result.succeeded is True
+        # 파일이 수정되지 않아야 한다
+        assert f.read_text(encoding="utf-8") == "original"
+
+    # 거부 시 LLM에 is_error=True ToolResult가 전달돼야 한다
+    def test_approval_denied_sends_error_to_llm(self, tmp_path):
+        f = tmp_path / "f.txt"
+        f.write_text("x", encoding="utf-8")
+
+        llm = _SequentialMockLLM(
+            [
+                _tool_response("id1", "edit_file", {"path": str(f), "old_str": "x", "new_str": "y"}),
+                _text_response("알겠습니다"),
+            ]
+        )
+        loop = ReactLoop(llm=llm, on_tool_approval=lambda tc: False)
+
+        result = loop.run("수정해줘")
+
+        tool_result_msg = result.messages[2]
+        assert tool_result_msg.role == "user"
+        assert tool_result_msg.content[0]["is_error"] is True
+        assert "취소" in tool_result_msg.content[0]["content"]
+
+    # 승인이 필요 없는 도구(read_file 등)는 콜백을 호출하지 않아야 한다
+    def test_approval_not_called_for_read_only_tools(self, tmp_path):
+        f = tmp_path / "read_me.txt"
+        f.write_text("data", encoding="utf-8")
+
+        approval_calls: list[str] = []
+
+        def track(tc: ToolCall) -> bool:
+            approval_calls.append(tc.name)
+            return True
+
+        llm = _SequentialMockLLM(
+            [
+                _tool_response("id1", "read_file", {"path": str(f)}),
+                _text_response("읽었어요"),
+            ]
+        )
+        loop = ReactLoop(llm=llm, on_tool_approval=track)
+
+        loop.run("읽어줘")
+
+        # read_file은 _APPROVAL_REQUIRED에 없으므로 콜백이 불리지 않아야 함
+        assert "read_file" not in approval_calls
+
+    # 한 턴에 여러 도구가 있을 때 각각 독립적으로 승인/거부
+    def test_mixed_approval_in_same_turn(self, tmp_path):
+        f1 = tmp_path / "f1.txt"
+        f2 = tmp_path / "f2.txt"
+        f1.write_text("a", encoding="utf-8")
+        f2.write_text("b", encoding="utf-8")
+
+        # f1 쓰기는 승인, f2 쓰기는 거부
+        def selective(tc: ToolCall) -> bool:
+            return tc.input.get("path", "") == str(f1)
+
+        multi_tool = SimpleNamespace(
+            stop_reason="tool_use",
+            content=[
+                {"type": "tool_use", "id": "id1", "name": "write_file",
+                 "input": {"path": str(f1), "content": "NEW_A"}},
+                {"type": "tool_use", "id": "id2", "name": "write_file",
+                 "input": {"path": str(f2), "content": "NEW_B"}},
+            ],
+        )
+        llm = _SequentialMockLLM([multi_tool, _text_response("처리 완료")])
+        loop = ReactLoop(llm=llm, on_tool_approval=selective)
+
+        result = loop.run("두 파일 써줘")
+
+        assert f1.read_text(encoding="utf-8") == "NEW_A"  # 승인됨
+        assert f2.read_text(encoding="utf-8") == "b"      # 거부됨 (원본 유지)
+        assert result.succeeded is True
+
+    # on_tool_approval=None이면 모든 도구가 승인 없이 실행된다
+    def test_no_approval_callback_executes_all(self, tmp_path):
+        f = tmp_path / "auto.txt"
+        f.write_text("old", encoding="utf-8")
+
+        llm = _SequentialMockLLM(
+            [
+                _tool_response("id1", "write_file", {"path": str(f), "content": "new"}),
+                _text_response("완료"),
+            ]
+        )
+        loop = ReactLoop(llm=llm, on_tool_approval=None)
+
+        result = loop.run("써줘")
+
+        assert result.succeeded is True
+        assert f.read_text(encoding="utf-8") == "new"
+
+    # 승인 거부 후 루프가 계속 돌아야 한다 (TOOL_ERROR로 종료되지 않음)
+    def test_denial_does_not_stop_loop(self, tmp_path):
+        f = tmp_path / "safe.txt"
+        f.write_text("safe", encoding="utf-8")
+
+        llm = _SequentialMockLLM(
+            [
+                _tool_response("id1", "write_file", {"path": str(f), "content": "danger"}),
+                _text_response("다른 방법 시도합니다"),
+            ]
+        )
+        loop = ReactLoop(llm=llm, on_tool_approval=lambda tc: False)
+
+        result = loop.run("파일 덮어써줘")
+
+        # 거부여도 루프는 END_TURN으로 정상 종료되어야 한다
+        assert result.stop_reason == StopReason.END_TURN
+
+    # on_tool_result 콜백은 거부된 도구에도 호출돼야 한다
+    def test_on_tool_result_called_on_denied_tool(self, tmp_path):
+        f = tmp_path / "g.txt"
+        f.write_text("x", encoding="utf-8")
+
+        received: list[ToolResult] = []
+        llm = _SequentialMockLLM(
+            [
+                _tool_response("id1", "write_file", {"path": str(f), "content": "y"}),
+                _text_response("끝"),
+            ]
+        )
+        loop = ReactLoop(
+            llm=llm,
+            on_tool_approval=lambda tc: False,
+            on_tool_result=received.append,
+        )
+
+        loop.run("써줘")
+
+        assert len(received) == 1
+        assert received[0].is_error is True

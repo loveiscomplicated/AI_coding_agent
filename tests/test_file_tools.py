@@ -289,3 +289,151 @@ class TestAppendToFile:
 
         assert result.success is True
         assert open(path, encoding="utf-8").read() == "first line\n"
+
+    def test_appends_multiple_times(self, tmp_path):
+        f = tmp_path / "multi.txt"
+        f.write_text("", encoding="utf-8")
+
+        for i in range(3):
+            append_to_file(str(f), f"line{i}\n")
+
+        assert f.read_text(encoding="utf-8") == "line0\nline1\nline2\n"
+
+    def test_appends_unicode(self, tmp_path):
+        f = tmp_path / "unicode.txt"
+        f.write_text("첫줄\n", encoding="utf-8")
+
+        result = append_to_file(str(f), "둘째줄\n")
+
+        assert result.success is True
+        assert "둘째줄" in f.read_text(encoding="utf-8")
+
+    def test_append_to_directory_returns_error(self, tmp_path):
+        result = append_to_file(str(tmp_path), "data")
+        assert result.success is False
+        assert result.error is not None
+
+
+# ── 추가 엣지 케이스 ────────────────────────────────────────────────────────
+
+
+class TestReadFileEdgeCases:
+    def test_unicode_content(self, tmp_path):
+        f = tmp_path / "kor.txt"
+        content = "안녕하세요\n반갑습니다\n"
+        f.write_text(content, encoding="utf-8")
+
+        result = read_file(str(f))
+
+        assert result.success is True
+        assert result.output == content
+
+    def test_binary_like_large_content(self, tmp_path):
+        f = tmp_path / "big.txt"
+        content = "x" * 10_000
+        f.write_text(content, encoding="utf-8")
+
+        result = read_file(str(f))
+
+        assert result.success is True
+        assert len(result.output) == 10_000
+
+
+class TestReadFileLinesEdgeCases:
+    def test_range_beyond_file_length(self, tmp_path):
+        f = tmp_path / "short.txt"
+        f.write_text("only one line", encoding="utf-8")
+
+        result = read_file_lines(str(f), start=1, end=999)
+
+        assert result.success is True
+        assert "only one line" in result.output
+
+    def test_single_line_file(self, tmp_path):
+        f = tmp_path / "single.txt"
+        f.write_text("sole", encoding="utf-8")
+
+        result = read_file_lines(str(f), start=1, end=1)
+
+        assert result.success is True
+        assert "sole" in result.output
+
+
+class TestWriteFileEdgeCases:
+    def test_unicode_content(self, tmp_path):
+        path = str(tmp_path / "kor.py")
+        result = write_file(path, "# 한국어 주석\nprint('안녕')\n")
+
+        assert result.success is True
+        assert "안녕" in (tmp_path / "kor.py").read_text(encoding="utf-8")
+
+    def test_write_empty_string(self, tmp_path):
+        path = str(tmp_path / "empty.txt")
+        result = write_file(path, "")
+
+        assert result.success is True
+        assert (tmp_path / "empty.txt").read_text(encoding="utf-8") == ""
+
+
+class TestEditFileEdgeCases:
+    def test_replace_with_empty_string_deletes_substring(self, tmp_path):
+        f = tmp_path / "del.py"
+        f.write_text("foo = bar + baz\n", encoding="utf-8")
+
+        result = edit_file(str(f), old_str=" + baz", new_str="")
+
+        assert result.success is True
+        assert f.read_text(encoding="utf-8") == "foo = bar\n"
+
+    def test_multiline_replacement(self, tmp_path):
+        f = tmp_path / "multi.py"
+        f.write_text("def old():\n    return 1\n", encoding="utf-8")
+
+        result = edit_file(
+            str(f),
+            old_str="def old():\n    return 1",
+            new_str="def new():\n    return 2",
+        )
+
+        assert result.success is True
+        content = f.read_text(encoding="utf-8")
+        assert "def new()" in content
+        assert "def old()" not in content
+
+    def test_unicode_replacement(self, tmp_path):
+        f = tmp_path / "kor.py"
+        f.write_text("# 구버전 주석\n", encoding="utf-8")
+
+        result = edit_file(str(f), old_str="구버전", new_str="신버전")
+
+        assert result.success is True
+        assert "신버전" in f.read_text(encoding="utf-8")
+
+
+class TestSearchInFileEdgeCases:
+    def test_empty_file_no_match(self, tmp_path):
+        f = tmp_path / "empty.py"
+        f.write_text("", encoding="utf-8")
+
+        result = search_in_file(str(f), pattern="anything")
+
+        assert result.success is True
+        assert "매칭 없음" in result.output
+
+    def test_invalid_regex_returns_error(self, tmp_path):
+        f = tmp_path / "code.py"
+        f.write_text("x = 1\n", encoding="utf-8")
+
+        result = search_in_file(str(f), pattern="[invalid(")
+
+        assert result.success is False
+        assert result.error is not None
+
+    def test_multiple_matches_returns_all(self, tmp_path):
+        f = tmp_path / "dup.py"
+        f.write_text("foo\nfoo\nfoo\n", encoding="utf-8")
+
+        result = search_in_file(str(f), pattern="foo")
+
+        assert result.success is True
+        assert result.output.count("foo") == 3

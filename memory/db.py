@@ -28,6 +28,24 @@ from pathlib import Path
 DEFAULT_DB_PATH = Path("data/sessions.db")
 
 
+def _serialize(content: object) -> object:
+    """
+    Anthropic SDK 객체(TextBlock, ToolUseBlock 등)를 JSON 직렬화 가능한
+    dict/list/str로 변환합니다.
+    """
+    if isinstance(content, list):
+        return [_serialize(item) for item in content]
+    if isinstance(content, dict):
+        return {k: _serialize(v) for k, v in content.items()}
+    # SDK 객체는 __dict__ 또는 model_dump()를 가짐
+    if hasattr(content, "model_dump"):
+        return content.model_dump()
+    if hasattr(content, "__dict__"):
+        return {k: _serialize(v) for k, v in vars(content).items()
+                if not k.startswith("_")}
+    return content
+
+
 # ── 연결 헬퍼 ─────────────────────────────────────────────────────────────────
 
 
@@ -157,7 +175,7 @@ def add_message(
     메시지를 추가하고 message_id를 반환합니다.
     content가 list(tool_use / tool_result 구조체)이면 JSON 직렬화합니다.
     """
-    content_json = json.dumps(content, ensure_ascii=False)
+    content_json = json.dumps(_serialize(content), ensure_ascii=False)
     now = _now()
     with _connect(db_path) as conn:
         cur = conn.execute(

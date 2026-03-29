@@ -1,0 +1,120 @@
+/**
+ * MeetingApp.test.tsx
+ *
+ * 메인 회의 앱 컴포넌트 통합 테스트.
+ * Anthropic SDK는 mock 처리.
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { MeetingApp } from '../../components/MeetingApp'
+
+// Anthropic SDK mock
+vi.mock('@anthropic-ai/sdk', () => ({
+  default: vi.fn().mockImplementation(() => ({
+    messages: {
+      stream: vi.fn().mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'content_block_delta', delta: { type: 'text_delta', text: '안녕하세요! ' } }
+          yield { type: 'content_block_delta', delta: { type: 'text_delta', text: '프로젝트명을 알려주세요.\n\n```json\n{"version":1,"project":{"name":"","overview":"","goals":[],"non_goals":[]},"tech_stack":{"languages":[],"frameworks":[],"infra":[],"ai_models":[]},"constraints":[],"milestones":[],"agent_config":{"orchestrator_model":"claude-opus-4-6","worker_models":[],"max_concurrent_agents":3,"sandbox_spec":{"cpu_limit":"","memory_limit":"","timeout_minutes":30}},"meeting_meta":{"date":"2026-03-29","duration_min":0,"completeness":0,"version":1}}\n```' } }
+          yield { type: 'message_stop' }
+        },
+        finalMessage: vi.fn().mockResolvedValue({ content: [] }),
+      }),
+    },
+  })),
+}))
+
+describe('MeetingApp', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.clearAllMocks()
+  })
+
+  it('초기 상태에서 입력창과 전송 버튼이 있어야 한다', () => {
+    render(<MeetingApp apiKey="test-key" />)
+    expect(screen.getByPlaceholderText(/메시지/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /전송/i })).toBeInTheDocument()
+  })
+
+  it('초기 완성도 게이지가 표시되어야 한다', () => {
+    render(<MeetingApp apiKey="test-key" />)
+    expect(screen.getByTestId('completion-gauge')).toBeInTheDocument()
+  })
+
+  it('회의 종료 버튼이 있어야 한다', () => {
+    render(<MeetingApp apiKey="test-key" />)
+    expect(screen.getByRole('button', { name: /회의 종료/i })).toBeInTheDocument()
+  })
+
+  it('빈 메시지는 전송되지 않아야 한다', async () => {
+    const user = userEvent.setup()
+    render(<MeetingApp apiKey="test-key" />)
+    const input = screen.getByPlaceholderText(/메시지/i)
+    await user.click(screen.getByRole('button', { name: /전송/i }))
+    // 입력이 비어있으면 메시지 목록에 아무것도 추가되지 않아야 함
+    expect(screen.queryByTestId('message-list')).not.toBeInTheDocument()
+  })
+
+  it('메시지 입력 후 전송하면 메시지 목록에 추가되어야 한다', async () => {
+    const user = userEvent.setup()
+    render(<MeetingApp apiKey="test-key" />)
+    const input = screen.getByPlaceholderText(/메시지/i)
+    await user.type(input, '안녕하세요')
+    await user.click(screen.getByRole('button', { name: /전송/i }))
+    await waitFor(() => {
+      expect(screen.getByTestId('message-list')).toBeInTheDocument()
+    })
+    expect(screen.getByText('안녕하세요')).toBeInTheDocument()
+  })
+
+  it('전송 후 입력창이 초기화되어야 한다', async () => {
+    const user = userEvent.setup()
+    render(<MeetingApp apiKey="test-key" />)
+    const input = screen.getByPlaceholderText(/메시지/i) as HTMLInputElement
+    await user.type(input, '테스트 메시지')
+    await user.click(screen.getByRole('button', { name: /전송/i }))
+    await waitFor(() => expect(input.value).toBe(''))
+  })
+
+  it('Enter 키로도 전송되어야 한다', async () => {
+    const user = userEvent.setup()
+    render(<MeetingApp apiKey="test-key" />)
+    const input = screen.getByPlaceholderText(/메시지/i)
+    await user.type(input, '엔터 테스트{Enter}')
+    await waitFor(() => {
+      expect(screen.queryByText('엔터 테스트')).toBeInTheDocument()
+    })
+  })
+
+  it('회의 종료 시 완료 화면이 표시되어야 한다', async () => {
+    const user = userEvent.setup()
+    render(<MeetingApp apiKey="test-key" />)
+    await user.click(screen.getByRole('button', { name: /회의 종료/i }))
+    await waitFor(() => {
+      expect(screen.getByTestId('meeting-finished')).toBeInTheDocument()
+    })
+  })
+
+  it('완료 화면에 채팅으로 돌아가기 버튼이 있어야 한다', async () => {
+    const user = userEvent.setup()
+    render(<MeetingApp apiKey="test-key" />)
+    await user.click(screen.getByRole('button', { name: /회의 종료/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /채팅으로 돌아가기/i })).toBeInTheDocument()
+    })
+  })
+
+  it('채팅으로 돌아가기 클릭 시 채팅 화면으로 복귀해야 한다', async () => {
+    const user = userEvent.setup()
+    render(<MeetingApp apiKey="test-key" />)
+    await user.click(screen.getByRole('button', { name: /회의 종료/i }))
+    await waitFor(() => screen.getByTestId('meeting-finished'))
+    await user.click(screen.getByRole('button', { name: /채팅으로 돌아가기/i }))
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(/메시지/i)).toBeInTheDocument()
+      expect(screen.queryByTestId('meeting-finished')).not.toBeInTheDocument()
+    })
+  })
+})

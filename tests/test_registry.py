@@ -13,7 +13,15 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from tools.registry import TOOL_REGISTRY, TOOLS_SCHEMA_ANTHROPIC as TOOLS_SCHEMA, call_tool
+from tools.registry import (
+    TOOL_REGISTRY,
+    TOOLS_SCHEMA_ANTHROPIC,
+    TOOLS_SCHEMA_OPENAI,
+    TOOLS_SCHEMA_OLLAMA,
+    call_tool,
+)
+
+TOOLS_SCHEMA = TOOLS_SCHEMA_ANTHROPIC
 
 
 # ── TOOLS_SCHEMA 구조 ──────────────────────────────────────────────────────
@@ -114,3 +122,64 @@ class TestCallTool:
         """모든 등록 도구가 함수로 호출 가능한지 확인 (실제 실행 X, fn이 callable인지만)"""
         for name, meta in TOOL_REGISTRY.items():
             assert callable(meta["fn"]), f"{name} 의 fn이 callable이 아님"
+
+    def test_missing_required_param_raises(self, tmp_path):
+        """필수 파라미터 없이 call_tool 호출 → TypeError"""
+        with pytest.raises(TypeError):
+            call_tool("write_file", path=str(tmp_path / "x.txt"))
+            # content 누락
+
+    def test_call_tool_edit_file_missing_old_str(self, tmp_path):
+        f = tmp_path / "f.py"
+        f.write_text("x\n", encoding="utf-8")
+        with pytest.raises(TypeError):
+            call_tool("edit_file", path=str(f), old_str="x")
+            # new_str 누락
+
+
+# ── OpenAI 스키마 ──────────────────────────────────────────────────────────
+
+
+class TestToolsSchemaOpenAI:
+    def test_schema_is_list(self):
+        assert isinstance(TOOLS_SCHEMA_OPENAI, list)
+        assert len(TOOLS_SCHEMA_OPENAI) > 0
+
+    def test_each_entry_has_type_function(self):
+        for entry in TOOLS_SCHEMA_OPENAI:
+            assert entry.get("type") == "function", f"{entry} 에 type=function 없음"
+
+    def test_function_has_name_and_description(self):
+        for entry in TOOLS_SCHEMA_OPENAI:
+            fn = entry.get("function", {})
+            assert "name" in fn, f"name 없음: {fn}"
+            assert "description" in fn, f"description 없음: {fn}"
+
+    def test_same_tool_names_as_anthropic(self):
+        anthropic_names = {e["name"] for e in TOOLS_SCHEMA_ANTHROPIC}
+        openai_names = {e["function"]["name"] for e in TOOLS_SCHEMA_OPENAI}
+        assert anthropic_names == openai_names
+
+    def test_parameters_have_properties(self):
+        for entry in TOOLS_SCHEMA_OPENAI:
+            params = entry["function"].get("parameters", {})
+            assert params.get("type") == "object"
+            assert "properties" in params
+
+
+# ── Ollama 스키마 ──────────────────────────────────────────────────────────
+
+
+class TestToolsSchemaOllama:
+    def test_schema_is_list(self):
+        assert isinstance(TOOLS_SCHEMA_OLLAMA, list)
+        assert len(TOOLS_SCHEMA_OLLAMA) > 0
+
+    def test_same_tool_names_as_anthropic(self):
+        anthropic_names = {e["name"] for e in TOOLS_SCHEMA_ANTHROPIC}
+        ollama_names = {e["function"]["name"] for e in TOOLS_SCHEMA_OLLAMA}
+        assert anthropic_names == ollama_names
+
+    def test_each_entry_has_type_function(self):
+        for entry in TOOLS_SCHEMA_OLLAMA:
+            assert entry.get("type") == "function"
