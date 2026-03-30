@@ -148,7 +148,8 @@ class GitWorkflow:
         self._git_checked(["commit", "-m", message])
 
     def _git_push(self, branch: str) -> None:
-        self._git_checked(["push", "origin", branch])
+        # agent 브랜치는 파이프라인 전용이므로 --force로 재실행 시 충돌 방지
+        self._git_checked(["push", "origin", branch, "--force"])
 
     def _safe_checkout(self, branch: str) -> None:
         """예외를 삼키는 checkout (정리용)."""
