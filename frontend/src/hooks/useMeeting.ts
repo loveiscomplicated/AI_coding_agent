@@ -19,7 +19,7 @@ export interface MeetingState {
   isRefreshing: boolean
 }
 
-export function useMeeting(apiKey: string, initialRecord?: MeetingRecord, onTitleGenerated?: () => void) {
+export function useMeeting(initialRecord?: MeetingRecord, onTitleGenerated?: () => void) {
   const storage = useRef(new MeetingStorage()).current
   const meetingId = useRef(initialRecord?.id ?? generateId()).current
 
@@ -33,7 +33,7 @@ export function useMeeting(apiKey: string, initialRecord?: MeetingRecord, onTitl
   const [refreshingDoc, setRefreshingDoc] = useState('')
   const abortControllerRef = useRef<AbortController | null>(null)
 
-  const { sendMessage, isStreaming } = useAnthropicStream(apiKey)
+  const { sendMessage, isStreaming } = useAnthropicStream()
 
   const persistState = useCallback(
     (msgs: ChatMessage[], ctx: MeetingContext, finished: boolean, titleOverride?: string, doc?: string) => {
@@ -95,7 +95,7 @@ export function useMeeting(apiKey: string, initialRecord?: MeetingRecord, onTitl
             persistState(updated, context, false, undefined, contextDoc)
 
             if (isFirstMessage) {
-              generateChatTitle(history[0].content, apiKey).then(applyGeneratedTitle)
+              generateChatTitle(history[0].content).then(applyGeneratedTitle)
             }
 
             return updated
@@ -103,7 +103,7 @@ export function useMeeting(apiKey: string, initialRecord?: MeetingRecord, onTitl
         },
       )
     },
-    [context, contextDoc, sendMessage, persistState, applyGeneratedTitle, apiKey]
+    [context, contextDoc, sendMessage, persistState, applyGeneratedTitle]
     // contextDoc은 persistState에 전달하기 위해 유지
   )
 
@@ -125,7 +125,7 @@ export function useMeeting(apiKey: string, initialRecord?: MeetingRecord, onTitl
   const generateFinalDoc = useCallback(async (msgs: ChatMessage[], finished: boolean) => {
     setIsRefreshing(true)
     try {
-      const newDoc = await generateContextDocWithOpus(msgs, contextDoc, apiKey)
+      const newDoc = await generateContextDocWithOpus(msgs, contextDoc)
       if (!newDoc) return
       const { meta } = parseContextDoc(newDoc)
       const newCtx: MeetingContext = {
@@ -143,7 +143,7 @@ export function useMeeting(apiKey: string, initialRecord?: MeetingRecord, onTitl
     } finally {
       setIsRefreshing(false)
     }
-  }, [contextDoc, context, apiKey, persistState])
+  }, [contextDoc, context, persistState])
 
   /** 수동으로 컨텍스트 문서를 Opus 스트리밍으로 갱신합니다. */
   const refreshContextDoc = useCallback(async () => {
@@ -157,7 +157,6 @@ export function useMeeting(apiKey: string, initialRecord?: MeetingRecord, onTitl
       const newDoc = await generateContextDocWithOpusStream(
         messages,
         contextDoc,
-        apiKey,
         (token) => {
           accumulated += token
           setRefreshingDoc(accumulated)
@@ -178,7 +177,7 @@ export function useMeeting(apiKey: string, initialRecord?: MeetingRecord, onTitl
       setIsRefreshing(false)
       abortControllerRef.current = null
     }
-  }, [isRefreshing, isStreaming, messages, contextDoc, context, apiKey, persistState])
+  }, [isRefreshing, isStreaming, messages, contextDoc, context, persistState])
 
   const abortRefresh = useCallback(() => {
     abortControllerRef.current?.abort()

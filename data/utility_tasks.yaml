@@ -1,0 +1,192 @@
+# 첫 실제 프로젝트: 멀티 에이전트 시스템 유틸리티 모듈 (셀프 호스팅 검증)
+#
+# 의존성 그래프:
+#   task-001, task-003, task-005 → 선행 조건 없음 (1차 실행)
+#   task-002 → task-001 완료 후
+#   task-004 → task-001 완료 후
+#
+# 실행:
+#   python -m orchestrator.run --tasks data/utility_tasks.yaml --repo . --no-pr --yes
+
+tasks:
+  - id: task-001
+    title: "메트릭 수집기 구현"
+    description: |
+      파이프라인 실행 중 발생하는 정량적 데이터를 구조화하여 저장하고 조회하는
+      metrics/collector.py 모듈을 구현한다.
+
+      저장 형식은 YAML이며, 저장 위치는 data/reports/task-{id}.yaml이다.
+
+      TaskReport 데이터클래스:
+        task_id: str
+        title: str
+        status: str  # "COMPLETED" | "FAILED"
+        completed_at: str  # ISO 8601
+        retry_count: int
+        total_tokens: int
+        cost_usd: float
+        test_count: int
+        test_pass_first_try: bool
+        reviewer_verdict: str  # "APPROVED" | "CHANGES_REQUESTED" | ""
+        time_elapsed_seconds: float
+        failure_reasons: list[str]
+        test_output_summary: str
+        reviewer_feedback: str
+        pr_number: int | None
+        branch: str
+    acceptance_criteria:
+      - "TaskReport 데이터클래스를 정의한다"
+      - "save_report(task_id, report) 는 data/reports/task-{id}.yaml 로 저장한다"
+      - "load_report(task_id) 는 저장된 TaskReport 를 반환한다"
+      - "존재하지 않는 task_id 로 load_report 호출 시 FileNotFoundError 가 발생한다"
+      - "load_reports(since=datetime) 는 해당 시점 이후의 모든 리포트를 반환한다"
+      - "get_aggregate_metrics(since, until) 는 총 비용, 평균 재시도율, 성공률을 반환한다"
+      - "since 이전의 리포트는 load_reports 결과에 포함되지 않는다"
+    target_files: []
+    depends_on: []
+    status: pending
+
+  - id: task-002
+    title: "Weekly Report 생성기 구현"
+    description: |
+      메트릭 수집기(task-001)의 데이터를 분석하여 주간 마크다운 보고서를 생성하는
+      reports/weekly.py 모듈을 구현한다.
+
+      출력 형식(마크다운):
+        # Weekly Report — {week_start} ~ {week_end}
+        ## 진행 요약 (완료/실패/보류 수)
+        ## 주요 성과
+        ## 이슈 & 패턴 (재시도율, CHANGES_REQUESTED 빈도, 패턴 분석)
+        ## 비용 (모델별, 합계, 태스크당 평균)
+        ## 추이 (전주 대비 주요 지표 증감)
+        ## 다음 주 계획 (placeholder)
+
+      저장 위치: data/reports/weekly/YYYY-WNN.md (예: 2026-W15.md)
+
+      패턴 감지 임계값 (초기 기본값):
+        - 재시도율 20% 이상 → 경고
+        - CHANGES_REQUESTED 비율 30% 이상 → 경고
+    acceptance_criteria:
+      - "generate_weekly_report(week_start, week_end) 는 마크다운 문자열을 반환한다"
+      - "보고서에 진행 요약, 비용, 이슈 & 패턴 섹션이 포함된다"
+      - "calculate_cost_summary(reports) 는 총 비용과 태스크당 평균 비용을 반환한다"
+      - "detect_patterns(reports) 는 재시도율이 20% 이상이면 경고 항목을 포함한다"
+      - "이전 보고서가 있으면 추이(증감)를 계산하고, 없으면 추이 섹션을 생략한다"
+      - "save_weekly_report(week_start, content) 는 data/reports/weekly/YYYY-WNN.md 로 저장한다"
+      - "reports 가 빈 리스트이면 '데이터 없음' 보고서를 반환한다"
+    target_files: []
+    depends_on: ["task-001"]
+    status: pending
+
+  - id: task-003
+    title: "PROJECT_STRUCTURE.md 생성기 구현"
+    description: |
+      Python 코드베이스를 AST 파싱하여 프로젝트 구조 문서(PROJECT_STRUCTURE.md)를
+      자동 생성하는 structure/updater.py 모듈을 구현한다.
+
+      파싱 깊이 레벨 3:
+        - 파일명
+        - 클래스/함수명
+        - 함수 시그니처 (인자, 리턴 타입)
+        - docstring 첫 줄 요약
+
+      테스트 파일(test_*.py, *_test.py): 함수 시그니처 없이 파일명 + 테스트 함수 개수만 표시.
+
+      기본 제외 대상: __pycache__, .git, node_modules, venv, .venv, .eggs, dist, build
+
+      출력 예시:
+        # Project Structure
+        ## src/
+        ### src/auth/
+        #### `token.py`
+        - `create_token(user_id: str) -> str`
+          JWT 토큰 생성. 만료 24h.
+        ## tests/
+        ### `test_auth.py`
+        - 7 tests
+    acceptance_criteria:
+      - "generate_structure(project_root) 는 마크다운 문자열을 반환한다"
+      - "parse_python_file(filepath) 는 함수명, 시그니처, docstring 첫 줄을 추출한다"
+      - "클래스 내부 메서드도 클래스 아래에 들여쓰기로 표시된다"
+      - "테스트 파일은 파일명과 테스트 함수 개수만 표시하고 시그니처는 표시하지 않는다"
+      - "제외 디렉토리(__pycache__ 등)는 출력에 포함되지 않는다"
+      - "docstring 이 없는 함수도 시그니처는 표시된다"
+      - "빈 디렉토리는 출력에 포함되지 않는다"
+    target_files: []
+    depends_on: []
+    status: pending
+
+  - id: task-004
+    title: "execution_brief 생성기 구현"
+    description: |
+      회의 시작 시 Opus에게 주입할 실행 요약 문서를 생성하는
+      reports/execution_brief.py 모듈을 구현한다.
+
+      마지막 회의 이후 ~ 현재까지의 Task Report를 수집하여
+      완료/실패/보류로 분류하고, 주의 필요 사항을 추출한다.
+
+      출력 형식(마크다운):
+        # Execution Brief
+        기간: {since} ~ {until}
+
+        ## 완료된 태스크
+        - task-001: 메트릭 수집기 ✅
+
+        ## 실패/보류 태스크
+        - task-010: DB 마이그레이션 ❌
+          사유: ...
+
+        ## 핵심 수치
+        | 완료 | 총 비용 | 평균 재시도 |
+
+        ## 주의 필요 사항
+        - (사람 개입이 필요한 항목)
+
+      주의 필요 사항 기준:
+        - status = FAILED 인 태스크
+        - retry_count >= 3 인 태스크
+        - reviewer_verdict = CHANGES_REQUESTED 인 태스크
+    acceptance_criteria:
+      - "generate_brief(since_datetime) 는 마크다운 문자열을 반환한다"
+      - "classify_tasks(reports) 는 완료/실패 로 분류한다"
+      - "extract_attention_items(reports) 는 FAILED 태스크를 주의 항목으로 포함한다"
+      - "extract_attention_items(reports) 는 retry_count >= 3 인 태스크를 주의 항목으로 포함한다"
+      - "since_datetime 이후의 리포트만 포함한다"
+      - "리포트가 없으면 '실행 기록 없음' 요약을 반환한다"
+    target_files: []
+    depends_on: ["task-001"]
+    status: pending
+
+  - id: task-005
+    title: "태스크 의존성 계산기 구현"
+    description: |
+      tasks.yaml에 정의된 태스크들의 의존성 관계를 분석하여
+      올바른 실행 순서를 결정하는 orchestrator/dependency.py 모듈을 구현한다.
+
+      Kahn's algorithm (위상 정렬)을 직접 구현한다. 외부 라이브러리 사용 금지.
+
+      Task 입력 형식:
+        [{"id": "001", "depends_on": []},
+         {"id": "002", "depends_on": ["001"]},
+         {"id": "003", "depends_on": ["001"]}]
+
+      resolve_order 반환값: [["001"], ["002", "003"]]
+        — 동시에 실행 가능한 태스크들을 묶어서 순서 리스트로 반환.
+          같은 그룹 내 순서는 임의.
+
+      이 유틸리티 모듈 프로젝트의 의존성 구조:
+        001, 003, 005 → 1차 (의존 없음)
+        002 → 001 이후
+        004 → 001 이후
+      → resolve_order 결과: [["001","003","005"], ["002","004"]]
+    acceptance_criteria:
+      - "resolve_order(tasks) 는 위상 정렬된 실행 그룹 리스트를 반환한다"
+      - "의존성이 없는 태스크들은 같은 첫 번째 그룹에 속한다"
+      - "depends_on 에 명시된 모든 태스크가 이전 그룹에 속한 뒤에야 해당 태스크가 실행된다"
+      - "순환 의존성이 있으면 CyclicDependencyError 를 발생시킨다"
+      - "존재하지 않는 task_id 를 depends_on 에 참조하면 ValueError 를 발생시킨다"
+      - "태스크가 하나뿐이고 의존성이 없으면 [[task_id]] 를 반환한다"
+      - "빈 리스트 입력 시 빈 리스트를 반환한다"
+    target_files: []
+    depends_on: []
+    status: pending

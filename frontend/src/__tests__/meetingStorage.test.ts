@@ -6,15 +6,15 @@
 
 import { describe, it, expect, beforeEach } from 'vitest'
 import { MeetingStorage } from '../storage/meetingStorage'
-import { emptyMeetingContext } from '../types/meeting'
+import { ChatMessage, MeetingRecord, emptyMeetingContext } from '../types/meeting'
 
-function makeRecord(overrides: Partial<{ id: string; title: string }> = {}) {
+function makeRecord(overrides: Partial<{ id: string; title: string }> = {}): MeetingRecord {
   return {
     id: overrides.id ?? 'test-id-001',
     title: overrides.title ?? '테스트 회의',
     createdAt: '2026-03-29T10:00:00Z',
     updatedAt: '2026-03-29T10:00:00Z',
-    messages: [],
+    messages: [] as ChatMessage[],
     context: emptyMeetingContext(),
     isFinished: false,
   }
@@ -119,8 +119,8 @@ describe('MeetingStorage', () => {
   it('messages 배열이 정확히 저장/복원되어야 한다', () => {
     const record = makeRecord()
     record.messages = [
-      { role: 'user', content: '안녕하세요' },
-      { role: 'assistant', content: '반갑습니다' },
+      { role: 'user' as const, content: '안녕하세요' },
+      { role: 'assistant' as const, content: '반갑습니다' },
     ]
     storage.save(record)
     const loaded = storage.get(record.id)

@@ -1,11 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { MeetingRecord } from './types/meeting'
 import { MeetingStorage } from './storage/meetingStorage'
 import { MeetingApp } from './components/MeetingApp'
 import { ChatListPage } from './components/ChatListPage'
 
 const storage = new MeetingStorage()
-const API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY as string
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000') as string
 
 function SidebarToggleIcon() {
   return (
@@ -17,6 +17,17 @@ function SidebarToggleIcon() {
 }
 
 export default function App() {
+  const [backendOk, setBackendOk] = useState<boolean | null>(null)
+  const checkedRef = useRef(false)
+
+  useEffect(() => {
+    if (checkedRef.current) return
+    checkedRef.current = true
+    fetch(`${API_BASE}/api/health`)
+      .then((r) => setBackendOk(r.ok))
+      .catch(() => setBackendOk(false))
+  }, [])
+
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [records, setRecords] = useState<MeetingRecord[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
@@ -90,15 +101,17 @@ export default function App() {
     setActiveId(record.id)
   }
 
-  if (!API_KEY) {
+  if (backendOk === false) {
     return (
       <div className="flex items-center justify-center h-screen text-center p-8">
         <div>
-          <p className="text-lg font-bold text-red-600 mb-2">API 키가 없습니다</p>
-          <p className="text-sm text-gray-500">
-            <code>frontend/.env</code> 파일에{' '}
-            <code>VITE_ANTHROPIC_API_KEY=sk-ant-...</code>를 설정하세요.
+          <p className="text-lg font-bold text-red-600 mb-2">백엔드 서버에 연결할 수 없습니다</p>
+          <p className="text-sm text-gray-500 mb-1">
+            아래 명령어로 백엔드를 먼저 실행하세요:
           </p>
+          <code className="text-sm bg-gray-100 px-2 py-1 rounded">
+            uvicorn backend.main:app --reload --port 8000
+          </code>
         </div>
       </div>
     )
@@ -310,7 +323,6 @@ export default function App() {
         ) : (
           <MeetingApp
             key={chatKey}
-            apiKey={API_KEY}
             initialRecord={activeRecord}
             onFinished={handleFinished}
             onTitleGenerated={() => setRecords(storage.list())}

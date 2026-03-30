@@ -5,7 +5,6 @@ import { MessageInput, MessageInputRef } from './MessageInput'
 import { MessageList } from './MessageList'
 
 interface Props {
-  apiKey: string
   initialRecord?: MeetingRecord
   onFinished?: (record: MeetingRecord) => void
   onGoToList?: () => void
@@ -13,8 +12,8 @@ interface Props {
   headerLeft?: React.ReactNode
 }
 
-export function MeetingApp({ apiKey, initialRecord, onFinished, onGoToList, onTitleGenerated, headerLeft }: Props) {
-  const meeting = useMeeting(apiKey, initialRecord, onTitleGenerated)
+export function MeetingApp({ initialRecord, onFinished, onGoToList, onTitleGenerated, headerLeft }: Props) {
+  const meeting = useMeeting(initialRecord, onTitleGenerated)
   const [showDocPanel, setShowDocPanel] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const inputRef = useRef<MessageInputRef>(null)

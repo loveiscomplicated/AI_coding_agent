@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react'
-import Anthropic from '@anthropic-ai/sdk'
 import { ChatMessage } from '../types/meeting'
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
 
 // ─── 시스템 프롬프트 ──────────────────────────────────────────────────────────
 
@@ -26,9 +27,6 @@ const BASE_SYSTEM_PROMPT = `당신은 프로젝트 기획 파트너입니다.
 
 // ─── 컨텍스트 문서 프롬프트 ──────────────────────────────────────────────────
 
-/**
- * Opus용: 최종 상세 문서 (저장 및 실제 활용 목적)
- */
 const OPUS_CONTEXT_DOC_SYSTEM = `당신은 방금 진행된 프로젝트 기획 대화의 내용을 정리하는 전문 문서 작성자입니다.
 
 아래 대화를 바탕으로 포괄적이고 상세한 프로젝트 컨텍스트 문서를 작성하세요.
@@ -49,28 +47,21 @@ completeness: [0~100 정수. 프로젝트를 바로 시작할 수 있을 만큼 
 hint: [남은 미결 사항 또는 다음 논의 필요 내용]
 ---`
 
+// ─── 내부 헬퍼 ───────────────────────────────────────────────────────────────
 
-// ─── 유틸리티 함수들 ──────────────────────────────────────────────────────────
-
-/**
- * 첫 번째 사용자 메시지를 보고 채팅방 제목을 자동 생성합니다.
- */
-export async function generateChatTitle(message: string, apiKey: string): Promise<string> {
-  try {
-    const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true })
-    const res = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 20,
-      messages: [{
-        role: 'user',
-        content: `다음 내용을 보고 채팅 제목을 한국어로 5단어 이내로 만들어줘. 제목만 출력:\n\n${message.slice(0, 500)}`,
-      }],
-    })
-    const text = res.content[0].type === 'text' ? res.content[0].text.trim() : ''
-    return text || '새 회의'
-  } catch {
-    return '새 회의'
-  }
+function buildAnthropicMessages(messages: ChatMessage[]) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return messages.map((m): any => {
+    if (!m.attachments?.length) return { role: m.role, content: m.content }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const blocks: any[] = m.attachments.map((att) =>
+      att.type === 'image'
+        ? { type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.data } }
+        : { type: 'document', source: { type: 'base64', media_type: att.mediaType, data: att.data } }
+    )
+    if (m.content) blocks.push({ type: 'text', text: m.content })
+    return { role: m.role, content: blocks }
+  })
 }
 
 function buildContextDocUserContent(messages: ChatMessage[], prevDoc: string): string {
@@ -82,62 +73,113 @@ function buildContextDocUserContent(messages: ChatMessage[], prevDoc: string): s
     : `전체 대화:\n${conversation}`
 }
 
-/**
- * [Opus] 전체 대화를 바탕으로 상세하고 포괄적인 컨텍스트 문서를 생성합니다.
- * 회의 종료 시 호출됩니다.
- */
+/** 백엔드 SSE 스트림을 읽어 onToken 콜백을 호출한다. 완료된 전체 텍스트를 반환. */
+async function readStream(
+  url: string,
+  body: object,
+  onToken: (token: string) => void,
+  signal?: AbortSignal,
+): Promise<string> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+
+  if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let accumulated = ''
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      const data = JSON.parse(line.slice(6))
+      if (data.type === 'text_delta') {
+        accumulated += data.text
+        onToken(data.text)
+      }
+      if (data.type === 'done') return accumulated
+      if (data.type === 'error') throw new Error(data.message)
+    }
+  }
+  return accumulated
+}
+
+// ─── 유틸리티 함수들 ──────────────────────────────────────────────────────────
+
+export async function generateChatTitle(message: string): Promise<string> {
+  try {
+    const res = await fetch(`${API_BASE}/api/chat/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 20,
+        messages: [{
+          role: 'user',
+          content: `다음 내용을 보고 채팅 제목을 한국어로 5단어 이내로 만들어줘. 제목만 출력:\n\n${message.slice(0, 500)}`,
+        }],
+      }),
+    })
+    if (!res.ok) return '새 회의'
+    const { text } = await res.json()
+    return text?.trim() || '새 회의'
+  } catch {
+    return '새 회의'
+  }
+}
+
 export async function generateContextDocWithOpus(
   messages: ChatMessage[],
   prevDoc: string,
-  apiKey: string,
 ): Promise<string> {
   try {
-    const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true })
-    const res = await client.messages.create({
-      model: 'claude-opus-4-6',
-      max_tokens: 16000,
-      system: OPUS_CONTEXT_DOC_SYSTEM,
-      messages: [{ role: 'user', content: buildContextDocUserContent(messages, prevDoc) }],
+    const res = await fetch(`${API_BASE}/api/chat/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-opus-4-6',
+        max_tokens: 16000,
+        system: OPUS_CONTEXT_DOC_SYSTEM,
+        messages: [{ role: 'user', content: buildContextDocUserContent(messages, prevDoc) }],
+      }),
     })
-    return res.content[0].type === 'text' ? res.content[0].text.trim() : prevDoc
+    if (!res.ok) return prevDoc
+    const { text } = await res.json()
+    return text?.trim() || prevDoc
   } catch {
     return prevDoc
   }
 }
 
-/**
- * [Opus] 수동 갱신용 스트리밍 버전. onToken으로 실시간 토큰을 전달합니다.
- * signal로 취소 가능합니다.
- */
 export async function generateContextDocWithOpusStream(
   messages: ChatMessage[],
   prevDoc: string,
-  apiKey: string,
   onToken: (token: string) => void,
   signal?: AbortSignal,
 ): Promise<string> {
   try {
-    const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true })
-    const stream = client.messages.stream({
-      model: 'claude-opus-4-6',
-      max_tokens: 16000,
-      system: OPUS_CONTEXT_DOC_SYSTEM,
-      messages: [{ role: 'user', content: buildContextDocUserContent(messages, prevDoc) }],
-    })
-
-    if (signal) {
-      signal.addEventListener('abort', () => stream.abort())
-    }
-
-    let accumulated = ''
-    for await (const event of stream) {
-      if (signal?.aborted) break
-      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-        accumulated += event.delta.text
-        onToken(event.delta.text)
-      }
-    }
-    return accumulated || prevDoc
+    const result = await readStream(
+      `${API_BASE}/api/chat/stream`,
+      {
+        model: 'claude-opus-4-6',
+        max_tokens: 16000,
+        system: OPUS_CONTEXT_DOC_SYSTEM,
+        messages: [{ role: 'user', content: buildContextDocUserContent(messages, prevDoc) }],
+      },
+      onToken,
+      signal,
+    )
+    return result || prevDoc
   } catch {
     return prevDoc
   }
@@ -145,7 +187,7 @@ export async function generateContextDocWithOpusStream(
 
 // ─── 훅 ───────────────────────────────────────────────────────────────────────
 
-export function useAnthropicStream(apiKey: string) {
+export function useAnthropicStream() {
   const [isStreaming, setIsStreaming] = useState(false)
 
   const sendMessage = useCallback(
@@ -154,44 +196,24 @@ export function useAnthropicStream(apiKey: string) {
       onToken: (token: string) => void,
       onDone: () => void,
     ): Promise<void> => {
-      const client = new Anthropic({
-        apiKey,
-        dangerouslyAllowBrowser: true,
-      })
-
       setIsStreaming(true)
       try {
-        const stream = client.messages.stream({
-          model: 'claude-opus-4-6',
-          max_tokens: 4096,
-          system: BASE_SYSTEM_PROMPT,
-          messages: messages.map((m) => {
-            if (!m.attachments?.length) return { role: m.role, content: m.content }
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const blocks: any[] = m.attachments.map((att) =>
-              att.type === 'image'
-                ? { type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.data } }
-                : { type: 'document', source: { type: 'base64', media_type: att.mediaType, data: att.data } }
-            )
-            if (m.content) blocks.push({ type: 'text', text: m.content })
-            return { role: m.role, content: blocks }
-          }),
-        })
-
-        for await (const event of stream) {
-          if (
-            event.type === 'content_block_delta' &&
-            event.delta.type === 'text_delta'
-          ) {
-            onToken(event.delta.text)
-          }
-        }
+        await readStream(
+          `${API_BASE}/api/chat/stream`,
+          {
+            model: 'claude-opus-4-6',
+            max_tokens: 4096,
+            system: BASE_SYSTEM_PROMPT,
+            messages: buildAnthropicMessages(messages),
+          },
+          onToken,
+        )
       } finally {
         setIsStreaming(false)
         onDone()
       }
     },
-    [apiKey],
+    [],
   )
 
   return { sendMessage, isStreaming }

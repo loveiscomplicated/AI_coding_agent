@@ -75,6 +75,91 @@ AI 에이전트 팀을 활용한 소프트웨어 개발 파이프라인 구축. 
 
 ---
 
+## 2.5 Phase 2 상세 설계 ✅ 구현 완료
+
+### 2.5.1 전체 데이터 흐름
+
+```
+data/tasks.yaml (수동 정의)
+    │
+    ▼ orchestrator/run.py
+[Task 목록] ──► 사람 확인(y/n) ──► 진행
+    │
+    ▼ for each Task:
+    │
+    ├─► STEP 1: TestWriter (Haiku + ScopedReactLoop)
+    │       input:  task.description + acceptance_criteria
+    │       output: workspace/tests/ 에 pytest 테스트 파일 작성
+    │       tools:  read_file, write_file, list_directory, search_files
+    │
+    ├─► STEP 2: Implementer (Haiku + ScopedReactLoop)
+    │       input:  task + 테스트 파일들
+    │       output: workspace/src/ 에 구현 파일 작성
+    │       tools:  read_file, write_file, edit_file, list_directory, search_files
+    │
+    ├─► STEP 3: DockerTestRunner
+    │       input:  workspace/ 디렉토리
+    │       output: RunResult (pass/fail, stdout, summary)
+    │       ─────────────────────────────────────────────
+    │       FAIL → Implementer 재시도 (max 3회, 이전 오류 포함)
+    │       PASS → 다음 단계
+    │
+    ├─► STEP 4: Reviewer (Haiku + ScopedReactLoop, 읽기 전용)
+    │       input:  task + 테스트 + 구현 + RunResult
+    │       output: APPROVED / CHANGES_REQUESTED + 피드백
+    │       ※ CHANGES_REQUESTED여도 PR은 생성 — 사람이 최종 판단
+    │
+    └─► STEP 5: GitWorkflow
+            - agent/task-{id} 브랜치 생성
+            - workspace 결과물 복사 + 커밋
+            - gh pr create → base branch로 PR
+            - PR body에 테스트 결과 + 리뷰 피드백 포함
+```
+
+### 2.5.2 디렉토리 구조
+
+```
+AI_coding_agent/
+├── agents/
+│   ├── roles.py               # 역할별 RoleConfig (TEST_WRITER, IMPLEMENTER, REVIEWER)
+│   ├── scoped_loop.py         # ScopedReactLoop (도구 제한 + workspace 격리)
+│   └── prompts/               # 역할별 시스템 프롬프트 마크다운
+│       ├── test_writer.md
+│       ├── implementer.md
+│       └── reviewer.md
+├── orchestrator/
+│   ├── task.py                # Task 데이터 모델 + TaskStatus enum + YAML 로드/저장
+│   ├── pipeline.py            # TDDPipeline 상태 머신
+│   ├── workspace.py           # WorkspaceManager (tmp 생성/정리)
+│   ├── git_workflow.py        # GitWorkflow + check_prerequisites
+│   └── run.py                 # CLI 진입점
+├── docker/
+│   ├── Dockerfile.test        # python:3.12-slim + pytest
+│   ├── docker-entrypoint.sh   # requirements.txt 자동 설치 후 pytest 실행
+│   └── runner.py              # DockerTestRunner
+└── data/
+    └── tasks.yaml             # 태스크 정의 파일 (수동 작성)
+```
+
+### 2.5.3 핵심 결정 사항 (확정)
+
+| 항목 | 결정 | 이유 |
+|------|------|------|
+| Task 정의 방식 | YAML 수동 정의 | Sonnet 파싱 오류 위험 제거, 명시적 확인 |
+| Reviewer 판정 후 행동 | CHANGES_REQUESTED여도 PR 생성 | 사람이 최종 판단 |
+| 테스트 타겟 | Python 전용 | Phase 3에서 Node.js 추가 |
+| 실패한 workspace | 보존 (디버깅용) | 성공 시만 자동 정리 |
+| Implementer 재시도 | MAX_RETRIES=3 | 초과 시 FAILED, 사람 개입 |
+
+### 2.5.4 E2E 검증 결과 (2026-03-30)
+
+실제 태스크 2개(`정수 계산기`, `단어 빈도 분석기`)로 전체 파이프라인 검증 완료.
+- task-002에서 첫 시도 실패 → Implementer 재시도(retry_count=1) → 통과 확인
+- Reviewer 양쪽 모두 APPROVED 판정
+- `tasks.yaml` 체크포인트 자동 저장 확인
+
+---
+
 ## 3. Git 브랜치 전략 및 승인 정책
 
 ### 3.1 브랜치 구조
@@ -285,18 +370,34 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
   └── 컨텍스트 문서 뷰어 (📄 버튼) ✅
 ```
 
-### Phase 2: 에이전트 실행 환경 (Phase 1 검증 후)
+### Phase 2: 에이전트 실행 환경 ✅ 4단계 완료
 
 ```
-4단계 - 단일 에이전트 파이프라인 (3~5일)
-  ├── 샌드박스 환경 구성 (Docker 기반)
-  ├── 태스크 수신 → 테스트 작성 → 구현 → 리뷰 순차 실행
-  └── 결과를 Git 브랜치에 커밋 + PR 생성
+4단계 - 단일 에이전트 파이프라인 ✅ 완료 (2026-03-30)
+  ├── Docker 테스트 러너 (격리 pytest 실행) ✅
+  ├── Task 모델 + YAML 로드/저장 ✅
+  ├── WorkspaceManager (tmp 격리 디렉토리) ✅
+  ├── ScopedReactLoop (역할별 도구 제한 + workspace 격리) ✅
+  ├── TestWriter / Implementer / Reviewer 에이전트 ✅
+  ├── TDDPipeline 상태 머신 (재시도 루프 포함) ✅
+  ├── GitWorkflow (브랜치 → 커밋 → PR 생성) ✅
+  └── run.py CLI 진입점 + E2E 검증 ✅
 
-5단계 - 오케스트레이터 연결 (3~5일)
-  ├── 컨텍스트 JSON → 태스크 분해 로직
-  ├── 에이전트에 태스크 분배
-  └── Task Report 수집 + 요약
+5단계 - 오케스트레이터 연결 ← 현재 단계
+  Step 1: FastAPI 백엔드 + API 프록시 (dangerouslyAllowBrowser 제거)
+  Step 2: 파이프라인 확장 (StructureUpdater, dev 머지 의존성, Task Report)
+  Step 3: 태스크 초안 생성 (context_doc → Sonnet → tasks.yaml + UI)
+  Step 4: 회의 인터페이스 확장 (회의 타입 분리, execution_brief 주입)
+  Step 5: Discord 핫라인 (알림 + 질의응답 양방향)
+  Step 6: 보고서 체계 (Weekly Report, 시스템 회의용 메트릭)
+
+  [첫 실제 프로젝트] 유틸리티 모듈 5개 (셀프 호스팅 검증):
+  ├── metrics/collector.py      — Task Report 저장/로드/집계
+  ├── reports/weekly.py         — 주간 보고서 생성
+  ├── structure/updater.py      — Python AST → PROJECT_STRUCTURE.md
+  ├── reports/execution_brief.py — 회의 시작 시 주입할 실행 요약
+  └── orchestrator/dependency.py — 위상 정렬 기반 실행 순서 결정
+  상세 설계: docs/project-document-after_Phase_2.md
 ```
 
 ### Phase 3: 멀티 에이전트 + 운영 (Phase 2 검증 후)
@@ -325,7 +426,11 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
 | 항목 | 현재 상태 | 결정 시점 |
 |------|-----------|-----------|
 | 실행 에이전트 모델 선택 | **확정**: 오케스트레이터 Sonnet, 실행 에이전트 Haiku | ✅ 결정 완료 |
-| 샌드박스 구현 방식 | **확정**: Docker (Firecracker는 macOS에서 KVM 미지원으로 제외). 코드베이스 읽기 전용 마운트 + 작업 디렉토리만 쓰기 허용 구조로 구현 | ✅ 결정 완료 |
+| 샌드박스 구현 방식 | **확정**: Docker. workspace를 `/tmp`에 생성 후 읽기 전용 마운트 | ✅ 결정 완료 |
+| Task 정의 방식 | **확정**: YAML 수동 정의. Sonnet 자동 추출은 Phase 3에서 검토 | ✅ 결정 완료 |
+| Reviewer 판정 후 행동 | **확정**: CHANGES_REQUESTED여도 PR 생성. PR body에 피드백 포함 | ✅ 결정 완료 |
+| Phase 2 테스트 타겟 | **확정**: Python 전용. Node.js 지원은 Phase 3 | ✅ 결정 완료 |
+| 5단계 오케스트레이터 연결 방식 | Phase 1 UI ↔ Phase 2 파이프라인 연동 구체화 필요 | 5단계 시작 시 |
 | 에이전트 간 의존성 태스크 처리 | 순차 실행 vs DAG 기반 스케줄링 | Phase 3 시작 시 |
-| DB 전환 | JSON → SQLite or PostgreSQL | 데이터 복잡도 증가 시 |
-| CI/CD 통합 | GitHub Actions 유력 | Phase 2에서 PR 자동화 시 |
+| DB 전환 | JSON/YAML → SQLite or PostgreSQL | 데이터 복잡도 증가 시 |
+| CI/CD 통합 | GitHub Actions 유력 | Phase 3에서 검토 |
