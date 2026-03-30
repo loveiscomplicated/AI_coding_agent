@@ -31,8 +31,9 @@ from hotline.notifier import DiscordNotifier
 from llm import LLMConfig, create_client
 from orchestrator.git_workflow import GitWorkflow, GitWorkflowError, check_prerequisites
 from orchestrator.merge_agent import MergeAgent
+from orchestrator.milestone import generate_milestone_report
 from orchestrator.pipeline import TDDPipeline
-from orchestrator.report import build_report, save_report
+from orchestrator.report import build_report, load_reports, save_report
 from orchestrator.task import Task, TaskStatus, load_tasks, save_tasks
 from orchestrator.workspace import WorkspaceManager
 
@@ -569,6 +570,38 @@ def main() -> int:
     print(f"\n{'═' * 60}")
     print(f"{_BOLD}실행 완료{_RESET}  성공: {_GREEN}{success_count}{_RESET}  실패: {_RED}{fail_count}{_RESET}")
     print(f"{'═' * 60}\n")
+
+    # ── 마일스톤 보고서 생성 ──────────────────────────────────────────────────
+    if success_count > 0:
+        try:
+            import anthropic as _anthropic
+            import os as _os
+
+            def _llm_fn(system: str, user: str) -> str:
+                client = _anthropic.Anthropic(api_key=_os.environ.get("ANTHROPIC_API_KEY", ""))
+                resp = client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=4096,
+                    system=system,
+                    messages=[{"role": "user", "content": user}],
+                )
+                return resp.content[0].text.strip() if resp.content else ""
+
+            run_label = tasks_path.stem  # 예: "tasks"
+            task_reports = load_reports()
+            # 이번 실행 태스크만 필터 (all_tasks ID 기준)
+            run_ids = {t.id for t in all_tasks}
+            run_reports = [r for r in task_reports if r.task_id in run_ids]
+
+            if run_reports:
+                _, milestone_path = generate_milestone_report(
+                    reports=run_reports,
+                    llm_fn=_llm_fn,
+                    run_label=run_label,
+                )
+                print(_ok(f"마일스톤 보고서: {milestone_path}"))
+        except Exception as exc:
+            print(_warn(f"마일스톤 보고서 생성 실패 (건너뜀): {exc}"))
 
     return 0 if fail_count == 0 else 1
 

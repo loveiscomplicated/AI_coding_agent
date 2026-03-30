@@ -8,7 +8,7 @@ backend/main.py — FastAPI 앱 진입점
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.routers import chat, discord_router, health, pipeline, reports, tasks
+from backend.routers import chat, dashboard, discord_router, health, pipeline, reports, tasks
 
 app = FastAPI(title="Multi-Agent Dev System API", version="0.1.0")
 
@@ -31,3 +31,4 @@ app.include_router(tasks.router, prefix="/api")
 app.include_router(pipeline.router, prefix="/api")
 app.include_router(reports.router, prefix="/api")
 app.include_router(discord_router.router, prefix="/api")
+app.include_router(dashboard.router, prefix="/api")
