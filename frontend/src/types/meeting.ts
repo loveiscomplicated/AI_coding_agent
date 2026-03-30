@@ -78,10 +78,20 @@ export function emptyMeetingContext(): MeetingContext {
   }
 }
 
+// 첨부파일
+export interface ChatAttachment {
+  type: 'image' | 'document'
+  mediaType: string  // e.g. "image/jpeg", "application/pdf"
+  data: string       // base64 (without data: prefix)
+  name: string
+  size: number
+}
+
 // 대화 메시지
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
+  attachments?: ChatAttachment[]
   /** 응답에서 추출된 컨텍스트 (assistant 메시지만) */
   context?: Partial<MeetingContext>
 }

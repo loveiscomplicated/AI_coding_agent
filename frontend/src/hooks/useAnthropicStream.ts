@@ -95,7 +95,7 @@ export async function generateContextDocWithOpus(
     const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true })
     const res = await client.messages.create({
       model: 'claude-opus-4-6',
-      max_tokens: 4096,
+      max_tokens: 16000,
       system: OPUS_CONTEXT_DOC_SYSTEM,
       messages: [{ role: 'user', content: buildContextDocUserContent(messages, prevDoc) }],
     })
@@ -120,7 +120,7 @@ export async function generateContextDocWithOpusStream(
     const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true })
     const stream = client.messages.stream({
       model: 'claude-opus-4-6',
-      max_tokens: 4096,
+      max_tokens: 16000,
       system: OPUS_CONTEXT_DOC_SYSTEM,
       messages: [{ role: 'user', content: buildContextDocUserContent(messages, prevDoc) }],
     })
@@ -165,7 +165,17 @@ export function useAnthropicStream(apiKey: string) {
           model: 'claude-opus-4-6',
           max_tokens: 4096,
           system: BASE_SYSTEM_PROMPT,
-          messages: messages.map((m) => ({ role: m.role, content: m.content })),
+          messages: messages.map((m) => {
+            if (!m.attachments?.length) return { role: m.role, content: m.content }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const blocks: any[] = m.attachments.map((att) =>
+              att.type === 'image'
+                ? { type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.data } }
+                : { type: 'document', source: { type: 'base64', media_type: att.mediaType, data: att.data } }
+            )
+            if (m.content) blocks.push({ type: 'text', text: m.content })
+            return { role: m.role, content: blocks }
+          }),
         })
 
         for await (const event of stream) {

@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMeeting } from '../hooks/useMeeting'
 import { MeetingRecord } from '../types/meeting'
-import { MessageInput } from './MessageInput'
+import { MessageInput, MessageInputRef } from './MessageInput'
 import { MessageList } from './MessageList'
 
 interface Props {
@@ -16,6 +16,9 @@ interface Props {
 export function MeetingApp({ apiKey, initialRecord, onFinished, onGoToList, onTitleGenerated, headerLeft }: Props) {
   const meeting = useMeeting(apiKey, initialRecord, onTitleGenerated)
   const [showDocPanel, setShowDocPanel] = useState(false)
+  const [isDragging, setIsDragging] = useState(false)
+  const inputRef = useRef<MessageInputRef>(null)
+  const dragCounter = useRef(0)
 
   // ESC 키로 패널 닫기 (갱신 중이면 취소도 함께)
   useEffect(() => {
@@ -107,8 +110,46 @@ export function MeetingApp({ apiKey, initialRecord, onFinished, onGoToList, onTi
 
   const docContent = meeting.isRefreshing ? meeting.refreshingDoc : meeting.contextDoc
 
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault()
+    dragCounter.current++
+    if (e.dataTransfer.types.includes('Files')) setIsDragging(true)
+  }
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault()
+    dragCounter.current--
+    if (dragCounter.current === 0) setIsDragging(false)
+  }
+  const handleDragOver = (e: React.DragEvent) => { e.preventDefault() }
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    dragCounter.current = 0
+    setIsDragging(false)
+    const files = Array.from(e.dataTransfer.files)
+    if (files.length > 0) inputRef.current?.addFiles(files)
+  }
+
   return (
-    <div className="flex flex-col h-full">
+    <div
+      className="flex flex-col h-full relative"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {/* 드래그 오버레이 */}
+      {isDragging && (
+        <div className="absolute inset-0 z-40 bg-blue-50/90 dark:bg-blue-950/80 border-2 border-dashed border-blue-400 dark:border-blue-500 rounded-lg flex flex-col items-center justify-center gap-3 pointer-events-none">
+          <svg className="w-10 h-10 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          <p className="text-sm font-medium text-blue-500 dark:text-blue-400">파일을 여기에 놓으세요</p>
+          <p className="text-xs text-blue-400 dark:text-blue-500">이미지, PDF 지원</p>
+        </div>
+      )}
+
       {/* 헤더 */}
       <div className="flex items-center justify-between px-4 py-3 bg-white dark:bg-zinc-900 border-b border-gray-200 dark:border-zinc-700">
         <div className="flex items-center gap-2">
@@ -151,7 +192,7 @@ export function MeetingApp({ apiKey, initialRecord, onFinished, onGoToList, onTi
       />
 
       {/* 입력창 */}
-      <MessageInput onSend={meeting.sendUserMessage} disabled={meeting.isStreaming} />
+      <MessageInput ref={inputRef} onSend={meeting.sendUserMessage} disabled={meeting.isStreaming} />
 
       {/* 컨텍스트 문서 패널 */}
       {showDocPanel && (

@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react'
-import { ChatMessage, MeetingContext, MeetingRecord, emptyMeetingContext } from '../types/meeting'
+import { ChatAttachment, ChatMessage, MeetingContext, MeetingRecord, emptyMeetingContext } from '../types/meeting'
 import { streamingVisibleText, parseContextDoc } from '../utils/contextParser'
 import { parseChoices } from '../utils/choiceParser'
 import { MeetingStorage } from '../storage/meetingStorage'
@@ -108,9 +108,10 @@ export function useMeeting(apiKey: string, initialRecord?: MeetingRecord, onTitl
   )
 
   const sendUserMessage = useCallback(
-    async (text: string) => {
-      if (!text.trim() || isStreaming || isFinished) return
-      const userMsg: ChatMessage = { role: 'user', content: text }
+    async (text: string, attachments?: ChatAttachment[]) => {
+      if (!text.trim() && !attachments?.length) return
+      if (isStreaming || isFinished) return
+      const userMsg: ChatMessage = { role: 'user', content: text, attachments }
       const history = [...messages, userMsg]
       const isFirstMessage = !initialRecord && messages.length === 0
       await sendWithHistory(history, isFirstMessage)
