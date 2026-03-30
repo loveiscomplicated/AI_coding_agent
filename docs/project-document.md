@@ -1,6 +1,6 @@
 # Multi-Agent Development System
 
-> 프로젝트 문서 v1.1 | 2026-03-30 — Phase 2 전체 완료
+> 프로젝트 문서 v1.2 | 2026-03-31 — Phase 3 6단계 완료
 
 ---
 
@@ -409,24 +409,29 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
     ├── backend/routers/reports.py  — POST/GET /api/reports/weekly
     └── tests/test_weekly.py (30개 테스트)
 
-  [다음] 첫 실제 프로젝트 — 유틸리티 모듈 5개 (셀프 호스팅 검증):
-  ├── metrics/collector.py      — Task Report 저장/로드/집계
-  ├── reports/weekly.py         — 주간 보고서 생성
-  ├── structure/updater.py      — Python AST → PROJECT_STRUCTURE.md
-  ├── reports/execution_brief.py — 회의 시작 시 주입할 실행 요약
-  └── orchestrator/dependency.py — 위상 정렬 기반 실행 순서 결정
+  첫 실제 프로젝트 — 유틸리티 모듈 5개 (셀프 호스팅 검증) ✅ 완료 (2026-03-31)
+  ├── metrics/collector.py       — Task Report 저장/로드/집계 (34 tests APPROVED)
+  ├── reports/weekly.py          — 주간 보고서 생성 (39 tests APPROVED)
+  ├── structure/updater.py       — Python AST → PROJECT_STRUCTURE.md (31 tests APPROVED)
+  ├── reports/execution_brief.py — 회의 시작 시 주입할 실행 요약 (35 tests APPROVED)
+  └── orchestrator/dependency.py — 위상 정렬 기반 실행 순서 결정 (27 tests APPROVED)
   상세 설계: docs/project-document-after_Phase_2.md
 ```
 
-### Phase 3: 멀티 에이전트 + 운영 (Phase 2 검증 후)
+### Phase 3: 멀티 에이전트 + 운영 ✅ 6단계 완료
 
 ```
-6단계 - 병렬 에이전트 (3~5일)
-  ├── 복수 에이전트 동시 실행
-  ├── 에이전트 간 의존성 관리
-  └── 충돌 감지 및 해결
+6단계 - 병렬 에이전트 ✅ 완료 (2026-03-31)
+  ├── git worktree 기반 GitWorkflow 재설계 ✅
+  │     main repo HEAD 불변 — 여러 태스크 동시 실행 시 git 상태 충돌 없음
+  ├── ThreadPoolExecutor + --parallel N 플래그 ✅
+  │     그룹 내 태스크 병렬 실행, 기본값 1 (순차, 하위 호환)
+  ├── MergeAgent — LLM 기반 머지 충돌 자동 해결 ✅
+  │     그룹 완료 후 dev 자동 머지, 충돌 시 Haiku 1회 호출로 파일별 해결
+  └── StructureUpdater 파이프라인 통합 ✅
+        그룹 머지 후 PROJECT_STRUCTURE.md 자동 갱신 → 다음 그룹 에이전트에 주입
 
-7단계 - 보고서 및 모니터링 (2~3일)
+7단계 - 보고서 및 모니터링
   ├── Daily / Milestone 보고서 자동 생성
   ├── 컨텍스트 압축 파이프라인
   └── 대시보드 UI
@@ -449,6 +454,8 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
 | Reviewer 판정 후 행동 | **확정**: CHANGES_REQUESTED여도 PR 생성. PR body에 피드백 포함 | ✅ 결정 완료 |
 | Phase 2 테스트 타겟 | **확정**: Python 전용. Node.js 지원은 Phase 3 | ✅ 결정 완료 |
 | 5단계 오케스트레이터 연결 방식 | **확정**: FastAPI 백엔드 + React 프론트엔드 분리, Discord 핫라인 포함 | ✅ 완료 |
-| 에이전트 간 의존성 태스크 처리 | 순차 실행 vs DAG 기반 스케줄링 | Phase 3 시작 시 |
+| 에이전트 간 의존성 태스크 처리 | **확정**: DAG 위상 정렬 + 그룹 내 병렬 실행 (ThreadPoolExecutor) | ✅ 완료 |
+| 병렬 실행 시 git 충돌 | **확정**: git worktree 기반 GitWorkflow — HEAD 불변, 병렬 안전 | ✅ 완료 |
+| 머지 충돌 자동 해결 | **확정**: MergeAgent (Haiku LLM 1회 호출/파일) | ✅ 완료 |
 | DB 전환 | JSON/YAML → SQLite or PostgreSQL | 데이터 복잡도 증가 시 |
-| CI/CD 통합 | GitHub Actions 유력 | Phase 3에서 검토 |
+| CI/CD 통합 | GitHub Actions 유력 | Phase 3 7단계에서 검토 |
