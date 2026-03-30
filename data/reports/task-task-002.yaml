@@ -1,0 +1,23 @@
+task_id: task-002
+title: Weekly Report 생성기 구현
+status: FAILED
+completed_at: '2026-03-30T14:26:30.490447+00:00'
+metrics:
+  retry_count: 3
+  total_tokens: 0
+  cost_usd: 0.0
+  test_count: 0
+  test_pass_first_try: false
+  reviewer_verdict: ''
+  time_elapsed_seconds: 351.6
+  failure_reasons:
+  - '테스트가 3회 모두 실패했습니다.
+
+    마지막 오류:
+
+    8 failed, 27 passed, 2 warnings in 0.04s'
+pipeline_result:
+  test_output_summary: ''
+  reviewer_feedback: ''
+  pr_number: null
+  branch: agent/task-002
