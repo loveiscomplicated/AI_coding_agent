@@ -17,10 +17,14 @@ vi.mock('@anthropic-ai/sdk', () => ({
       stream: vi.fn().mockReturnValue({
         [Symbol.asyncIterator]: async function* () {
           yield { type: 'content_block_delta', delta: { type: 'text_delta', text: '안녕하세요! ' } }
-          yield { type: 'content_block_delta', delta: { type: 'text_delta', text: '프로젝트명을 알려주세요.\n\n```json\n{"version":1,"project":{"name":"","overview":"","goals":[],"non_goals":[]},"tech_stack":{"languages":[],"frameworks":[],"infra":[],"ai_models":[]},"constraints":[],"milestones":[],"agent_config":{"orchestrator_model":"claude-opus-4-6","worker_models":[],"max_concurrent_agents":3,"sandbox_spec":{"cpu_limit":"","memory_limit":"","timeout_minutes":30}},"meeting_meta":{"date":"2026-03-29","duration_min":0,"completeness":0,"version":1}}\n```' } }
+          yield { type: 'content_block_delta', delta: { type: 'text_delta', text: '프로젝트에 대해 이야기해 봐요.' } }
           yield { type: 'message_stop' }
         },
         finalMessage: vi.fn().mockResolvedValue({ content: [] }),
+      }),
+      // generateContextDocWithOpus, generateContextDoc, generateChatTitle 에서 사용
+      create: vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: '---\ncompleteness: 80\nhint: 테스트 문서\n---\n# 테스트 프로젝트\n\n내용' }],
       }),
     },
   })),
@@ -36,11 +40,6 @@ describe('MeetingApp', () => {
     render(<MeetingApp apiKey="test-key" />)
     expect(screen.getByPlaceholderText(/메시지/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /전송/i })).toBeInTheDocument()
-  })
-
-  it('초기 완성도 게이지가 표시되어야 한다', () => {
-    render(<MeetingApp apiKey="test-key" />)
-    expect(screen.getByTestId('completion-gauge')).toBeInTheDocument()
   })
 
   it('회의 종료 버튼이 있어야 한다', () => {

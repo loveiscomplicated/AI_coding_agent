@@ -32,16 +32,43 @@ export function splitResponse(response: string): { text: string; rawJson: string
 
 /**
  * 스트리밍 도중 사용자에게 보여줄 텍스트를 반환합니다.
- * ```json 또는 <choice> 태그가 등장하는 순간 그 이전까지만 잘라냅니다.
- * 두 블록 모두 응답 끝에 오므로 이 방식이 안전합니다.
+ * ```json 이 등장하는 순간 그 이전까지만 잘라냅니다.
  */
 export function streamingVisibleText(accumulated: string): string {
   const jsonIdx = accumulated.indexOf(JSON_FENCE_START)
-  const choiceIdx = accumulated.indexOf('<choice>')
+  if (jsonIdx === -1) return accumulated
+  return accumulated.slice(0, jsonIdx).trimEnd()
+}
 
-  const cuts = [jsonIdx, choiceIdx].filter((i) => i !== -1)
-  if (cuts.length === 0) return accumulated
+export interface ContextDocMeta {
+  completeness: number
+  hint: string
+}
 
-  const cutAt = Math.min(...cuts)
-  return accumulated.slice(0, cutAt).trimEnd()
+/**
+ * Haiku가 생성한 컨텍스트 문서에서 YAML frontmatter와 마크다운 본문을 분리합니다.
+ *
+ * 문서 형식:
+ *   ---
+ *   completeness: 75
+ *   hint: "다음에 필요한 정보"
+ *   ---
+ *   # 마크다운 본문...
+ */
+export function parseContextDoc(doc: string): { meta: ContextDocMeta; body: string } {
+  const match = doc.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/)
+  if (!match) return { meta: { completeness: 0, hint: '' }, body: doc }
+
+  const fm = match[1]
+  const body = match[2].trim()
+  const completenessStr = (fm.match(/completeness:\s*(\d+)/) ?? [])[1] ?? '0'
+  const hintStr = ((fm.match(/hint:\s*["']?([^\n"']+)["']?/) ?? [])[1] ?? '').trim()
+
+  return {
+    meta: {
+      completeness: Math.min(100, Math.max(0, parseInt(completenessStr, 10))),
+      hint: hintStr,
+    },
+    body,
+  }
 }

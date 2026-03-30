@@ -53,10 +53,10 @@ export function MessageList({ messages, isStreaming, onChoice, onRegenerate }: P
         const isLast = i === messages.length - 1
         const isAssistant = msg.role === 'assistant'
 
-        // assistant 메시지에서 <choice> 태그 파싱: 마지막 메시지가 스트리밍 완료된 경우 선택지 버튼 표시
+        // assistant 마지막 메시지: 스트리밍 중에도 완성된 <choice> 태그는 버튼으로 표시
         // 그 외 assistant 메시지는 태그만 제거하고 내용은 유지
         const { text, choices } =
-          isAssistant && isLast && !isStreaming
+          isAssistant && isLast
             ? parseChoices(msg.content)
             : isAssistant
               ? { text: parseChoices(msg.content).text, choices: [] }
@@ -84,6 +84,7 @@ export function MessageList({ messages, isStreaming, onChoice, onRegenerate }: P
             {/* 선택지 버튼 */}
             {choices.length > 0 && onChoice && (() => {
               const selected = selectedChoices[i] ?? []
+              const canInteract = !isStreaming
               return (
                 <div className="grid grid-cols-1 gap-2 mt-2 pl-1 max-w-[80%]">
                   {choices.map((choice, j) => {
@@ -91,12 +92,16 @@ export function MessageList({ messages, isStreaming, onChoice, onRegenerate }: P
                     return (
                       <button
                         key={j}
+                        disabled={!canInteract}
                         className={`w-full rounded-full border px-3.5 py-1.5 text-sm transition-colors text-center ${
-                          isSelected
-                            ? 'border-blue-500 bg-blue-500 text-white'
-                            : 'border-blue-300 dark:border-blue-700 bg-white dark:bg-zinc-800 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-zinc-700 hover:border-blue-400'
+                          !canInteract
+                            ? 'border-blue-200 dark:border-blue-900 bg-white dark:bg-zinc-800 text-blue-300 dark:text-blue-700 cursor-default'
+                            : isSelected
+                              ? 'border-blue-500 bg-blue-500 text-white'
+                              : 'border-blue-300 dark:border-blue-700 bg-white dark:bg-zinc-800 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-zinc-700 hover:border-blue-400'
                         }`}
                         onClick={() => {
+                          if (!canInteract) return
                           setSelectedChoices((prev) => {
                             const cur = prev[i] ?? []
                             const next = cur.includes(choice)
@@ -110,7 +115,7 @@ export function MessageList({ messages, isStreaming, onChoice, onRegenerate }: P
                       </button>
                     )
                   })}
-                  {selected.length > 0 && (
+                  {selected.length > 0 && canInteract && (
                     <button
                       className="w-full rounded-full bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-1.5 text-sm font-medium transition-colors"
                       onClick={() => {

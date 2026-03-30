@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { MeetingRecord } from './types/meeting'
 import { MeetingStorage } from './storage/meetingStorage'
 import { MeetingApp } from './components/MeetingApp'
+import { ChatListPage } from './components/ChatListPage'
 
 const storage = new MeetingStorage()
 const API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY as string
@@ -21,6 +22,10 @@ export default function App() {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [chatKey, setChatKey] = useState(0)
   const [search, setSearch] = useState('')
+  const [showListPage, setShowListPage] = useState(false)
+  const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('darkMode')
     return saved ? saved === 'true' : window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -41,17 +46,18 @@ export default function App() {
   )
 
   const startNew = () => {
+    setShowListPage(false)
     setActiveId(null)
     setChatKey(k => k + 1)
   }
 
   const handleSelect = (record: MeetingRecord) => {
+    setShowListPage(false)
     setActiveId(record.id)
     setChatKey(k => k + 1)
   }
 
-  const handleDelete = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation()
+  const handleDelete = (id: string) => {
     storage.delete(id)
     setRecords(storage.list())
     if (activeId === id) {
@@ -59,6 +65,25 @@ export default function App() {
       setChatKey(k => k + 1)
     }
   }
+
+  const handleRename = (id: string, newTitle: string) => {
+    const record = records.find(r => r.id === id)
+    if (!record) return
+    const trimmed = newTitle.trim()
+    if (trimmed) {
+      storage.save({ ...record, title: trimmed, updatedAt: new Date().toISOString() })
+      setRecords(storage.list())
+    }
+    setRenamingId(null)
+  }
+
+  // 메뉴 외부 클릭 시 닫기
+  useEffect(() => {
+    if (!menuOpenId) return
+    const close = () => setMenuOpenId(null)
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [menuOpenId])
 
   const handleFinished = (record: MeetingRecord) => {
     setRecords(storage.list())
@@ -146,6 +171,23 @@ export default function App() {
           </div>
         </div>
 
+        {/* 채팅 목록 페이지 링크 */}
+        <div className="px-2 pb-1 flex-shrink-0">
+          <button
+            onClick={() => { setRecords(storage.list()); setShowListPage(true) }}
+            className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors ${
+              showListPage
+                ? 'bg-zinc-700 text-zinc-100'
+                : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100'
+            }`}
+          >
+            <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
+            채팅
+          </button>
+        </div>
+
         {/* 대화 목록 */}
         <div className="flex-1 overflow-y-auto px-2 space-y-0.5 pb-2">
           {filtered.length === 0 ? (
@@ -156,22 +198,79 @@ export default function App() {
             filtered.map(r => (
               <div
                 key={r.id}
-                onClick={() => handleSelect(r)}
-                className={`group flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${
+                onClick={() => {
+                  if (menuOpenId === r.id) { setMenuOpenId(null); return }
+                  if (renamingId === r.id) return
+                  handleSelect(r)
+                }}
+                className={`group relative flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${
                   activeId === r.id
                     ? 'bg-zinc-700 text-zinc-100'
                     : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100'
                 }`}
               >
-                <p className="flex-1 text-sm truncate">{r.title || '(제목 없음)'}</p>
-                <button
-                  onClick={e => handleDelete(r.id, e)}
-                  className="opacity-0 group-hover:opacity-100 p-0.5 rounded text-zinc-600 hover:text-red-400 transition-all flex-shrink-0"
-                >
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" />
-                  </svg>
-                </button>
+                {renamingId === r.id ? (
+                  <input
+                    autoFocus
+                    value={renameValue}
+                    onChange={e => setRenameValue(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') handleRename(r.id, renameValue)
+                      if (e.key === 'Escape') setRenamingId(null)
+                    }}
+                    onBlur={() => handleRename(r.id, renameValue)}
+                    onClick={e => e.stopPropagation()}
+                    className="flex-1 text-sm bg-zinc-600 text-zinc-100 rounded px-1.5 py-0.5 outline-none min-w-0"
+                  />
+                ) : (
+                  <p className="flex-1 text-sm truncate">{r.title || '(제목 없음)'}</p>
+                )}
+
+                {renamingId !== r.id && (
+                  <div className="relative flex-shrink-0">
+                    <button
+                      onClick={e => {
+                        e.stopPropagation()
+                        setMenuOpenId(menuOpenId === r.id ? null : r.id)
+                      }}
+                      onMouseDown={e => e.stopPropagation()}
+                      className="opacity-0 group-hover:opacity-100 p-0.5 rounded text-zinc-500 hover:text-zinc-200 transition-all"
+                    >
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                        <circle cx="5" cy="12" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="19" cy="12" r="1.5" />
+                      </svg>
+                    </button>
+
+                    {menuOpenId === r.id && (
+                      <div
+                        onMouseDown={e => e.stopPropagation()}
+                        className="absolute right-0 top-6 z-20 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl py-1 w-32"
+                      >
+                        <button
+                          onClick={e => {
+                            e.stopPropagation()
+                            setRenameValue(r.title || '')
+                            setRenamingId(r.id)
+                            setMenuOpenId(null)
+                          }}
+                          className="w-full text-left px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 transition-colors"
+                        >
+                          이름 수정
+                        </button>
+                        <button
+                          onClick={e => {
+                            e.stopPropagation()
+                            setMenuOpenId(null)
+                            handleDelete(r.id)
+                          }}
+                          className="w-full text-left px-3 py-1.5 text-sm text-red-400 hover:bg-zinc-700 transition-colors"
+                        >
+                          삭제
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ))
           )}
@@ -200,13 +299,28 @@ export default function App() {
 
       {/* ── 메인 ── */}
       <div className="flex-1 flex flex-col min-w-0">
-        <MeetingApp
-          key={chatKey}
-          apiKey={API_KEY}
-          initialRecord={activeRecord}
-          onFinished={handleFinished}
-          headerLeft={!sidebarOpen ? mainToggle : undefined}
-        />
+        {showListPage ? (
+          <ChatListPage
+            records={records}
+            onSelect={handleSelect}
+            onNew={startNew}
+            onRename={handleRename}
+            onDelete={handleDelete}
+          />
+        ) : (
+          <MeetingApp
+            key={chatKey}
+            apiKey={API_KEY}
+            initialRecord={activeRecord}
+            onFinished={handleFinished}
+            onTitleGenerated={() => setRecords(storage.list())}
+            onGoToList={() => {
+              setRecords(storage.list())
+              setShowListPage(true)
+            }}
+            headerLeft={!sidebarOpen ? mainToggle : undefined}
+          />
+        )}
       </div>
     </div>
   )

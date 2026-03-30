@@ -6,10 +6,14 @@ const CHOICE_TAG_RE = /<choice>([\s\S]*?)<\/choice>/g
  */
 export function parseChoices(content: string): { text: string; choices: string[] } {
   const choices: string[] = []
-  const text = content.replace(CHOICE_TAG_RE, (_, inner: string) => {
-    choices.push(inner.trim())
-    return ''
-  }).trim()
+  const text = content
+    .replace(CHOICE_TAG_RE, (_, inner: string) => {
+      choices.push(inner.trim())
+      return ''
+    })
+    // 스트리밍 중 끝에 잘린 불완전한 <choice> 태그 제거
+    .replace(/<choice>[^<]*$/, '')
+    .trim()
   return { text, choices }
 }
 

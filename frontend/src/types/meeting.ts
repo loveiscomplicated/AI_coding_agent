@@ -94,5 +94,7 @@ export interface MeetingRecord {
   updatedAt: string
   messages: ChatMessage[]
   context: MeetingContext
+  /** Haiku가 생성한 마크다운 컨텍스트 문서 (frontmatter + 본문) */
+  contextDoc?: string
   isFinished: boolean
 }
