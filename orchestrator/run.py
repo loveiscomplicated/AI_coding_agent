@@ -268,22 +268,38 @@ def main() -> int:
         return 1
 
     if args.id:
-        all_tasks = [t for t in all_tasks if t.id == args.id]
-        if not all_tasks:
+        if not any(t.id == args.id for t in all_tasks):
             print(_fail(f"태스크 ID '{args.id}' 를 찾을 수 없습니다."))
             return 1
+        # --id 모드: 지정 태스크를 pending으로 강제
+        for t in all_tasks:
+            if t.id == args.id:
+                t.status = TaskStatus.PENDING
+        target = next(t for t in all_tasks if t.id == args.id)
+        # 의존성 충족 여부 확인 (완료된 것만 허용)
+        done_ids = {t.id for t in all_tasks if t.status == TaskStatus.DONE}
+        unmet = [d for d in target.depends_on if d not in done_ids and d != target.id]
+        if unmet:
+            print(_fail(f"의존성 미충족: '{target.id}'의 선행 태스크가 완료되지 않았습니다: {unmet}"))
+            return 1
+        # 단독 실행을 위해 depends_on 없이 그룹 구성
+        import copy
+        solo = copy.copy(target)
+        solo.depends_on = []
+        pending = [target]
+        groups = [[solo]]
+    else:
+        pending = [t for t in all_tasks if t.status not in (TaskStatus.DONE, TaskStatus.FAILED)]
+        if not pending:
+            print(_ok("모든 태스크가 이미 완료되었습니다."))
+            return 0
 
-    pending = [t for t in all_tasks if t.status not in (TaskStatus.DONE, TaskStatus.FAILED)]
-    if not pending:
-        print(_ok("모든 태스크가 이미 완료되었습니다."))
-        return 0
-
-    # 의존성 그룹 계산
-    try:
-        groups = resolve_execution_groups(pending)
-    except ValueError as e:
-        print(_fail(f"의존성 오류: {e}"))
-        return 1
+        # 의존성 그룹 계산
+        try:
+            groups = resolve_execution_groups(pending)
+        except ValueError as e:
+            print(_fail(f"의존성 오류: {e}"))
+            return 1
 
     # 태스크 목록 출력
     print(f"\n{_BOLD}실행할 태스크{_RESET} ({len(pending)}개):\n")
