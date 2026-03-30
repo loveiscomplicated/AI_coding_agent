@@ -8,10 +8,16 @@ from .schemas import ToolResult
 # ── 읽기 ──────────────────────────────────────────
 
 
-def read_file(path: str) -> ToolResult:
-    """파일 전체 내용 읽기"""
+def read_file(path: str, start: int | None = None, end: int | None = None) -> ToolResult:
+    """파일 내용 읽기. start/end(1-indexed 줄 번호)를 지정하면 해당 범위만 반환한다."""
     try:
         content = Path(path).read_text(encoding="utf-8")
+        if start is not None or end is not None:
+            lines = content.splitlines()
+            s = (start - 1) if start is not None else 0
+            e = end if end is not None else len(lines)
+            sliced = lines[s:e]
+            content = "\n".join(f"{i+s+1}: {line}" for i, line in enumerate(sliced))
         return ToolResult(success=True, output=content)
     except FileNotFoundError:
         return ToolResult(success=False, output="", error=f"파일 없음: {path}")

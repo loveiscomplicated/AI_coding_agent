@@ -1,67 +1,24 @@
 task_id: task-005
 title: 태스크 의존성 계산기 구현
-status: COMPLETED
-completed_at: '2026-03-30T14:20:38.875255+00:00'
+status: FAILED
+completed_at: '2026-03-30T14:57:08.696000+00:00'
 metrics:
-  retry_count: 0
+  retry_count: 3
   total_tokens: 0
   cost_usd: 0.0
-  test_count: 24
-  test_pass_first_try: true
-  reviewer_verdict: APPROVED
-  time_elapsed_seconds: 80.3
-  failure_reasons: []
+  test_count: 0
+  test_pass_first_try: false
+  reviewer_verdict: ''
+  time_elapsed_seconds: 162.5
+  failure_reasons:
+  - '테스트가 3회 모두 실패했습니다.
+
+    마지막 오류:
+
+    이미지 ''ai-coding-agent-test-runner'' 없음. DockerTestRunner().build_image() 를 먼저
+    실행하세요.'
 pipeline_result:
-  test_output_summary: 24 passed, 1 warning in 0.02s
-  reviewer_feedback: '✅ 수락 기준 충족:
-
-    - 기준 1-4: resolve_order()가 Kahn''s algorithm으로 올바른 위상 정렬 수행
-
-    - 기준 5-6: has_cycle()이 순환 의존성을 정확히 감지
-
-    - 기준 7-8: validate_dependencies()가 존재하지 않는 ID 참조를 올바르게 검증
-
-
-    ✅ 구현 완전성:
-
-    - 모든 함수가 빈 리스트 등 엣지 케이스 처리
-
-    - Kahn''s algorithm 구현이 정확하고 효율적
-
-    - 오류 메시지가 명확하고 유용함
-
-
-    ✅ 코드 품질:
-
-    - 함수 이름과 docstring이 명확
-
-    - 알고리즘 선택이 적절 (위상 정렬에 Kahn''s algorithm 사용)
-
-    - 코드가 간결하고 읽기 쉬움
-
-
-    ✅ 테스트 품질:
-
-    - 24개 테스트 모두 통과
-
-    - 모든 수락 기준을 명시적으로 검증
-
-    - 엣지 케이스와 복잡한 시나리오 포함
-
-    - 테스트 이름이 명확하고 의도가 분명
-
-
-    개선 제안 (선택사항):
-
-    1. resolve_order()와 has_cycle()의 중복 로직을 헬퍼 함수로 추출 가능
-
-    2. 입력 데이터 구조 검증 추가 (필수 키 존재 확인)
-
-    3. 대규모 그래프 성능 테스트 추가 가능
-
-
-    그러나 이러한 사항들은 현재 요구사항 범위를 벗어나며, 구현은 모든 수락 기준을 완벽히 충족합니다.
-
-    ```'
+  test_output_summary: ''
+  reviewer_feedback: ''
   pr_number: null
   branch: agent/task-005

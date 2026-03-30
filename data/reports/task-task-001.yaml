@@ -1,24 +1,24 @@
 task_id: task-001
 title: 메트릭 수집기 구현
-status: COMPLETED
-completed_at: '2026-03-30T14:16:41.597449+00:00'
+status: FAILED
+completed_at: '2026-03-30T14:52:16.554487+00:00'
 metrics:
-  retry_count: 1
+  retry_count: 3
   total_tokens: 0
   cost_usd: 0.0
-  test_count: 34
+  test_count: 0
   test_pass_first_try: false
-  reviewer_verdict: APPROVED
-  time_elapsed_seconds: 216.7
-  failure_reasons: []
+  reviewer_verdict: ''
+  time_elapsed_seconds: 139.9
+  failure_reasons:
+  - '테스트가 3회 모두 실패했습니다.
+
+    마지막 오류:
+
+    이미지 ''ai-coding-agent-test-runner'' 없음. DockerTestRunner().build_image() 를 먼저
+    실행하세요.'
 pipeline_result:
-  test_output_summary: 34 passed, 1 warning in 0.04s
-  reviewer_feedback: "✅ 수락 기준 1-7 모두 충족:\n  - TaskReport를 YAML 파일로 저장/복원 정확함\n  -\
-    \ aggregate() 함수의 모든 계산 로직 정확함\n  - since 파라미터 필터링 동작 정확함\n  - reviewer_approved\
-    \ 집계 정확함\n\n✅ 코드 품질:\n  - 표준 라이브러리만 사용한 간결한 구현\n  - YAML 파싱/생성 로직이 현재 데이터 구조에\
-    \ 적합\n  - 파일 정렬로 일관된 순서 보장\n  - 부동소수점 연산 정확함\n\n✅ 에러 처리:\n  - 디렉토리 없음 시 빈 리스트\
-    \ 반환\n  - None 값 처리 적절\n  - ISO 형식 datetime 파싱 표준적\n\n✅ 테스트 품질:\n  - 34개 테스트 모두\
-    \ 통과\n  - 엣지 케이스 (빈 리스트, None, 경계값) 포함\n  - 통합 테스트로 전체 워크플로우 검증\n  - 외부 동작 중심의\
-    \ 테스트\n\n✅ 보안:\n  - Path Traversal 취약점 없음\n  - 파일 시스템 접근 안전함\n```"
+  test_output_summary: ''
+  reviewer_feedback: ''
   pr_number: null
   branch: agent/task-001

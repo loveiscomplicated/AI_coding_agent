@@ -1,100 +1,19 @@
 task_id: task-004
 title: execution_brief 생성기 구현
-status: COMPLETED
-completed_at: '2026-03-30T14:30:14.688931+00:00'
+status: FAILED
+completed_at: '2026-03-30T15:03:30.265103+00:00'
 metrics:
   retry_count: 0
   total_tokens: 0
   cost_usd: 0.0
-  test_count: 32
-  test_pass_first_try: true
-  reviewer_verdict: APPROVED
-  time_elapsed_seconds: 224.2
-  failure_reasons: []
+  test_count: 0
+  test_pass_first_try: false
+  reviewer_verdict: ''
+  time_elapsed_seconds: 130.3
+  failure_reasons:
+  - 'Implementer 실패: 최대 반복 횟수(20회)를 초과했습니다. 작업을 더 작게 나눠 시도해주세요.'
 pipeline_result:
-  test_output_summary: 32 passed, 1 warning in 0.02s
-  reviewer_feedback: '✅ 수락 기준 완벽 충족
-
-    - generate_brief([])는 "실행 기록 없음" 반환
-
-    - "## 실행 요약" 헤더 포함
-
-    - format_report_line()이 task_id, title, status 모두 포함
-
-    - COMPLETED/FAILED 태스크 별도 섹션 분리
-
-    - 핵심 지표 섹션에 성공률 포함
-
-    - since/until 파라미터로 completed_at 기준 필터링 동작
-
-
-    ✅ 구현 완전성
-
-    - 빈 리스트 처리: "실행 기록 없음" 반환
-
-    - 필터링 후 빈 결과도 동일하게 처리
-
-    - 0으로 나누기 방지 (total_count > 0 조건)
-
-    - 모든 완료/모든 실패 케이스 정상 처리
-
-    - None 체크를 통한 안전한 필터링
-
-
-    ✅ 보안
-
-    - SQL injection, path traversal, command injection 위험 없음
-
-    - 입력 검증 불필요 (TaskReport 객체 속성만 사용)
-
-
-    ✅ 코드 품질
-
-    - 순수 함수로 구현 (부작용 없음)
-
-    - 명확한 변수명과 주석
-
-    - 적절한 docstring
-
-    - 중복 코드 없음
-
-    - 낮은 복잡도
-
-
-    ✅ 테스트 품질
-
-    - 32개 테스트 모두 통과
-
-    - 각 수락 기준에 대한 명시적 테스트
-
-    - 엣지 케이스 포함 (빈 리스트, 필터링 결과 없음, 모두 완료/실패)
-
-    - 필터링 로직 상세 테스트 (since, until, 조합)
-
-    - 마크다운 형식 검증
-
-    - 외부 동작 검증 (블랙박스 테스트)
-
-
-    ✅ 계산 로직 검증
-
-    - 성공률: 완료된 태스크 수 / 전체 * 100 (올바름)
-
-    - 첫 시도 성공률: retry_count==0인 완료 / 전체 * 100 (올바름)
-
-    - 평균 소요 시간: 합계 / 전체 (올바름)
-
-    - round() 사용으로 정수 반올림 (정상)
-
-
-    ✅ 필터링 로직 검증
-
-    - since: completed_at < since 제외 (경계값 포함)
-
-    - until: completed_at > until 제외 (경계값 포함)
-
-    - 조합 사용 시 AND 로직 정상 동작
-
-    ```'
+  test_output_summary: ''
+  reviewer_feedback: ''
   pr_number: null
   branch: agent/task-004
