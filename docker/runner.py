@@ -55,12 +55,13 @@ class DockerTestRunner:
         이미 존재하면 캐시를 활용해 빠르게 완료된다.
         """
         _check_docker_available()
+        project_root = DOCKERFILE_DIR.parent
         result = subprocess.run(
             [
                 "docker", "build",
                 "-f", str(DOCKERFILE_DIR / "Dockerfile.test"),
                 "-t", self.image,
-                str(DOCKERFILE_DIR),
+                str(project_root),
             ],
             capture_output=True,
             text=True,
