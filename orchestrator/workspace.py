@@ -95,6 +95,7 @@ class WorkspaceManager:
 
         self._copy_target_files()
         self._copy_requirements()
+        self._copy_project_structure()
 
         logger.info("workspace 생성: %s", self._path)
         return self
@@ -170,3 +171,14 @@ class WorkspaceManager:
         req = self.repo_path / "requirements.txt"
         if req.exists():
             shutil.copy2(req, self.path / "requirements.txt")
+
+    def _copy_project_structure(self) -> None:
+        """PROJECT_STRUCTURE.md 가 있으면 workspace 루트에 복사한다.
+
+        에이전트가 태스크 시작 시 코드베이스 전체 구조를 즉시 파악할 수 있도록 한다.
+        파일이 없으면 조용히 건너뜀 (첫 태스크에서는 아직 생성 전일 수 있음).
+        """
+        structure_doc = self.repo_path / "PROJECT_STRUCTURE.md"
+        if structure_doc.exists():
+            shutil.copy2(structure_doc, self.path / "PROJECT_STRUCTURE.md")
+            logger.debug("PROJECT_STRUCTURE.md 복사 완료")

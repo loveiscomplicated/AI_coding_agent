@@ -211,6 +211,10 @@ class TDDPipeline:
 
 
 def _build_test_writer_prompt(task: Task, workspace: WorkspaceManager) -> str:
+    structure_hint = ""
+    if (workspace.path / "PROJECT_STRUCTURE.md").exists():
+        structure_hint = "\n`PROJECT_STRUCTURE.md` 로 전체 코드베이스 구조를 먼저 파악하세요.\n"
+
     return f"""## 태스크
 
 **{task.title}**
@@ -224,7 +228,7 @@ def _build_test_writer_prompt(task: Task, workspace: WorkspaceManager) -> str:
 ## 워크스페이스 경로
 
 `{workspace.path}`
-
+{structure_hint}
 `src/` 에 있는 기존 코드를 먼저 확인하고,
 `tests/` 에 이 태스크를 검증하는 pytest 테스트를 작성하세요.
 구현이 없으므로 테스트는 실행 시 실패해야 합니다 (Red 단계).
@@ -232,6 +236,10 @@ def _build_test_writer_prompt(task: Task, workspace: WorkspaceManager) -> str:
 
 
 def _build_implementer_prompt(task: Task, workspace: WorkspaceManager) -> str:
+    structure_hint = ""
+    if (workspace.path / "PROJECT_STRUCTURE.md").exists():
+        structure_hint = "\n`PROJECT_STRUCTURE.md` 로 전체 코드베이스 구조를 먼저 파악하고, 재사용 가능한 모듈이 있는지 확인하세요.\n"
+
     base = f"""## 태스크
 
 **{task.title}**
@@ -245,7 +253,7 @@ def _build_implementer_prompt(task: Task, workspace: WorkspaceManager) -> str:
 ## 워크스페이스 경로
 
 `{workspace.path}`
-
+{structure_hint}
 `tests/` 에 있는 테스트를 먼저 읽고,
 `src/` 에 테스트를 **모두** 통과하는 구현을 작성하세요.
 """

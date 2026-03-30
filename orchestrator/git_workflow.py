@@ -4,23 +4,26 @@ orchestrator/git_workflow.py — 브랜치 생성 · 커밋 · PR 생성
 파이프라인 성공 후 workspace 결과물을 실제 repo 에 반영하고
 GitHub PR 을 생성한다.
 
-흐름:
-  1. 현재 브랜치 저장
-  2. agent/task-{id} 브랜치 생성 (git checkout -b)
-  3. workspace → repo 파일 복사
-  4. git add + git commit
-  5. git push origin {branch}
-  6. 원래 브랜치로 복귀 (git checkout)
-  7. gh pr create
+흐름 (git worktree 기반, 병렬 실행 안전):
+  1. git worktree add  — 임시 worktree 생성 (main repo HEAD 불변)
+  2. workspace → worktree 파일 복사
+  3. git add + git commit  (worktree 안에서)
+  4. git push origin {branch} --force
+  5. git worktree remove  — 임시 디렉토리 정리
+  6. gh pr create
+
+병렬 안전성:
+  각 태스크가 독립 worktree 를 사용하므로 main repo 의 HEAD 나
+  working tree 를 변경하지 않는다. 여러 태스크가 동시에 실행돼도
+  git 상태 충돌이 발생하지 않는다.
 
 파일 복사 규칙:
-  workspace/src/**  → repo/**        (workspace/src/ 기준 상대 경로 유지)
-  workspace/tests/** → repo/tests/** (workspace/tests/ 기준 상대 경로 유지)
+  workspace/src/**   → worktree/**        (workspace/src/ 기준 상대 경로 유지)
+  workspace/tests/** → worktree/tests/**  (workspace/tests/ 기준 상대 경로 유지)
 
-사전 조건 (run.py 에서 _check_prerequisites() 로 검증):
+사전 조건 (run.py 에서 check_prerequisites() 로 검증):
   - git 명령어 사용 가능
   - gh 명령어 사용 가능 (GitHub CLI, `gh auth login` 완료 상태)
-  - repo 워킹 트리가 클린 (uncommitted 변경 없음)
 """
 
 from __future__ import annotations
@@ -28,6 +31,8 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import tempfile
+import time
 from pathlib import Path
 from textwrap import dedent
 
@@ -62,6 +67,9 @@ class GitWorkflow:
         """
         파이프라인 결과를 repo 에 반영하고 PR 을 생성한다.
 
+        git worktree 를 사용하므로 main repo 의 HEAD 를 변경하지 않는다.
+        여러 태스크가 동시에 호출해도 안전하다.
+
         Returns:
             생성된 PR 의 URL 문자열
 
@@ -69,94 +77,99 @@ class GitWorkflow:
             GitWorkflowError: git / gh 명령 실패 시
         """
         branch = task.branch_name
-        original = self._current_branch()
-        logger.info("[%s] git 워크플로우 시작 (branch: %s)", task.id, branch)
+        wt_path = Path(tempfile.mkdtemp(prefix=f"wt-{task.id}-{int(time.time())}-"))
+        logger.info("[%s] git 워크플로우 시작 (worktree: %s)", task.id, wt_path)
 
         try:
-            self._create_branch(branch)
-            changed = self._copy_workspace_to_repo(workspace)
-            self._git_add(changed)
-            self._git_commit(task)
-            self._git_push(branch)
-        except Exception:
-            # 브랜치 전환에 실패했더라도 원래 브랜치로 복귀 시도
-            self._safe_checkout(original)
-            raise
+            self._create_worktree(branch, wt_path)
+            changed = self._copy_workspace_to_worktree(workspace, wt_path)
+            self._wt_git_checked(wt_path, ["add"] + [str(f) for f in changed])
+            message = f"[agent] {task.title} ({task.id})\n\n자동 생성 by AI Coding Agent Pipeline"
+            self._wt_git_checked(wt_path, ["commit", "-m", message])
+            self._wt_git_checked(wt_path, ["push", "origin", branch, "--force"])
+        finally:
+            self._remove_worktree(wt_path)
 
-        self._safe_checkout(original)
         pr_url = self._create_pr(task, result)
         logger.info("[%s] PR 생성 완료: %s", task.id, pr_url)
         return pr_url
 
-    # ── git 작업 ─────────────────────────────────────────────────────────────
+    # ── git worktree 작업 ────────────────────────────────────────────────────
 
-    def _current_branch(self) -> str:
-        result = self._git(["rev-parse", "--abbrev-ref", "HEAD"])
-        return result.stdout.strip()
-
-    def _create_branch(self, branch: str) -> None:
-        """base_branch 에서 새 브랜치를 만든다. 이미 존재하면 삭제 후 재생성."""
-        # 혹시 이미 있으면 삭제 (이전 실패한 시도 잔재)
-        existing = self._git(["branch", "--list", branch])
-        if existing.stdout.strip():
-            self._git(["branch", "-D", branch])
-
-        self._git_checked(["checkout", "-b", branch])
-        logger.debug("브랜치 생성: %s", branch)
-
-    def _copy_workspace_to_repo(self, workspace: WorkspaceManager) -> list[Path]:
+    def _create_worktree(self, branch: str, wt_path: Path) -> None:
         """
-        workspace 파일을 repo 에 복사하고 변경된 파일 목록을 반환한다.
+        base_branch 를 시작점으로 임시 worktree 를 생성한다.
+        브랜치가 이미 존재하면 -B 로 강제 리셋한다.
+        """
+        result = self._git(
+            ["worktree", "add", "-B", branch, str(wt_path), self.base_branch]
+        )
+        if result.returncode != 0:
+            raise GitWorkflowError(
+                f"git worktree add 실패:\n{result.stderr.strip() or result.stdout.strip()}"
+            )
+        logger.debug("[worktree] 생성: %s → %s", branch, wt_path)
+
+    def _remove_worktree(self, wt_path: Path) -> None:
+        """worktree 디렉토리를 삭제하고 git 메타데이터를 정리한다."""
+        if wt_path.exists():
+            shutil.rmtree(wt_path, ignore_errors=True)
+        self._git(["worktree", "prune"])
+        logger.debug("[worktree] 제거: %s", wt_path)
+
+    def _copy_workspace_to_worktree(
+        self, workspace: WorkspaceManager, wt_path: Path
+    ) -> list[Path]:
+        """
+        workspace 파일을 worktree 에 복사하고 상대 경로 목록을 반환한다.
 
         복사 규칙:
-          workspace/src/a/b.py  →  repo/a/b.py
-          workspace/tests/x.py  →  repo/tests/x.py
+          workspace/src/a/b.py  →  worktree/a/b.py
+          workspace/tests/x.py  →  worktree/tests/x.py
         """
         changed: list[Path] = []
 
-        # src/ 아래 파일: workspace/src/ 기준 상대 경로를 repo 루트에 적용
         for src_file in sorted(workspace.src_dir.rglob("*")):
             if not src_file.is_file():
                 continue
             rel = src_file.relative_to(workspace.src_dir)
-            dest = self.repo_path / rel
+            dest = wt_path / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src_file, dest)
-            changed.append(dest.relative_to(self.repo_path))
-            logger.debug("복사: %s → %s", rel, dest)
+            changed.append(rel)
+            logger.debug("복사: src/%s → worktree/%s", rel, rel)
 
-        # tests/ 아래 파일: workspace/tests/ 기준 상대 경로를 repo/tests/ 에 적용
         for test_file in sorted(workspace.tests_dir.rglob("*")):
             if not test_file.is_file():
                 continue
             rel = test_file.relative_to(workspace.tests_dir)
-            dest = self.repo_path / "tests" / rel
+            dest = wt_path / "tests" / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(test_file, dest)
-            changed.append(dest.relative_to(self.repo_path))
-            logger.debug("복사: tests/%s → %s", rel, dest)
+            changed.append(Path("tests") / rel)
+            logger.debug("복사: tests/%s → worktree/tests/%s", rel, rel)
 
         return changed
 
-    def _git_add(self, files: list[Path]) -> None:
-        if not files:
-            return
-        self._git_checked(["add"] + [str(f) for f in files])
+    def _wt_git(self, wt_path: Path, args: list[str]) -> subprocess.CompletedProcess:
+        """worktree 디렉토리에서 git 명령을 실행한다."""
+        return subprocess.run(
+            ["git"] + args,
+            capture_output=True,
+            text=True,
+            cwd=str(wt_path),
+        )
 
-    def _git_commit(self, task: Task) -> None:
-        message = f"[agent] {task.title} ({task.id})\n\n자동 생성 by AI Coding Agent Pipeline"
-        self._git_checked(["commit", "-m", message])
-
-    def _git_push(self, branch: str) -> None:
-        # agent 브랜치는 파이프라인 전용이므로 --force로 재실행 시 충돌 방지
-        self._git_checked(["push", "origin", branch, "--force"])
-
-    def _safe_checkout(self, branch: str) -> None:
-        """예외를 삼키는 checkout (정리용)."""
-        try:
-            self._git(["checkout", branch])
-        except Exception as e:
-            logger.warning("checkout %s 실패 (무시): %s", branch, e)
+    def _wt_git_checked(
+        self, wt_path: Path, args: list[str]
+    ) -> subprocess.CompletedProcess:
+        """worktree 에서 git 실행 후 실패 시 GitWorkflowError."""
+        result = self._wt_git(wt_path, args)
+        if result.returncode != 0:
+            raise GitWorkflowError(
+                f"git {' '.join(args)} 실패:\n{result.stderr.strip() or result.stdout.strip()}"
+            )
+        return result
 
     # ── PR 생성 ───────────────────────────────────────────────────────────────
 
@@ -246,20 +259,6 @@ def check_prerequisites(repo_path: str | Path) -> list[str]:
         issues.append(
             "GitHub CLI(gh)를 찾을 수 없습니다. "
             "https://cli.github.com 에서 설치 후 `gh auth login` 을 실행하세요."
-        )
-
-    # repo 워킹 트리 클린?
-    r = subprocess.run(
-        ["git", "status", "--porcelain"],
-        capture_output=True,
-        text=True,
-        cwd=str(repo_path),
-    )
-    if r.returncode == 0 and r.stdout.strip():
-        issues.append(
-            "repo 에 uncommitted 변경이 있습니다. "
-            "파이프라인 실행 전 커밋하거나 스태시하세요.\n"
-            f"  {r.stdout.strip()}"
         )
 
     return issues

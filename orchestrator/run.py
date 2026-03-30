@@ -19,7 +19,9 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -28,6 +30,7 @@ from docker.runner import DockerTestRunner
 from hotline.notifier import DiscordNotifier
 from llm import LLMConfig, create_client
 from orchestrator.git_workflow import GitWorkflow, GitWorkflowError, check_prerequisites
+from orchestrator.merge_agent import MergeAgent
 from orchestrator.pipeline import TDDPipeline
 from orchestrator.report import build_report, save_report
 from orchestrator.task import Task, TaskStatus, load_tasks, save_tasks
@@ -213,6 +216,173 @@ def run_pipeline(
     }
 
 
+# ── 단일 태스크 실행 (스레드 안전) ────────────────────────────────────────────
+
+
+def _run_single_task(
+    task: Task,
+    pipeline: "TDDPipeline",
+    git: "GitWorkflow",
+    repo_path: Path,
+    no_pr: bool,
+    notifier,
+    save_lock: threading.Lock,
+    all_tasks: list[Task],
+    tasks_path: Path,
+) -> tuple[bool, str]:
+    """
+    태스크 하나를 실행하고 (succeeded, branch_name) 을 반환한다.
+
+    Thread-safe:
+    - WorkspaceManager 는 태스크마다 독립 디렉토리 사용
+    - GitWorkflow.run() 은 worktree 기반으로 main repo HEAD 불변
+    - save_lock 은 tasks.yaml 파일 쓰기 직렬화에 사용
+    """
+    print(f"\n{'─' * 60}")
+    print(f"{_BOLD}[{task.id}]{_RESET} {task.title}")
+    if task.depends_on:
+        print(f"  선행 완료: {', '.join(task.depends_on)}")
+    print(f"{'─' * 60}")
+
+    start_time = time.monotonic()
+    _notify(notifier, f"🚀 [{task.id}] \"{task.title}\" 시작")
+
+    with WorkspaceManager(task, repo_path, keep_on_failure=True) as ws:
+        print(_info(f"[{task.id}] TestWriter → Implementer → Docker → Reviewer ..."))
+        result = pipeline.run(task, ws)
+        elapsed = time.monotonic() - start_time
+
+        pr_url = ""
+        branch = ""
+        succeeded = False
+
+        if not result.succeeded:
+            print(_fail(f"[{task.id}] 파이프라인 실패: {result.failure_reason}"))
+            print(f"  workspace 보존됨: {ws.path}")
+            _notify_failure(notifier, task, result.failure_reason or "알 수 없음", elapsed)
+        else:
+            if result.test_result:
+                print(_ok(f"[{task.id}] 테스트: {result.test_result.summary}"))
+            if result.review:
+                icon = "✅" if result.review.approved else "⚠️"
+                print(f"  {icon} [{task.id}] 리뷰: {result.review.verdict} — {result.review.summary}")
+
+            if no_pr:
+                print(_warn(f"[{task.id}] --no-pr: PR 생성 건너뜀"))
+                task.status = TaskStatus.DONE
+                succeeded = True
+                _notify(notifier, f"✅ [{task.id}] \"{task.title}\" 완료! (⏱ {elapsed:.0f}s)")
+            else:
+                print(_info(f"[{task.id}] 브랜치 → 커밋 → 푸시 → PR ..."))
+                try:
+                    pr_url = git.run(task, ws, result)
+                    task.pr_url = pr_url
+                    task.status = TaskStatus.DONE
+                    branch = task.branch_name
+                    succeeded = True
+                    print(_ok(f"[{task.id}] PR: {pr_url}"))
+                    _notify(
+                        notifier,
+                        f"✅ [{task.id}] \"{task.title}\" 완료! PR: {pr_url}  (⏱ {elapsed:.0f}s)",
+                    )
+                except GitWorkflowError as e:
+                    print(_fail(f"[{task.id}] Git 워크플로우 실패: {e}"))
+                    _notify_failure(notifier, task, str(e), elapsed)
+
+        report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url)
+        report_path = save_report(report)
+        print(f"  [{task.id}] 리포트: {report_path}")
+
+        with save_lock:
+            save_tasks(all_tasks, tasks_path)
+
+    return succeeded, branch
+
+
+# ── 자동 머지 헬퍼 ────────────────────────────────────────────────────────────
+
+
+def _auto_merge_group(
+    branches: list[str],
+    base_branch: str,
+    repo_path: Path,
+    merge_agent: MergeAgent,
+) -> None:
+    """
+    그룹 내 agent 브랜치들을 base_branch 에 순서대로 머지하고 push 한다.
+
+    충돌 발생 시 MergeAgent(LLM)가 자동 해결한다.
+    머지 실패는 경고로 출력하고 계속 진행한다 (태스크 자체는 DONE).
+    """
+    import subprocess
+
+    def git(args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git"] + args, capture_output=True, text=True, cwd=str(repo_path)
+        )
+
+    # 현재 브랜치 저장 → base_branch 로 이동
+    original = git(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+    checkout = git(["checkout", base_branch])
+    if checkout.returncode != 0:
+        print(_warn(f"자동 머지 건너뜀 — {base_branch} checkout 실패: {checkout.stderr.strip()}"))
+        return
+
+    print(f"\n{_info(f'{base_branch} 자동 머지 시작 ({len(branches)}개 브랜치)')}")
+
+    for branch in branches:
+        merge_result = merge_agent.merge_branch(branch, base_branch=base_branch)
+        if merge_result.success:
+            resolved = merge_result.conflicts_resolved
+            if resolved:
+                print(_ok(f"머지: {branch}  (충돌 {resolved}개 자동 해결)"))
+            else:
+                print(_ok(f"머지: {branch}"))
+        else:
+            print(_warn(f"머지 실패: {branch} — {merge_result.error}"))
+
+    # StructureUpdater — 머지 완료 후 PROJECT_STRUCTURE.md 갱신
+    _update_project_structure(repo_path, git)
+
+    # base_branch push
+    push = git(["push", "origin", base_branch])
+    if push.returncode == 0:
+        print(_ok(f"{base_branch} push 완료"))
+    else:
+        print(_warn(f"{base_branch} push 실패: {push.stderr.strip()}"))
+
+    # 원래 브랜치로 복귀
+    git(["checkout", original])
+
+
+def _update_project_structure(repo_path: Path, git_fn) -> None:
+    """
+    StructureUpdater 로 PROJECT_STRUCTURE.md 를 갱신하고 커밋한다.
+
+    다음 그룹의 에이전트가 최신 코드베이스 구조를 볼 수 있도록
+    각 그룹 머지 완료 직후 호출한다.
+    """
+    try:
+        from structure.updater import update as structure_update
+
+        structure_update(
+            root=str(repo_path),
+            output="PROJECT_STRUCTURE.md",
+        )
+
+        git_fn(["add", "PROJECT_STRUCTURE.md"])
+        result = git_fn(["commit", "-m", "[auto] PROJECT_STRUCTURE.md 업데이트"])
+
+        if result.returncode == 0:
+            print(_ok("PROJECT_STRUCTURE.md 업데이트 완료"))
+        elif "nothing to commit" in (result.stdout + result.stderr):
+            pass  # 변경 없음 — 정상
+        else:
+            print(_warn(f"PROJECT_STRUCTURE.md 커밋 실패: {result.stderr.strip()}"))
+    except Exception as exc:
+        print(_warn(f"StructureUpdater 실패 (건너뜀): {exc}"))
+
+
 # ── Discord 헬퍼 ──────────────────────────────────────────────────────────────
 
 def _notify(notifier: DiscordNotifier | None, content: str) -> str | None:
@@ -349,63 +519,52 @@ def main() -> int:
 
     pipeline = TDDPipeline(agent_llm=haiku, implementer_llm=sonnet, test_runner=runner)
     git = GitWorkflow(repo_path, base_branch=args.base_branch)
+    merge_agent = MergeAgent(llm=haiku, repo_path=repo_path)
 
+    save_lock = threading.Lock()  # tasks.yaml 쓰기 직렬화
     success_count = 0
     fail_count = 0
+    max_parallel = args.parallel
 
     for group_idx, group in enumerate(groups, 1):
-        if len(groups) > 1:
-            print(f"\n{_BOLD}── 실행 그룹 {group_idx}/{len(groups)} ──{_RESET}")
+        parallel_str = f"  병렬 {min(max_parallel, len(group))}개" if max_parallel > 1 else ""
+        if len(groups) > 1 or max_parallel > 1:
+            print(f"\n{_BOLD}── 실행 그룹 {group_idx}/{len(groups)} ({len(group)}개 태스크{parallel_str}) ──{_RESET}")
 
-        for task in group:
-            print(f"\n{'─' * 60}")
-            print(f"{_BOLD}[{task.id}]{_RESET} {task.title}")
-            if task.depends_on:
-                print(f"  선행 완료: {', '.join(task.depends_on)}")
-            print(f"{'─' * 60}")
+        merged_branches: list[str] = []
 
-            start_time = time.monotonic()
-
-            with WorkspaceManager(task, repo_path, keep_on_failure=True) as ws:
-                print(_info("TestWriter → Implementer → Docker → Reviewer ..."))
-                result = pipeline.run(task, ws)
-                elapsed = time.monotonic() - start_time
-
-                pr_url = ""
-
-                if not result.succeeded:
-                    print(_fail(f"파이프라인 실패: {result.failure_reason}"))
-                    print(f"  workspace 보존됨: {ws.path}")
-                    fail_count += 1
-                else:
-                    if result.test_result:
-                        print(_ok(f"테스트: {result.test_result.summary}"))
-                    if result.review:
-                        icon = "✅" if result.review.approved else "⚠️"
-                        print(f"  {icon} 리뷰: {result.review.verdict} — {result.review.summary}")
-
-                    if args.no_pr:
-                        print(_warn("--no-pr 옵션: PR 생성 건너뜀"))
-                        task.status = TaskStatus.DONE
+        with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+            futures = {
+                executor.submit(
+                    _run_single_task,
+                    task, pipeline, git, repo_path,
+                    args.no_pr, None,  # notifier=None (CLI에서는 Discord 미사용)
+                    save_lock, all_tasks, tasks_path,
+                ): task
+                for task in group
+            }
+            for future in as_completed(futures):
+                task = futures[future]
+                try:
+                    succeeded, branch = future.result()
+                    if succeeded:
                         success_count += 1
+                        if branch:
+                            merged_branches.append(branch)
                     else:
-                        print(_info("브랜치 생성 → 커밋 → 푸시 → PR 생성 ..."))
-                        try:
-                            pr_url = git.run(task, ws, result)
-                            task.pr_url = pr_url
-                            task.status = TaskStatus.DONE
-                            print(_ok(f"PR: {pr_url}"))
-                            success_count += 1
-                        except GitWorkflowError as e:
-                            print(_fail(f"Git 워크플로우 실패: {e}"))
-                            fail_count += 1
+                        fail_count += 1
+                except Exception as exc:
+                    print(_fail(f"[{task.id}] 예외 발생: {exc}"))
+                    fail_count += 1
 
-                # Task Report 저장
-                report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url)
-                report_path = save_report(report)
-                print(f"  리포트: {report_path}")
-
-            save_tasks(all_tasks, tasks_path)
+        # ── 그룹 완료 후 base_branch 에 자동 머지 ─────────────────────────────
+        if merged_branches and not args.no_pr:
+            _auto_merge_group(
+                branches=merged_branches,
+                base_branch=args.base_branch,
+                repo_path=repo_path,
+                merge_agent=merge_agent,
+            )
 
     print(f"\n{'═' * 60}")
     print(f"{_BOLD}실행 완료{_RESET}  성공: {_GREEN}{success_count}{_RESET}  실패: {_RED}{fail_count}{_RESET}")
@@ -431,6 +590,9 @@ def _parse_args() -> argparse.Namespace:
                         help="확인 없이 바로 시작")
     parser.add_argument("--no-pr", action="store_true",
                         help="PR 생성 없이 로컬 실행")
+    parser.add_argument("--parallel", "-p", type=int, default=1,
+                        metavar="N",
+                        help="그룹 내 태스크 병렬 실행 수 (기본값: 1 = 순차)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="DEBUG 로그 출력")
     return parser.parse_args()
