@@ -1,61 +1,212 @@
 tasks:
 - id: task-001
-  title: 정수 계산기 구현
-  description: '두 정수를 받아 사칙연산(덧셈, 뺄셈, 곱셈, 나눗셈)을 수행하는
+  title: 메트릭 수집기 구현
+  description: |
+    metrics/collector.py 모듈을 구현한다.
 
-    Calculator 클래스를 구현한다.
+    Task Report를 YAML 파일로 저장/로드하고, 여러 Report를 집계하는
+    순수 Python 모듈이다. 외부 라이브러리 없이 표준 라이브러리(dataclasses, pathlib,
+    datetime, yaml)만 사용한다.
 
-    나눗셈 시 0으로 나누는 경우 ValueError 를 발생시킨다.
-
-    '
+    구현할 요소:
+    - TaskReport dataclass: task_id(str), title(str), status(str),
+      completed_at(str), retry_count(int), test_count(int),
+      test_pass_first_try(bool), reviewer_verdict(str),
+      time_elapsed_seconds(float), failure_reasons(list[str]),
+      reviewer_feedback(str) 필드를 가진다.
+    - save_report(report: TaskReport, reports_dir: str = "data/reports") -> Path:
+      task-{task_id}.yaml 파일명으로 저장하고 경로를 반환한다.
+    - load_reports(reports_dir: str = "data/reports", since: datetime | None = None) -> list[TaskReport]:
+      디렉토리 내 모든 YAML을 로드한다. since가 주어지면 completed_at이
+      그 이후인 것만 반환한다.
+    - aggregate(reports: list[TaskReport]) -> dict:
+      total, completed, failed, success_rate(%), first_try_rate(%),
+      avg_elapsed_seconds, total_retries, reviewer_approved 키를 반환한다.
   acceptance_criteria:
-  - Calculator().add(2, 3) 은 5 를 반환한다
-  - Calculator().subtract(10, 4) 는 6 을 반환한다
-  - Calculator().multiply(3, 4) 는 12 를 반환한다
-  - Calculator().divide(10, 2) 는 5.0 을 반환한다
-  - Calculator().divide(1, 0) 은 ValueError 를 발생시킨다
-  target_files: []
+  - TaskReport 인스턴스를 save_report()로 저장하면 지정 디렉토리에 YAML 파일이 생성된다
+  - load_reports()가 저장된 YAML 파일들을 TaskReport 리스트로 정확히 복원한다
+  - aggregate([])는 total=0, success_rate=0, first_try_rate=0을 반환한다
+  - aggregate()는 status=="COMPLETED"인 항목만 completed로 집계한다
+  - aggregate()의 success_rate는 completed/total*100 (정수 반올림)이다
+  - since 파라미터로 completed_at 기준 필터링이 동작한다
+  - reviewer_verdict=="APPROVED"인 항목 수를 reviewer_approved로 반환한다
+  target_files:
+  - metrics/__init__.py
+  - metrics/collector.py
   test_framework: pytest
-  status: done
+  depends_on: []
+  status: pending
   retry_count: 0
   last_error: ''
   pr_url: ''
   failure_reason: ''
+
 - id: task-002
-  title: 텍스트 단어 빈도 분석기 구현
-  description: '문자열을 입력받아 각 단어의 등장 횟수를 딕셔너리로 반환하는
+  title: Weekly Report 생성기 구현
+  description: |
+    reports/weekly.py 모듈을 구현한다.
 
-    word_frequency(text: str) 함수를 구현한다.
+    TaskReport 리스트를 받아 ISO 주차 기준 주간 마크다운 보고서를 생성하는
+    순수 함수 모듈이다. LLM을 호출하지 않고 데이터만으로 보고서를 구성한다.
 
-    대소문자를 구분하지 않으며, 구두점은 무시한다.
+    구현할 요소:
+    - get_week_range(year: int, week: int) -> tuple[datetime, datetime]:
+      ISO 주차의 월요일 00:00 UTC ~ 일요일 23:59:59 UTC를 반환한다.
+    - filter_by_week(reports: list[TaskReport], year: int, week: int) -> list[TaskReport]:
+      completed_at 기준으로 해당 주의 Report만 필터링한다.
+    - collect_stats(reports: list[TaskReport]) -> dict:
+      total, completed, failed, success_rate, first_try_rate, avg_elapsed_seconds,
+      total_retries 키를 포함한 집계 딕셔너리를 반환한다.
+    - generate_report(reports: list[TaskReport], year: int, week: int) -> str:
+      마크다운 문자열을 반환한다. 제목 형식은 "# 주간 보고서: {year}년 {week}주차"이며
+      집계 지표와 태스크 목록을 포함한다.
 
-    '
+    주의: TaskReport는 metrics.collector에서 임포트한다.
   acceptance_criteria:
-  - 'word_frequency(''hello world hello'') 는 {''hello'': 2, ''world'': 1} 을 반환한다'
-  - 대소문자를 구분하지 않는다 (Hello 와 hello 는 같은 단어)
-  - 구두점(마침표, 쉼표 등)은 단어에 포함되지 않는다
-  - 빈 문자열 입력 시 빈 딕셔너리를 반환한다
-  target_files: []
+  - get_week_range(2026, 1)의 첫 번째 값은 월요일(weekday==0)이다
+  - get_week_range(2026, 1)의 두 번째 값은 일요일(weekday==6)이다
+  - filter_by_week는 해당 주 내 completed_at을 가진 report만 반환한다
+  - collect_stats([])는 total=0, success_rate=0을 반환한다
+  - collect_stats는 COMPLETED 상태 항목을 정확히 집계한다
+  - generate_report()의 반환값은 "# 주간 보고서" 문자열로 시작한다
+  - generate_report()의 반환값에 year와 week 숫자가 포함된다
+  - generate_report([], 2026, 15)는 완료된 태스크 없음을 명시한다
+  target_files:
+  - reports/__init__.py
+  - reports/weekly.py
   test_framework: pytest
-  status: done
-  retry_count: 1
-  last_error: "..............F................                                   \
-    \       [100%]\n=================================== FAILURES ===================================\n\
-    ____________ TestWordFrequencyPunctuation.test_apostrophe_handling _____________\n\
-    tests/test_word_frequency.py:96: in test_apostrophe_handling\n    assert 'dont'\
-    \ in result or \"don't\" in result\nE   assert ('dont' in {'can': 1, 'don': 1,\
-    \ 't': 2} or \"don't\" in {'can': 1, 'don': 1, 't': 2})\n===============================\
-    \ warnings summary ===============================\n../usr/local/lib/python3.12/site-packages/_pytest/cacheprovider.py:475\n\
-    \  /usr/local/lib/python3.12/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning:\
-    \ could not create cache path /workspace/.pytest_cache/v/cache/nodeids: [Errno\
-    \ 30] Read-only file system: '/workspace/pytest-cache-files-4jljzu93'\n    config.cache.set(\"\
-    cache/nodeids\", sorted(self.cached_nodeids))\n\n../usr/local/lib/python3.12/site-packages/_pytest/cacheprovider.py:429\n\
-    \  /usr/local/lib/python3.12/site-packages/_pytest/cacheprovider.py:429: PytestCacheWarning:\
-    \ could not create cache path /workspace/.pytest_cache/v/cache/lastfailed: [Errno\
-    \ 30] Read-only file system: '/workspace/pytest-cache-files-46pajb25'\n    config.cache.set(\"\
-    cache/lastfailed\", self.lastfailed)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n\
-    =========================== short test summary info ============================\n\
-    FAILED tests/test_word_frequency.py::TestWordFrequencyPunctuation::test_apostrophe_handling\n\
-    1 failed, 30 passed, 2 warnings in 0.03s\n"
+  depends_on:
+  - task-001
+  status: pending
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
+
+- id: task-003
+  title: PROJECT_STRUCTURE.md 생성기 구현
+  description: |
+    structure/updater.py 모듈을 구현한다.
+
+    Python 표준 라이브러리의 ast 모듈로 소스 코드를 파싱하여
+    PROJECT_STRUCTURE.md 파일을 자동 생성하는 모듈이다.
+
+    구현할 요소:
+    - parse_module(file_path: Path) -> dict:
+      파이썬 파일을 ast로 파싱하여 {"path": str, "classes": list, "functions": list}
+      구조를 반환한다. 각 class는 {"name": str, "methods": list[str], "docstring": str | None},
+      각 function은 {"name": str, "signature": str, "docstring": str | None}를 포함한다.
+      최상위 함수와 클래스만 추출한다.
+    - scan_directory(root: Path, exclude_dirs: list[str] | None = None) -> list[dict]:
+      디렉토리를 재귀 탐색하여 .py 파일들의 parse_module 결과 리스트를 반환한다.
+      exclude_dirs 기본값은 ["__pycache__", ".git", "venv", ".venv", "node_modules"]이다.
+    - generate_markdown(modules: list[dict], title: str = "PROJECT_STRUCTURE") -> str:
+      모듈 목록을 마크다운 문자열로 변환한다.
+      형식: 파일 경로를 헤더로, 클래스/함수를 목록으로 표시한다.
+    - update(root: str = ".", output: str = "PROJECT_STRUCTURE.md") -> Path:
+      scan_directory → generate_markdown → 파일 저장 후 경로를 반환한다.
+  acceptance_criteria:
+  - parse_module()은 클래스 이름과 메서드 이름 목록을 정확히 추출한다
+  - parse_module()은 최상위 함수의 이름과 docstring 첫 줄을 추출한다
+  - parse_module()은 구문 오류 있는 파일에서 빈 dict(classes=[], functions=[])를 반환한다
+  - scan_directory()는 .py 확장자 파일만 처리한다
+  - scan_directory()는 exclude_dirs에 지정된 디렉토리를 건너뛴다
+  - generate_markdown()의 반환값은 "# PROJECT_STRUCTURE" 헤더를 포함한다
+  - generate_markdown()에 모듈이 없으면 "(파이썬 파일 없음)"을 포함한다
+  - update()는 파일을 생성하고 존재하는 Path를 반환한다
+  target_files:
+  - structure/__init__.py
+  - structure/updater.py
+  test_framework: pytest
+  depends_on: []
+  status: pending
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
+
+- id: task-004
+  title: execution_brief 생성기 구현
+  description: |
+    reports/execution_brief.py 모듈을 구현한다.
+
+    TaskReport 리스트를 받아 회의 시작 시 Opus 시스템 프롬프트에 주입할
+    실행 요약 마크다운을 생성하는 순수 함수 모듈이다. LLM을 호출하지 않는다.
+
+    구현할 요소:
+    - format_report_line(report: TaskReport) -> str:
+      "- {task_id}: {title} — {status}, 소요: {time_elapsed_seconds}s, 재시도: {retry_count}회"
+      형식의 문자열을 반환한다.
+    - generate_brief(reports: list[TaskReport],
+                     since: datetime | None = None,
+                     until: datetime | None = None) -> str:
+      마크다운 실행 요약을 반환한다. since/until로 기간 필터링을 지원한다.
+      반환 형식:
+        ## 실행 요약
+        **완료된 태스크** (N개)
+        - task-xxx: 제목 — COMPLETED, 소요: Xs, 재시도: N회
+        **실패한 태스크** (N개)
+        - ...
+        **핵심 지표**
+        - 전체 성공률: N%
+        - 첫 시도 성공률: N%
+        - 평균 소요 시간: Xs
+      보고서가 없으면 "실행 기록 없음"을 반환한다.
+
+    주의: TaskReport는 metrics.collector에서 임포트한다.
+  acceptance_criteria:
+  - generate_brief([])는 "실행 기록 없음" 문자열을 반환한다
+  - generate_brief(reports)의 반환값은 "## 실행 요약" 헤더를 포함한다
+  - format_report_line()은 task_id, title, status를 모두 포함한 문자열을 반환한다
+  - generate_brief()는 COMPLETED 태스크와 FAILED 태스크를 별도 섹션으로 분리한다
+  - generate_brief()의 핵심 지표 섹션에 성공률 숫자가 포함된다
+  - since 파라미터로 completed_at 기준 필터링이 동작한다
+  - until 파라미터로 completed_at 기준 필터링이 동작한다
+  target_files:
+  - reports/execution_brief.py
+  test_framework: pytest
+  depends_on:
+  - task-001
+  status: pending
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
+
+- id: task-005
+  title: 태스크 의존성 계산기 구현
+  description: |
+    orchestrator/dependency.py 모듈을 구현한다.
+
+    태스크 간 depends_on 관계를 분석하여 실행 순서를 계산하는 모듈이다.
+    Kahn's algorithm으로 위상 정렬을 수행한다.
+
+    구현할 요소:
+    - resolve_order(tasks: list[dict]) -> list[list[str]]:
+      각 task는 {"id": str, "depends_on": list[str]} 구조를 가진다.
+      반환값은 병렬 실행 가능한 그룹의 리스트이다.
+      예: [["task-001", "task-003", "task-005"], ["task-002", "task-004"]]
+      의미: 첫 번째 그룹을 모두 완료한 후 두 번째 그룹을 실행한다.
+    - has_cycle(tasks: list[dict]) -> bool:
+      의존성 그래프에 순환이 있으면 True를 반환한다.
+    - validate_dependencies(tasks: list[dict]) -> list[str]:
+      존재하지 않는 태스크 ID를 depends_on에 참조하는 경우 오류 메시지 리스트를 반환한다.
+      문제 없으면 빈 리스트를 반환한다.
+  acceptance_criteria:
+  - depends_on이 모두 빈 리스트인 태스크들은 하나의 그룹으로 반환된다
+  - task-002가 task-001에 의존하면 task-001 그룹이 먼저 반환된다
+  - 의존성이 없는 task-001, task-003, task-005는 같은 그룹에 포함된다
+  - task-002(→task-001)와 task-004(→task-001)는 task-001 이후 같은 그룹에 포함된다
+  - has_cycle()은 순환 의존성이 없으면 False를 반환한다
+  - has_cycle()은 A→B→A 같은 순환 의존성에 대해 True를 반환한다
+  - validate_dependencies()는 존재하지 않는 ID를 참조하면 오류 메시지를 반환한다
+  - validate_dependencies()는 의존성이 올바르면 빈 리스트를 반환한다
+  target_files:
+  - orchestrator/dependency.py
+  test_framework: pytest
+  depends_on: []
+  status: pending
+  retry_count: 0
+  last_error: ''
   pr_url: ''
   failure_reason: ''
