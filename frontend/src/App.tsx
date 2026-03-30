@@ -3,6 +3,7 @@ import { MeetingRecord } from './types/meeting'
 import { MeetingStorage } from './storage/meetingStorage'
 import { MeetingApp } from './components/MeetingApp'
 import { ChatListPage } from './components/ChatListPage'
+import { DashboardPage } from './components/DashboardPage'
 
 const storage = new MeetingStorage()
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000') as string
@@ -34,6 +35,7 @@ export default function App() {
   const [chatKey, setChatKey] = useState(0)
   const [search, setSearch] = useState('')
   const [showListPage, setShowListPage] = useState(false)
+  const [showDashboard, setShowDashboard] = useState(false)
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -237,10 +239,10 @@ export default function App() {
           </div>
         </div>
 
-        {/* 채팅 목록 페이지 링크 */}
-        <div className="px-2 pb-1 flex-shrink-0">
+        {/* 네비게이션 링크 */}
+        <div className="px-2 pb-1 flex-shrink-0 space-y-0.5">
           <button
-            onClick={() => { setRecords(storage.list()); setShowListPage(true) }}
+            onClick={() => { setRecords(storage.list()); setShowListPage(true); setShowDashboard(false) }}
             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors ${
               showListPage
                 ? 'bg-zinc-700 text-zinc-100'
@@ -251,6 +253,20 @@ export default function App() {
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
             </svg>
             채팅
+          </button>
+          <button
+            onClick={() => { setShowDashboard(true); setShowListPage(false); setActiveId(null) }}
+            className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors ${
+              showDashboard
+                ? 'bg-zinc-700 text-zinc-100'
+                : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100'
+            }`}
+          >
+            <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+              <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+            </svg>
+            대시보드
           </button>
         </div>
 
@@ -370,7 +386,9 @@ export default function App() {
 
       {/* ── 메인 ── */}
       <div className="flex-1 flex flex-col min-w-0">
-        {showListPage ? (
+        {showDashboard ? (
+          <DashboardPage />
+        ) : showListPage ? (
           <ChatListPage
             records={records}
             onSelect={handleSelect}
