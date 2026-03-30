@@ -1,0 +1,43 @@
+# AI Coding Agent — 태스크 정의 샘플
+#
+# 실행 방법:
+#   python -m orchestrator.run --tasks data/tasks.yaml --repo . --no-pr --yes
+#
+# 각 태스크 필드:
+#   id                  : 고유 식별자 (브랜치명 agent/{id} 에 사용됨)
+#   title               : 짧은 제목
+#   description         : 태스크 상세 설명
+#   acceptance_criteria : 수락 기준 목록 (테스트로 검증됨)
+#   target_files        : workspace 에 복사할 기존 소스 파일 목록 (없으면 빈 배열)
+#   status              : pending | writing_tests | implementing | … | done | failed
+#                         (파이프라인이 자동으로 갱신, 직접 수정 불필요)
+
+tasks:
+  - id: task-001
+    title: "정수 계산기 구현"
+    description: |
+      두 정수를 받아 사칙연산(덧셈, 뺄셈, 곱셈, 나눗셈)을 수행하는
+      Calculator 클래스를 구현한다.
+      나눗셈 시 0으로 나누는 경우 ValueError 를 발생시킨다.
+    acceptance_criteria:
+      - "Calculator().add(2, 3) 은 5 를 반환한다"
+      - "Calculator().subtract(10, 4) 는 6 을 반환한다"
+      - "Calculator().multiply(3, 4) 는 12 를 반환한다"
+      - "Calculator().divide(10, 2) 는 5.0 을 반환한다"
+      - "Calculator().divide(1, 0) 은 ValueError 를 발생시킨다"
+    target_files: []
+    status: pending
+
+  - id: task-002
+    title: "텍스트 단어 빈도 분석기 구현"
+    description: |
+      문자열을 입력받아 각 단어의 등장 횟수를 딕셔너리로 반환하는
+      word_frequency(text: str) 함수를 구현한다.
+      대소문자를 구분하지 않으며, 구두점은 무시한다.
+    acceptance_criteria:
+      - "word_frequency('hello world hello') 는 {'hello': 2, 'world': 1} 을 반환한다"
+      - "대소문자를 구분하지 않는다 (Hello 와 hello 는 같은 단어)"
+      - "구두점(마침표, 쉼표 등)은 단어에 포함되지 않는다"
+      - "빈 문자열 입력 시 빈 딕셔너리를 반환한다"
+    target_files: []
+    status: pending

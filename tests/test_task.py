@@ -1,0 +1,226 @@
+"""
+tests/test_task.py
+
+orchestrator/task.py 단위 테스트.
+외부 의존성 없음 — tmp_path fixture로 실제 YAML I/O 검증.
+
+실행:
+    pytest tests/test_task.py -v
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+import pytest
+import yaml
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+from orchestrator.task import Task, TaskStatus, load_tasks, save_tasks
+
+
+# ── 픽스처 ────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def minimal_task_dict():
+    return {
+        "id": "task-001",
+        "title": "사용자 인증 구현",
+        "description": "JWT 기반 로그인 API를 구현한다.",
+        "acceptance_criteria": [
+            "올바른 자격증명으로 로그인 시 JWT 반환",
+            "잘못된 자격증명으로 401 반환",
+        ],
+        "target_files": ["src/auth.py"],
+        "test_framework": "pytest",
+    }
+
+
+@pytest.fixture
+def sample_yaml(tmp_path, minimal_task_dict):
+    path = tmp_path / "tasks.yaml"
+    path.write_text(
+        yaml.dump({"tasks": [minimal_task_dict]}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    return path
+
+
+# ── Task.from_dict ────────────────────────────────────────────────────────────
+
+
+class TestTaskFromDict:
+    def test_loads_required_fields(self, minimal_task_dict):
+        task = Task.from_dict(minimal_task_dict)
+        assert task.id == "task-001"
+        assert task.title == "사용자 인증 구현"
+        assert len(task.acceptance_criteria) == 2
+        assert task.target_files == ["src/auth.py"]
+
+    def test_default_status_is_pending(self, minimal_task_dict):
+        task = Task.from_dict(minimal_task_dict)
+        assert task.status == TaskStatus.PENDING
+
+    def test_default_test_framework_is_pytest(self):
+        task = Task.from_dict(
+            {
+                "id": "x",
+                "title": "t",
+                "description": "d",
+                "acceptance_criteria": ["c"],
+            }
+        )
+        assert task.test_framework == "pytest"
+
+    def test_restores_non_pending_status(self, minimal_task_dict):
+        minimal_task_dict["status"] = "implementing"
+        task = Task.from_dict(minimal_task_dict)
+        assert task.status == TaskStatus.IMPLEMENTING
+
+    def test_restores_retry_count_and_last_error(self, minimal_task_dict):
+        minimal_task_dict["retry_count"] = 2
+        minimal_task_dict["last_error"] = "AssertionError: ..."
+        task = Task.from_dict(minimal_task_dict)
+        assert task.retry_count == 2
+        assert task.last_error == "AssertionError: ..."
+
+
+# ── Task 프로퍼티 ─────────────────────────────────────────────────────────────
+
+
+class TestTaskProperties:
+    def test_branch_name(self, minimal_task_dict):
+        task = Task.from_dict(minimal_task_dict)
+        assert task.branch_name == "agent/task-001"
+
+    def test_is_done_for_done_status(self, minimal_task_dict):
+        task = Task.from_dict(minimal_task_dict)
+        task.status = TaskStatus.DONE
+        assert task.is_done is True
+
+    def test_is_done_for_failed_status(self, minimal_task_dict):
+        task = Task.from_dict(minimal_task_dict)
+        task.status = TaskStatus.FAILED
+        assert task.is_done is True
+
+    def test_is_not_done_for_in_progress(self, minimal_task_dict):
+        task = Task.from_dict(minimal_task_dict)
+        task.status = TaskStatus.IMPLEMENTING
+        assert task.is_done is False
+
+    def test_acceptance_criteria_text(self, minimal_task_dict):
+        task = Task.from_dict(minimal_task_dict)
+        text = task.acceptance_criteria_text()
+        assert "1." in text
+        assert "2." in text
+        assert "JWT" in text
+
+
+# ── Task.to_dict 왕복 ─────────────────────────────────────────────────────────
+
+
+class TestTaskRoundTrip:
+    def test_to_dict_and_back(self, minimal_task_dict):
+        original = Task.from_dict(minimal_task_dict)
+        original.status = TaskStatus.REVIEWING
+        original.retry_count = 1
+        original.last_error = "some error"
+        original.pr_url = "https://github.com/owner/repo/pull/42"
+
+        restored = Task.from_dict(original.to_dict())
+
+        assert restored.id == original.id
+        assert restored.status == original.status
+        assert restored.retry_count == original.retry_count
+        assert restored.last_error == original.last_error
+        assert restored.pr_url == original.pr_url
+
+
+# ── load_tasks ────────────────────────────────────────────────────────────────
+
+
+class TestLoadTasks:
+    def test_loads_single_task(self, sample_yaml):
+        tasks = load_tasks(sample_yaml)
+        assert len(tasks) == 1
+        assert tasks[0].id == "task-001"
+
+    def test_loads_multiple_tasks(self, tmp_path, minimal_task_dict):
+        second = dict(minimal_task_dict, id="task-002", title="두 번째 태스크")
+        path = tmp_path / "tasks.yaml"
+        path.write_text(
+            yaml.dump({"tasks": [minimal_task_dict, second]}, allow_unicode=True),
+            encoding="utf-8",
+        )
+        tasks = load_tasks(path)
+        assert len(tasks) == 2
+        assert tasks[1].id == "task-002"
+
+    def test_raises_if_file_not_found(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            load_tasks(tmp_path / "nonexistent.yaml")
+
+    def test_raises_if_tasks_key_missing(self, tmp_path):
+        path = tmp_path / "bad.yaml"
+        path.write_text("something: []\n", encoding="utf-8")
+        with pytest.raises(KeyError, match="tasks"):
+            load_tasks(path)
+
+    def test_raises_if_required_field_missing(self, tmp_path):
+        path = tmp_path / "bad.yaml"
+        path.write_text(
+            yaml.dump({"tasks": [{"id": "x", "title": "t"}]}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="필수 필드 누락"):
+            load_tasks(path)
+
+    def test_raises_if_acceptance_criteria_not_list(self, tmp_path):
+        path = tmp_path / "bad.yaml"
+        path.write_text(
+            yaml.dump({
+                "tasks": [{
+                    "id": "x",
+                    "title": "t",
+                    "description": "d",
+                    "acceptance_criteria": "string instead of list",
+                }]
+            }),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="리스트여야"):
+            load_tasks(path)
+
+
+# ── save_tasks ────────────────────────────────────────────────────────────────
+
+
+class TestSaveTasks:
+    def test_saves_and_reloads(self, tmp_path, minimal_task_dict):
+        task = Task.from_dict(minimal_task_dict)
+        task.status = TaskStatus.DONE
+        task.pr_url = "https://github.com/owner/repo/pull/1"
+
+        path = tmp_path / "output" / "tasks.yaml"  # 중간 디렉토리 없음
+        save_tasks([task], path)
+
+        reloaded = load_tasks(path)
+        assert len(reloaded) == 1
+        assert reloaded[0].status == TaskStatus.DONE
+        assert reloaded[0].pr_url == task.pr_url
+
+    def test_creates_parent_dirs(self, tmp_path):
+        task = Task.from_dict(
+            {
+                "id": "x",
+                "title": "t",
+                "description": "d",
+                "acceptance_criteria": ["c"],
+            }
+        )
+        deep_path = tmp_path / "a" / "b" / "c" / "tasks.yaml"
+        save_tasks([task], deep_path)
+        assert deep_path.exists()

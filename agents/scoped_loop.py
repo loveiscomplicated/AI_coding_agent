@@ -1,0 +1,178 @@
+"""
+agents/scoped_loop.py — 역할별 제약이 적용된 ReactLoop 래퍼
+
+ScopedReactLoop 은 기존 ReactLoop 을 상속하며 다음 세 가지 제약을 추가한다:
+
+1. **시스템 프롬프트 교체**: 역할 전용 지시문을 LLM 에 주입
+2. **도구 허용 목록**: 역할에 허용된 도구만 스키마에 포함, 미허용 도구 호출 시 차단
+3. **workspace 격리**: 파일 쓰기 경로가 workspace_dir 밖이면 차단
+
+사용 예:
+    from agents.roles import TEST_WRITER
+    from agents.scoped_loop import ScopedReactLoop
+
+    loop = ScopedReactLoop(llm=haiku_client, role=TEST_WRITER, workspace_dir=ws.path)
+    result = loop.run(task_prompt)
+    print(result.answer)
+    print(result.workspace_files)
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from agents.roles import RoleConfig, WRITE_TOOLS
+from core.loop import ReactLoop, ToolCall, ToolResult, LoopResult
+from tools.registry import TOOL_REGISTRY, _build_tools_schema
+
+logger = logging.getLogger(__name__)
+
+# 경로 검증이 필요한 쓰기 도구 (input 의 "path" 키를 검사)
+_PATH_ARG_WRITE_TOOLS = frozenset(WRITE_TOOLS)
+
+
+@dataclass
+class ScopedResult:
+    """ScopedReactLoop.run() 의 반환값."""
+
+    answer: str
+    succeeded: bool
+    workspace_files: list[str] = field(default_factory=list)
+    loop_result: LoopResult | None = None
+
+
+class ScopedReactLoop(ReactLoop):
+    """
+    역할(RoleConfig)과 workspace 경로 제약이 적용된 ReactLoop.
+
+    ReactLoop 의 _execute_tool 을 오버라이드해서:
+    - 미허용 도구 호출 → 에러 반환 (LLM 이 스스로 수정하도록)
+    - workspace 밖 쓰기 → 에러 반환
+    """
+
+    def __init__(
+        self,
+        llm,
+        role: RoleConfig,
+        workspace_dir: str | Path,
+        max_iterations: int = 20,
+        **kwargs,
+    ):
+        super().__init__(llm=llm, max_iterations=max_iterations, **kwargs)
+        self._role = role
+        self._workspace_dir = Path(workspace_dir).resolve()
+
+        # 허용 도구만 포함한 스키마로 교체
+        self.TOOLS_SCHEMA = self._build_scoped_schema()
+
+    # ── 공개 인터페이스 ───────────────────────────────────────────────────────
+
+    def run(
+        self,
+        user_message: str,
+        history=None,
+    ) -> ScopedResult:
+        """
+        역할 시스템 프롬프트를 적용해 루프를 실행하고 ScopedResult 를 반환한다.
+        """
+        original_prompt = self.llm.config.system_prompt
+        self.llm.config.system_prompt = self._role.system_prompt
+        try:
+            loop_result: LoopResult = super().run(user_message, history=history)
+        finally:
+            self.llm.config.system_prompt = original_prompt
+
+        workspace_files = self._scan_workspace()
+        return ScopedResult(
+            answer=loop_result.answer,
+            succeeded=loop_result.succeeded,
+            workspace_files=workspace_files,
+            loop_result=loop_result,
+        )
+
+    # ── 오버라이드: 도구 실행 전 제약 검사 ───────────────────────────────────
+
+    def _execute_tool(self, tc: ToolCall) -> ToolResult:
+        # 1. 허용 목록 검사
+        if not self._role.allows(tc.name):
+            msg = (
+                f"[역할 제약] '{self._role.name}' 역할에서는 '{tc.name}' 도구를 "
+                f"사용할 수 없습니다. 허용된 도구: {list(self._role.allowed_tools)}"
+            )
+            logger.warning(msg)
+            return ToolResult(tool_use_id=tc.id, content=msg, is_error=True)
+
+        # 2. workspace 경로 검사 (쓰기 도구만)
+        if tc.name in _PATH_ARG_WRITE_TOOLS:
+            path_str = tc.input.get("path", "")
+            if path_str:
+                violation = self._check_workspace_path(path_str)
+                if violation:
+                    return ToolResult(
+                        tool_use_id=tc.id, content=violation, is_error=True
+                    )
+
+        return super()._execute_tool(tc)
+
+    # ── 내부 헬퍼 ─────────────────────────────────────────────────────────────
+
+    def _build_scoped_schema(self) -> list[dict]:
+        """허용된 도구만 포함한 tools 스키마를 생성한다."""
+        filtered_registry = {
+            name: meta
+            for name, meta in TOOL_REGISTRY.items()
+            if name in self._role.allowed_tools
+        }
+        provider = _infer_provider(self.llm)
+        return _build_tools_schema(filtered_registry, provider)
+
+    def _check_workspace_path(self, path_str: str) -> str | None:
+        """
+        경로가 workspace_dir 밖이면 오류 메시지를 반환하고, 안이면 None 을 반환한다.
+
+        상대 경로는 workspace_dir 기준으로 해석한다.
+        """
+        try:
+            path = Path(path_str)
+            if not path.is_absolute():
+                path = self._workspace_dir / path
+            resolved = path.resolve()
+        except Exception:
+            return f"[경로 오류] 잘못된 경로: {path_str!r}"
+
+        try:
+            resolved.relative_to(self._workspace_dir)
+            return None  # 정상
+        except ValueError:
+            return (
+                f"[workspace 격리] workspace 밖 경로 접근 금지.\n"
+                f"  요청 경로: {resolved}\n"
+                f"  허용 범위: {self._workspace_dir}\n"
+                f"  파일은 반드시 workspace 안에 저장하세요."
+            )
+
+    def _scan_workspace(self) -> list[str]:
+        """workspace 안의 모든 파일을 상대 경로 목록으로 반환한다."""
+        if not self._workspace_dir.exists():
+            return []
+        return [
+            str(p.relative_to(self._workspace_dir))
+            for p in sorted(self._workspace_dir.rglob("*"))
+            if p.is_file()
+        ]
+
+
+# ── 모듈 수준 헬퍼 ────────────────────────────────────────────────────────────
+
+
+def _infer_provider(llm) -> str:
+    """LLM 클라이언트 타입에서 provider 이름을 추론한다."""
+    name = type(llm).__name__
+    mapping = {
+        "ClaudeClient": "anthropic",
+        "OpenaiClient": "openai",
+        "OllamaClient": "ollama",
+    }
+    return mapping.get(name, "anthropic")
