@@ -1,13 +1,6 @@
 tasks:
-- acceptance_criteria:
-  - TaskReport 인스턴스를 save_report()로 저장하면 지정 디렉토리에 YAML 파일이 생성된다
-  - load_reports()가 저장된 YAML 파일들을 TaskReport 리스트로 정확히 복원한다
-  - aggregate([])는 total=0, success_rate=0, first_try_rate=0을 반환한다
-  - aggregate()는 status=="COMPLETED"인 항목만 completed로 집계한다
-  - aggregate()의 success_rate는 completed/total*100 (정수 반올림)이다
-  - since 파라미터로 completed_at 기준 필터링이 동작한다
-  - reviewer_verdict=="APPROVED"인 항목 수를 reviewer_approved로 반환한다
-  depends_on: []
+- id: task-001
+  title: 메트릭 수집기 구현
   description: "metrics/collector.py 모듈을 구현한다.\n\nTask Report를 YAML 파일로 저장/로드하고, 여러\
     \ Report를 집계하는\n순수 Python 모듈이다. 외부 라이브러리 없이 표준 라이브러리(dataclasses, pathlib,\ndatetime,\
     \ yaml)만 사용한다.\n\n구현할 요소:\n- TaskReport dataclass: task_id(str), title(str), status(str),\n\
@@ -20,8 +13,21 @@ tasks:
     \ 이후인 것만 반환한다.\n- aggregate(reports: list[TaskReport]) -> dict:\n  total, completed,\
     \ failed, success_rate(%), first_try_rate(%),\n  avg_elapsed_seconds, total_retries,\
     \ reviewer_approved 키를 반환한다.\n"
-  failure_reason: ''
-  id: task-001
+  acceptance_criteria:
+  - TaskReport 인스턴스를 save_report()로 저장하면 지정 디렉토리에 YAML 파일이 생성된다
+  - load_reports()가 저장된 YAML 파일들을 TaskReport 리스트로 정확히 복원한다
+  - aggregate([])는 total=0, success_rate=0, first_try_rate=0을 반환한다
+  - aggregate()는 status=="COMPLETED"인 항목만 completed로 집계한다
+  - aggregate()의 success_rate는 completed/total*100 (정수 반올림)이다
+  - since 파라미터로 completed_at 기준 필터링이 동작한다
+  - reviewer_verdict=="APPROVED"인 항목 수를 reviewer_approved로 반환한다
+  target_files:
+  - metrics/__init__.py
+  - metrics/collector.py
+  test_framework: pytest
+  depends_on: []
+  status: done
+  retry_count: 1
   last_error: "\n==================================== ERRORS ====================================\n\
     ___________________ ERROR collecting tests/test_collector.py ___________________\n\
     ImportError while importing test module '/workspace/tests/test_collector.py'.\n\
@@ -44,24 +50,9 @@ tasks:
     ERROR tests/test_collector.py\n!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during\
     \ collection !!!!!!!!!!!!!!!!!!!!\n2 warnings, 1 error in 0.06s\n"
   pr_url: ''
-  retry_count: 1
-  status: done
-  target_files:
-  - metrics/__init__.py
-  - metrics/collector.py
-  test_framework: pytest
-  title: 메트릭 수집기 구현
-- acceptance_criteria:
-  - get_week_range(2026, 1)의 첫 번째 값은 월요일(weekday==0)이다
-  - get_week_range(2026, 1)의 두 번째 값은 일요일(weekday==6)이다
-  - filter_by_week는 해당 주 내 completed_at을 가진 report만 반환한다
-  - collect_stats([])는 total=0, success_rate=0을 반환한다
-  - collect_stats는 COMPLETED 상태 항목을 정확히 집계한다
-  - generate_report()의 반환값은 "# 주간 보고서" 문자열로 시작한다
-  - generate_report()의 반환값에 year와 week 숫자가 포함된다
-  - generate_report([], 2026, 15)는 완료된 태스크 없음을 명시한다
-  depends_on:
-  - task-001
+  failure_reason: ''
+- id: task-002
+  title: Weekly Report 생성기 구현
   description: "reports/weekly.py 모듈을 구현한다.\n\nTaskReport 리스트를 받아 ISO 주차 기준 주간 마크다운\
     \ 보고서를 생성하는\n순수 함수 모듈이다. LLM을 호출하지 않고 데이터만으로 보고서를 구성한다.\n\n구현할 요소:\n- get_week_range(year:\
     \ int, week: int) -> tuple[datetime, datetime]:\n  ISO 주차의 월요일 00:00 UTC ~ 일요일\
@@ -72,31 +63,32 @@ tasks:
     \ 딕셔너리를 반환한다.\n- generate_report(reports: list[TaskReport], year: int, week: int)\
     \ -> str:\n  마크다운 문자열을 반환한다. 제목 형식은 \"# 주간 보고서: {year}년 {week}주차\"이며\n  집계 지표와\
     \ 태스크 목록을 포함한다.\n\n주의: TaskReport는 metrics.collector에서 임포트한다.\n"
+  acceptance_criteria:
+  - get_week_range(2026, 1)의 첫 번째 값은 월요일(weekday==0)이다
+  - get_week_range(2026, 1)의 두 번째 값은 일요일(weekday==6)이다
+  - filter_by_week는 해당 주 내 completed_at을 가진 report만 반환한다
+  - collect_stats([])는 total=0, success_rate=0을 반환한다
+  - collect_stats는 COMPLETED 상태 항목을 정확히 집계한다
+  - generate_report()의 반환값은 "# 주간 보고서" 문자열로 시작한다
+  - generate_report()의 반환값에 year와 week 숫자가 포함된다
+  - generate_report([], 2026, 15)는 완료된 태스크 없음을 명시한다
+  target_files:
+  - reports/__init__.py
+  - reports/weekly.py
+  test_framework: pytest
+  depends_on:
+  - task-001
+  status: pending
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
   failure_reason: '테스트가 3회 모두 실패했습니다.
 
     마지막 오류:
 
     8 failed, 27 passed, 2 warnings in 0.04s'
-  id: task-002
-  last_error: ''
-  pr_url: ''
-  retry_count: 0
-  status: pending
-  target_files:
-  - reports/__init__.py
-  - reports/weekly.py
-  test_framework: pytest
-  title: Weekly Report 생성기 구현
-- acceptance_criteria:
-  - parse_module()은 클래스 이름과 메서드 이름 목록을 정확히 추출한다
-  - parse_module()은 최상위 함수의 이름과 docstring 첫 줄을 추출한다
-  - parse_module()은 구문 오류 있는 파일에서 빈 dict(classes=[], functions=[])를 반환한다
-  - scan_directory()는 .py 확장자 파일만 처리한다
-  - scan_directory()는 exclude_dirs에 지정된 디렉토리를 건너뛴다
-  - generate_markdown()의 반환값은 "# PROJECT_STRUCTURE" 헤더를 포함한다
-  - generate_markdown()에 모듈이 없으면 "(파이썬 파일 없음)"을 포함한다
-  - update()는 파일을 생성하고 존재하는 Path를 반환한다
-  depends_on: []
+- id: task-003
+  title: PROJECT_STRUCTURE.md 생성기 구현
   description: "structure/updater.py 모듈을 구현한다.\n\nPython 표준 라이브러리의 ast 모듈로 소스 코드를\
     \ 파싱하여\nPROJECT_STRUCTURE.md 파일을 자동 생성하는 모듈이다.\n\n구현할 요소:\n- parse_module(file_path:\
     \ Path) -> dict:\n  파이썬 파일을 ast로 파싱하여 {\"path\": str, \"classes\": list, \"functions\"\
@@ -109,27 +101,27 @@ tasks:
     \ str = \"PROJECT_STRUCTURE\") -> str:\n  모듈 목록을 마크다운 문자열로 변환한다.\n  형식: 파일 경로를\
     \ 헤더로, 클래스/함수를 목록으로 표시한다.\n- update(root: str = \".\", output: str = \"PROJECT_STRUCTURE.md\"\
     ) -> Path:\n  scan_directory → generate_markdown → 파일 저장 후 경로를 반환한다.\n"
-  failure_reason: ''
-  id: task-003
-  last_error: ''
-  pr_url: ''
-  retry_count: 0
-  status: done
+  acceptance_criteria:
+  - parse_module()은 클래스 이름과 메서드 이름 목록을 정확히 추출한다
+  - parse_module()은 최상위 함수의 이름과 docstring 첫 줄을 추출한다
+  - parse_module()은 구문 오류 있는 파일에서 빈 dict(classes=[], functions=[])를 반환한다
+  - scan_directory()는 .py 확장자 파일만 처리한다
+  - scan_directory()는 exclude_dirs에 지정된 디렉토리를 건너뛴다
+  - generate_markdown()의 반환값은 "# PROJECT_STRUCTURE" 헤더를 포함한다
+  - generate_markdown()에 모듈이 없으면 "(파이썬 파일 없음)"을 포함한다
+  - update()는 파일을 생성하고 존재하는 Path를 반환한다
   target_files:
   - structure/__init__.py
   - structure/updater.py
   test_framework: pytest
-  title: PROJECT_STRUCTURE.md 생성기 구현
-- acceptance_criteria:
-  - generate_brief([])는 "실행 기록 없음" 문자열을 반환한다
-  - generate_brief(reports)의 반환값은 "## 실행 요약" 헤더를 포함한다
-  - format_report_line()은 task_id, title, status를 모두 포함한 문자열을 반환한다
-  - generate_brief()는 COMPLETED 태스크와 FAILED 태스크를 별도 섹션으로 분리한다
-  - generate_brief()의 핵심 지표 섹션에 성공률 숫자가 포함된다
-  - since 파라미터로 completed_at 기준 필터링이 동작한다
-  - until 파라미터로 completed_at 기준 필터링이 동작한다
-  depends_on:
-  - task-001
+  depends_on: []
+  status: done
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
+- id: task-004
+  title: execution_brief 생성기 구현
   description: "reports/execution_brief.py 모듈을 구현한다.\n\nTaskReport 리스트를 받아 회의 시작 시\
     \ Opus 시스템 프롬프트에 주입할\n실행 요약 마크다운을 생성하는 순수 함수 모듈이다. LLM을 호출하지 않는다.\n\n구현할 요소:\n\
     - format_report_line(report: TaskReport) -> str:\n  \"- {task_id}: {title} — {status},\
@@ -140,26 +132,26 @@ tasks:
     \ 제목 — COMPLETED, 소요: Xs, 재시도: N회\n    **실패한 태스크** (N개)\n    - ...\n    **핵심 지표**\n\
     \    - 전체 성공률: N%\n    - 첫 시도 성공률: N%\n    - 평균 소요 시간: Xs\n  보고서가 없으면 \"실행 기록\
     \ 없음\"을 반환한다.\n\n주의: TaskReport는 metrics.collector에서 임포트한다.\n"
-  failure_reason: ''
-  id: task-004
-  last_error: ''
-  pr_url: ''
-  retry_count: 0
-  status: done
+  acceptance_criteria:
+  - generate_brief([])는 "실행 기록 없음" 문자열을 반환한다
+  - generate_brief(reports)의 반환값은 "## 실행 요약" 헤더를 포함한다
+  - format_report_line()은 task_id, title, status를 모두 포함한 문자열을 반환한다
+  - generate_brief()는 COMPLETED 태스크와 FAILED 태스크를 별도 섹션으로 분리한다
+  - generate_brief()의 핵심 지표 섹션에 성공률 숫자가 포함된다
+  - since 파라미터로 completed_at 기준 필터링이 동작한다
+  - until 파라미터로 completed_at 기준 필터링이 동작한다
   target_files:
   - reports/execution_brief.py
   test_framework: pytest
-  title: execution_brief 생성기 구현
-- acceptance_criteria:
-  - depends_on이 모두 빈 리스트인 태스크들은 하나의 그룹으로 반환된다
-  - task-002가 task-001에 의존하면 task-001 그룹이 먼저 반환된다
-  - 의존성이 없는 task-001, task-003, task-005는 같은 그룹에 포함된다
-  - task-002(→task-001)와 task-004(→task-001)는 task-001 이후 같은 그룹에 포함된다
-  - has_cycle()은 순환 의존성이 없으면 False를 반환한다
-  - has_cycle()은 A→B→A 같은 순환 의존성에 대해 True를 반환한다
-  - validate_dependencies()는 존재하지 않는 ID를 참조하면 오류 메시지를 반환한다
-  - validate_dependencies()는 의존성이 올바르면 빈 리스트를 반환한다
-  depends_on: []
+  depends_on:
+  - task-001
+  status: done
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
+- id: task-005
+  title: 태스크 의존성 계산기 구현
   description: "orchestrator/dependency.py 모듈을 구현한다.\n\n태스크 간 depends_on 관계를 분석하여\
     \ 실행 순서를 계산하는 모듈이다.\nKahn's algorithm으로 위상 정렬을 수행한다.\n\n구현할 요소:\n- resolve_order(tasks:\
     \ list[dict]) -> list[list[str]]:\n  각 task는 {\"id\": str, \"depends_on\": list[str]}\
@@ -168,13 +160,21 @@ tasks:
     - has_cycle(tasks: list[dict]) -> bool:\n  의존성 그래프에 순환이 있으면 True를 반환한다.\n- validate_dependencies(tasks:\
     \ list[dict]) -> list[str]:\n  존재하지 않는 태스크 ID를 depends_on에 참조하는 경우 오류 메시지 리스트를\
     \ 반환한다.\n  문제 없으면 빈 리스트를 반환한다.\n"
-  failure_reason: ''
-  id: task-005
-  last_error: ''
-  pr_url: ''
-  retry_count: 0
-  status: done
+  acceptance_criteria:
+  - depends_on이 모두 빈 리스트인 태스크들은 하나의 그룹으로 반환된다
+  - task-002가 task-001에 의존하면 task-001 그룹이 먼저 반환된다
+  - 의존성이 없는 task-001, task-003, task-005는 같은 그룹에 포함된다
+  - task-002(→task-001)와 task-004(→task-001)는 task-001 이후 같은 그룹에 포함된다
+  - has_cycle()은 순환 의존성이 없으면 False를 반환한다
+  - has_cycle()은 A→B→A 같은 순환 의존성에 대해 True를 반환한다
+  - validate_dependencies()는 존재하지 않는 ID를 참조하면 오류 메시지를 반환한다
+  - validate_dependencies()는 의존성이 올바르면 빈 리스트를 반환한다
   target_files:
   - orchestrator/dependency.py
   test_framework: pytest
-  title: 태스크 의존성 계산기 구현
+  depends_on: []
+  status: done
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
