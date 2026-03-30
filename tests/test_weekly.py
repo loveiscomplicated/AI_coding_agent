@@ -1,331 +1,342 @@
-"""
-tests/test_weekly.py — orchestrator.weekly 단위 테스트
-"""
-
-from __future__ import annotations
-
-import tempfile
-from datetime import datetime, timezone
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
+"""Weekly Report 생성기 테스트"""
 import pytest
-
-from orchestrator.report import TaskReport
-from orchestrator.weekly import (
-    _prev_week,
-    build_weekly_prompt,
-    collect_week_stats,
-    current_iso_week,
-    generate_weekly_report,
+from datetime import datetime, timezone
+from reports.weekly import (
     get_week_range,
-    list_weekly_reports,
-    load_weekly_report,
+    filter_by_week,
+    collect_stats,
+    generate_report,
 )
+from metrics.collector import TaskReport, TaskStatus
 
-
-# ── 헬퍼 ──────────────────────────────────────────────────────────────────────
-
-def make_report(**kwargs) -> TaskReport:
-    defaults = dict(
-        task_id="task-001",
-        title="테스트 태스크",
-        status="COMPLETED",
-        completed_at="2026-01-05T10:00:00+00:00",
-        retry_count=0,
-        test_count=3,
-        test_pass_first_try=True,
-        reviewer_verdict="APPROVED",
-        time_elapsed_seconds=120.0,
-        failure_reasons=[],
-        reviewer_feedback="",
-    )
-    defaults.update(kwargs)
-    return TaskReport(**defaults)
-
-
-# ── get_week_range ────────────────────────────────────────────────────────────
 
 class TestGetWeekRange:
-    def test_returns_monday_to_sunday(self):
-        monday, sunday = get_week_range(2026, 1)
-        assert monday.weekday() == 0  # 월요일
-        assert sunday.weekday() == 6  # 일요일
+    """get_week_range 함수 테스트"""
 
-    def test_sunday_is_6_days_after_monday(self):
-        monday, sunday = get_week_range(2026, 15)
-        delta = sunday - monday
-        assert delta.days == 6
+    def test_get_week_range_returns_tuple(self):
+        """get_week_range는 튜플을 반환한다"""
+        result = get_week_range(2026, 1)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
 
-    def test_times_are_utc(self):
-        monday, sunday = get_week_range(2026, 1)
-        assert monday.tzinfo == timezone.utc
-        assert sunday.tzinfo == timezone.utc
+    def test_get_week_range_first_value_is_monday(self):
+        """get_week_range(2026, 1)의 첫 번째 값은 월요일(weekday==0)이다"""
+        start, _ = get_week_range(2026, 1)
+        assert start.weekday() == 0, f"Expected Monday (0), got {start.weekday()}"
 
-    def test_monday_is_start_of_day(self):
-        monday, _ = get_week_range(2026, 10)
-        assert monday.hour == 0
-        assert monday.minute == 0
-        assert monday.second == 0
+    def test_get_week_range_second_value_is_sunday(self):
+        """get_week_range(2026, 1)의 두 번째 값은 일요일(weekday==6)이다"""
+        _, end = get_week_range(2026, 1)
+        assert end.weekday() == 6, f"Expected Sunday (6), got {end.weekday()}"
 
-    def test_sunday_is_end_of_day(self):
-        _, sunday = get_week_range(2026, 10)
-        assert sunday.hour == 23
-        assert sunday.minute == 59
-        assert sunday.second == 59
+    def test_get_week_range_returns_datetime_objects(self):
+        """get_week_range는 datetime 객체를 반환한다"""
+        start, end = get_week_range(2026, 1)
+        assert isinstance(start, datetime)
+        assert isinstance(end, datetime)
 
+    def test_get_week_range_start_is_midnight_utc(self):
+        """get_week_range의 시작은 00:00:00 UTC이다"""
+        start, _ = get_week_range(2026, 1)
+        assert start.hour == 0
+        assert start.minute == 0
+        assert start.second == 0
 
-# ── current_iso_week ──────────────────────────────────────────────────────────
+    def test_get_week_range_end_is_end_of_day_utc(self):
+        """get_week_range의 끝은 23:59:59 UTC이다"""
+        _, end = get_week_range(2026, 1)
+        assert end.hour == 23
+        assert end.minute == 59
+        assert end.second == 59
 
-class TestCurrentIsoWeek:
-    def test_returns_tuple_of_ints(self):
-        year, week = current_iso_week()
-        assert isinstance(year, int)
-        assert isinstance(week, int)
+    def test_get_week_range_different_weeks(self):
+        """get_week_range는 다른 주차에 대해 올바른 범위를 반환한다"""
+        # 2주차
+        start2, end2 = get_week_range(2026, 2)
+        assert start2.weekday() == 0
+        assert end2.weekday() == 6
+        
+        # 3주차
+        start3, end3 = get_week_range(2026, 3)
+        assert start3.weekday() == 0
+        assert end3.weekday() == 6
 
-    def test_week_in_valid_range(self):
-        _, week = current_iso_week()
-        assert 1 <= week <= 53
-
-
-# ── collect_week_stats ────────────────────────────────────────────────────────
-
-class TestCollectWeekStats:
-    def test_empty_list(self):
-        stats = collect_week_stats([])
-        assert stats["total"] == 0
-        assert stats["success_rate"] == 0
-        assert stats["first_try_rate"] == 0
-        assert stats["avg_elapsed_seconds"] == 0
-
-    def test_all_completed(self):
-        reports = [make_report(task_id=f"task-{i:03d}") for i in range(4)]
-        stats = collect_week_stats(reports)
-        assert stats["total"] == 4
-        assert stats["completed"] == 4
-        assert stats["failed"] == 0
-        assert stats["success_rate"] == 100
-
-    def test_mixed_status(self):
-        reports = [
-            make_report(task_id="task-001", status="COMPLETED"),
-            make_report(task_id="task-002", status="FAILED"),
-        ]
-        stats = collect_week_stats(reports)
-        assert stats["completed"] == 1
-        assert stats["failed"] == 1
-        assert stats["success_rate"] == 50
-
-    def test_first_try_rate(self):
-        reports = [
-            make_report(task_id="task-001", test_pass_first_try=True),
-            make_report(task_id="task-002", test_pass_first_try=False),
-            make_report(task_id="task-003", test_pass_first_try=True),
-            make_report(task_id="task-004", test_pass_first_try=False),
-        ]
-        stats = collect_week_stats(reports)
-        assert stats["first_try_rate"] == 50
-
-    def test_avg_elapsed(self):
-        reports = [
-            make_report(task_id="task-001", time_elapsed_seconds=100.0),
-            make_report(task_id="task-002", time_elapsed_seconds=200.0),
-        ]
-        stats = collect_week_stats(reports)
-        assert stats["avg_elapsed_seconds"] == 150.0
-
-    def test_reviewer_approved_count(self):
-        reports = [
-            make_report(task_id="task-001", reviewer_verdict="APPROVED"),
-            make_report(task_id="task-002", reviewer_verdict="REJECTED"),
-            make_report(task_id="task-003", reviewer_verdict="APPROVED"),
-        ]
-        stats = collect_week_stats(reports)
-        assert stats["reviewer_approved"] == 2
+    def test_get_week_range_week_53(self):
+        """get_week_range는 53주차도 처리한다"""
+        start, end = get_week_range(2026, 53)
+        assert start.weekday() == 0
+        assert end.weekday() == 6
 
 
-# ── build_weekly_prompt ───────────────────────────────────────────────────────
+class TestFilterByWeek:
+    """filter_by_week 함수 테스트"""
 
-class TestBuildWeeklyPrompt:
-    def test_contains_year_and_week(self):
-        reports = [make_report()]
-        prompt = build_weekly_prompt(2026, 15, reports)
-        assert "2026" in prompt
-        assert "15" in prompt
+    def test_filter_by_week_returns_list(self, sample_reports):
+        """filter_by_week는 리스트를 반환한다"""
+        result = filter_by_week(sample_reports, 2026, 1)
+        assert isinstance(result, list)
 
-    def test_contains_stats(self):
-        reports = [make_report()]
-        prompt = build_weekly_prompt(2026, 15, reports)
-        assert "성공률" in prompt
-        assert "태스크" in prompt
+    def test_filter_by_week_filters_by_completed_at(self, sample_reports):
+        """filter_by_week는 completed_at 기준으로 해당 주의 Report만 필터링한다"""
+        result = filter_by_week(sample_reports, 2026, 1)
+        # 1주차(2026-01-05 ~ 2026-01-11)에 완료된 항목만 포함
+        assert len(result) > 0
+        for report in result:
+            assert report.completed_at is not None
+            start, end = get_week_range(2026, 1)
+            assert start <= report.completed_at <= end
 
-    def test_empty_reports_message(self):
-        prompt = build_weekly_prompt(2026, 15, [])
-        assert "태스크 없음" in prompt
+    def test_filter_by_week_excludes_none_completed_at(self, sample_reports):
+        """filter_by_week는 completed_at이 None인 항목을 제외한다"""
+        result = filter_by_week(sample_reports, 2026, 1)
+        for report in result:
+            assert report.completed_at is not None
 
-    def test_includes_prev_content(self):
-        reports = [make_report()]
-        prompt = build_weekly_prompt(2026, 15, reports, prev_content="이전 주 보고서 내용")
-        assert "이전 주 보고서 내용" in prompt
+    def test_filter_by_week_different_weeks(self, reports_different_weeks):
+        """filter_by_week는 다른 주차를 올바르게 필터링한다"""
+        # 1주차 필터링
+        week1_reports = filter_by_week(reports_different_weeks, 2026, 1)
+        assert len(week1_reports) == 1
+        assert week1_reports[0].task_id == "task_w1_1"
 
-    def test_no_prev_content_by_default(self):
-        reports = [make_report()]
-        prompt = build_weekly_prompt(2026, 15, reports)
-        assert "전주 보고서" not in prompt
+        # 2주차 필터링
+        week2_reports = filter_by_week(reports_different_weeks, 2026, 2)
+        assert len(week2_reports) == 1
+        assert week2_reports[0].task_id == "task_w2_1"
 
+        # 3주차 필터링
+        week3_reports = filter_by_week(reports_different_weeks, 2026, 3)
+        assert len(week3_reports) == 1
+        assert week3_reports[0].task_id == "task_w3_1"
 
-# ── _prev_week ────────────────────────────────────────────────────────────────
-
-class TestPrevWeek:
-    def test_week_2_returns_week_1(self):
-        year, week = _prev_week(2026, 2)
-        assert year == 2026
-        assert week == 1
-
-    def test_week_1_crosses_year_boundary(self):
-        year, week = _prev_week(2026, 1)
-        # 2025년의 마지막 ISO 주차
-        assert year == 2025
-        assert week >= 52
-
-    def test_week_decrements_by_one(self):
-        year, week = _prev_week(2026, 20)
-        assert year == 2026
-        assert week == 19
-
-
-# ── generate_weekly_report ────────────────────────────────────────────────────
-
-class TestGenerateWeeklyReport:
-    def test_saves_file_to_weekly_dir(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            reports_dir = Path(tmpdir) / "reports"
-            reports_dir.mkdir()
-            weekly_dir = Path(tmpdir) / "weekly"
-
-            mock_llm = MagicMock(return_value="# 주간 보고서\n내용")
-
-            with patch("orchestrator.weekly.load_reports", return_value=[]):
-                content, path = generate_weekly_report(
-                    llm_fn=mock_llm,
-                    year=2026,
-                    week=15,
-                    reports_dir=reports_dir,
-                    weekly_dir=weekly_dir,
-                )
-
-            assert path.exists()
-            assert path.name == "2026-W15.md"
-            assert content == "# 주간 보고서\n내용"
-
-    def test_llm_called_with_system_and_user(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            reports_dir = Path(tmpdir) / "reports"
-            reports_dir.mkdir()
-            weekly_dir = Path(tmpdir) / "weekly"
-            mock_llm = MagicMock(return_value="보고서 내용")
-
-            with patch("orchestrator.weekly.load_reports", return_value=[]):
-                generate_weekly_report(
-                    llm_fn=mock_llm,
-                    year=2026,
-                    week=15,
-                    reports_dir=reports_dir,
-                    weekly_dir=weekly_dir,
-                )
-
-            assert mock_llm.called
-            call_args = mock_llm.call_args[0]
-            system_prompt, user_prompt = call_args
-            assert "보고서" in system_prompt
-            assert "2026" in user_prompt
-
-    def test_uses_current_week_when_none(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            reports_dir = Path(tmpdir) / "reports"
-            reports_dir.mkdir()
-            weekly_dir = Path(tmpdir) / "weekly"
-            mock_llm = MagicMock(return_value="내용")
-
-            with patch("orchestrator.weekly.load_reports", return_value=[]):
-                with patch("orchestrator.weekly.current_iso_week", return_value=(2026, 20)):
-                    content, path = generate_weekly_report(
-                        llm_fn=mock_llm,
-                        year=None,
-                        week=None,
-                        reports_dir=reports_dir,
-                        weekly_dir=weekly_dir,
-                    )
-
-            assert path.name == "2026-W20.md"
-
-    def test_loads_prev_week_report_if_exists(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            reports_dir = Path(tmpdir) / "reports"
-            reports_dir.mkdir()
-            weekly_dir = Path(tmpdir) / "weekly"
-            weekly_dir.mkdir()
-
-            # 전주 보고서 미리 생성
-            prev_path = weekly_dir / "2026-W14.md"
-            prev_path.write_text("전주 보고서 내용", encoding="utf-8")
-
-            captured_user = {}
-            def mock_llm(system, user):
-                captured_user["prompt"] = user
-                return "이번 주 보고서"
-
-            with patch("orchestrator.weekly.load_reports", return_value=[]):
-                generate_weekly_report(
-                    llm_fn=mock_llm,
-                    year=2026,
-                    week=15,
-                    reports_dir=reports_dir,
-                    weekly_dir=weekly_dir,
-                )
-
-            assert "전주 보고서 내용" in captured_user["prompt"]
-
-
-# ── load_weekly_report / list_weekly_reports ──────────────────────────────────
-
-class TestLoadAndList:
-    def test_load_returns_none_when_missing(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result = load_weekly_report(2026, 15, weekly_dir=Path(tmpdir))
-        assert result is None
-
-    def test_load_returns_content_when_exists(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            p = Path(tmpdir) / "2026-W15.md"
-            p.write_text("주간 보고서 내용", encoding="utf-8")
-            result = load_weekly_report(2026, 15, weekly_dir=Path(tmpdir))
-        assert result == "주간 보고서 내용"
-
-    def test_list_returns_empty_when_dir_missing(self):
-        result = list_weekly_reports(weekly_dir=Path("/nonexistent/path"))
+    def test_filter_by_week_empty_list(self):
+        """filter_by_week는 빈 리스트를 처리한다"""
+        result = filter_by_week([], 2026, 1)
         assert result == []
 
-    def test_list_returns_sorted_descending(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            d = Path(tmpdir)
-            (d / "2026-W10.md").write_text("a")
-            (d / "2026-W15.md").write_text("b")
-            (d / "2025-W52.md").write_text("c")
+    def test_filter_by_week_no_matching_reports(self):
+        """filter_by_week는 해당 주에 일치하는 보고서가 없으면 빈 리스트를 반환한다"""
+        reports = [
+            TaskReport(
+                task_id="task_1",
+                status=TaskStatus.COMPLETED,
+                completed_at=datetime(2026, 2, 5, 10, 0, 0, tzinfo=timezone.utc),
+                elapsed_seconds=3600.0,
+                retries=0,
+                first_try=True,
+            ),
+        ]
+        result = filter_by_week(reports, 2026, 1)
+        assert result == []
 
-            result = list_weekly_reports(weekly_dir=d)
 
-        names = [f"{r['year']}-W{r['week']:02d}" for r in result]
-        assert names == sorted(names, reverse=True)
+class TestCollectStats:
+    """collect_stats 함수 테스트"""
 
-    def test_list_ignores_non_matching_files(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            d = Path(tmpdir)
-            (d / "2026-W10.md").write_text("a")
-            (d / "README.md").write_text("b")
-            (d / "invalid.md").write_text("c")
+    def test_collect_stats_returns_dict(self, sample_reports):
+        """collect_stats는 딕셔너리를 반환한다"""
+        result = collect_stats(sample_reports)
+        assert isinstance(result, dict)
 
-            result = list_weekly_reports(weekly_dir=d)
+    def test_collect_stats_has_required_keys(self, sample_reports):
+        """collect_stats는 필수 키를 포함한다"""
+        result = collect_stats(sample_reports)
+        required_keys = {
+            "total",
+            "completed",
+            "failed",
+            "success_rate",
+            "first_try_rate",
+            "avg_elapsed_seconds",
+            "total_retries",
+        }
+        assert required_keys.issubset(result.keys())
 
-        assert len(result) == 1
-        assert result[0]["week"] == 10
+    def test_collect_stats_empty_list_total_zero(self):
+        """collect_stats([])는 total=0을 반환한다"""
+        result = collect_stats([])
+        assert result["total"] == 0
+
+    def test_collect_stats_empty_list_success_rate_zero(self):
+        """collect_stats([])는 success_rate=0을 반환한다"""
+        result = collect_stats([])
+        assert result["success_rate"] == 0
+
+    def test_collect_stats_counts_completed_status(self, sample_reports):
+        """collect_stats는 COMPLETED 상태 항목을 정확히 집계한다"""
+        result = collect_stats(sample_reports)
+        # sample_reports에서 COMPLETED 상태는 3개 (task_1, task_2, task_4)
+        assert result["completed"] == 3
+
+    def test_collect_stats_counts_failed_status(self, sample_reports):
+        """collect_stats는 FAILED 상태 항목을 정확히 집계한다"""
+        result = collect_stats(sample_reports)
+        # sample_reports에서 FAILED 상태는 1개 (task_3)
+        assert result["failed"] == 1
+
+    def test_collect_stats_total_count(self, sample_reports):
+        """collect_stats는 전체 항목 수를 정확히 집계한다"""
+        result = collect_stats(sample_reports)
+        assert result["total"] == len(sample_reports)
+
+    def test_collect_stats_success_rate_calculation(self, sample_reports):
+        """collect_stats는 success_rate를 올바르게 계산한다"""
+        result = collect_stats(sample_reports)
+        # 3 completed / 5 total = 0.6
+        assert result["success_rate"] == pytest.approx(0.6)
+
+    def test_collect_stats_first_try_rate(self, sample_reports):
+        """collect_stats는 first_try_rate를 올바르게 계산한다"""
+        result = collect_stats(sample_reports)
+        # first_try=True인 항목: task_1, task_4, task_5 = 3개
+        # 3 / 5 = 0.6
+        assert result["first_try_rate"] == pytest.approx(0.6)
+
+    def test_collect_stats_avg_elapsed_seconds(self, sample_reports):
+        """collect_stats는 avg_elapsed_seconds를 올바르게 계산한다"""
+        result = collect_stats(sample_reports)
+        # (3600 + 7200 + 5400 + 1800 + 0) / 5 = 17400 / 5 = 3480
+        assert result["avg_elapsed_seconds"] == pytest.approx(3480.0)
+
+    def test_collect_stats_total_retries(self, sample_reports):
+        """collect_stats는 total_retries를 올바르게 집계한다"""
+        result = collect_stats(sample_reports)
+        # 0 + 1 + 2 + 0 + 0 = 3
+        assert result["total_retries"] == 3
+
+    def test_collect_stats_single_completed_report(self):
+        """collect_stats는 단일 완료 보고서를 처리한다"""
+        reports = [
+            TaskReport(
+                task_id="task_1",
+                status=TaskStatus.COMPLETED,
+                completed_at=datetime(2026, 1, 5, 10, 0, 0, tzinfo=timezone.utc),
+                elapsed_seconds=3600.0,
+                retries=0,
+                first_try=True,
+            ),
+        ]
+        result = collect_stats(reports)
+        assert result["total"] == 1
+        assert result["completed"] == 1
+        assert result["failed"] == 0
+        assert result["success_rate"] == 1.0
+        assert result["first_try_rate"] == 1.0
+        assert result["avg_elapsed_seconds"] == 3600.0
+        assert result["total_retries"] == 0
+
+    def test_collect_stats_all_failed(self):
+        """collect_stats는 모두 실패한 경우를 처리한다"""
+        reports = [
+            TaskReport(
+                task_id="task_1",
+                status=TaskStatus.FAILED,
+                completed_at=datetime(2026, 1, 5, 10, 0, 0, tzinfo=timezone.utc),
+                elapsed_seconds=3600.0,
+                retries=2,
+                first_try=False,
+            ),
+            TaskReport(
+                task_id="task_2",
+                status=TaskStatus.FAILED,
+                completed_at=datetime(2026, 1, 6, 10, 0, 0, tzinfo=timezone.utc),
+                elapsed_seconds=3600.0,
+                retries=1,
+                first_try=False,
+            ),
+        ]
+        result = collect_stats(reports)
+        assert result["total"] == 2
+        assert result["completed"] == 0
+        assert result["failed"] == 2
+        assert result["success_rate"] == 0.0
+
+
+class TestGenerateReport:
+    """generate_report 함수 테스트"""
+
+    def test_generate_report_returns_string(self, sample_reports):
+        """generate_report는 문자열을 반환한다"""
+        result = generate_report(sample_reports, 2026, 1)
+        assert isinstance(result, str)
+
+    def test_generate_report_starts_with_heading(self, sample_reports):
+        """generate_report()의 반환값은 '# 주간 보고서' 문자열로 시작한다"""
+        result = generate_report(sample_reports, 2026, 1)
+        assert result.startswith("# 주간 보고서")
+
+    def test_generate_report_includes_year(self, sample_reports):
+        """generate_report()의 반환값에 year 숫자가 포함된다"""
+        result = generate_report(sample_reports, 2026, 1)
+        assert "2026" in result
+
+    def test_generate_report_includes_week(self, sample_reports):
+        """generate_report()의 반환값에 week 숫자가 포함된다"""
+        result = generate_report(sample_reports, 2026, 1)
+        assert "1" in result
+
+    def test_generate_report_includes_year_and_week_in_title(self, sample_reports):
+        """generate_report의 제목에 year와 week이 포함된다"""
+        result = generate_report(sample_reports, 2026, 15)
+        assert "2026" in result
+        assert "15" in result
+
+    def test_generate_report_empty_list_indicates_no_tasks(self):
+        """generate_report([], 2026, 15)는 완료된 태스크 없음을 명시한다"""
+        result = generate_report([], 2026, 15)
+        assert "완료된 태스크 없음" in result or "없음" in result or "없습니다" in result
+
+    def test_generate_report_includes_stats(self, sample_reports):
+        """generate_report는 집계 지표를 포함한다"""
+        result = generate_report(sample_reports, 2026, 1)
+        # 집계 지표 키워드 확인
+        assert "완료" in result or "completed" in result.lower()
+
+    def test_generate_report_includes_task_list(self, sample_reports):
+        """generate_report는 태스크 목록을 포함한다"""
+        result = generate_report(sample_reports, 2026, 1)
+        # 필터링된 보고서의 task_id가 포함되어야 함
+        filtered = filter_by_week(sample_reports, 2026, 1)
+        if filtered:
+            # 최소한 하나의 task_id가 포함되어야 함
+            assert any(report.task_id in result for report in filtered)
+
+    def test_generate_report_different_weeks(self, reports_different_weeks):
+        """generate_report는 다른 주차에 대해 올바른 보고서를 생성한다"""
+        result1 = generate_report(reports_different_weeks, 2026, 1)
+        result2 = generate_report(reports_different_weeks, 2026, 2)
+        
+        assert "2026" in result1
+        assert "1" in result1
+        assert "2026" in result2
+        assert "2" in result2
+
+    def test_generate_report_markdown_format(self, sample_reports):
+        """generate_report는 마크다운 형식을 사용한다"""
+        result = generate_report(sample_reports, 2026, 1)
+        # 마크다운 헤딩 확인
+        assert "#" in result
+
+    def test_generate_report_with_filtered_reports(self, sample_reports):
+        """generate_report는 해당 주의 보고서만 포함한다"""
+        result = generate_report(sample_reports, 2026, 1)
+        filtered = filter_by_week(sample_reports, 2026, 1)
+        
+        # 필터링된 보고서가 있으면 보고서에 포함되어야 함
+        if filtered:
+            assert len(result) > 0
+
+    def test_generate_report_empty_with_different_week(self):
+        """generate_report는 해당 주에 보고서가 없으면 빈 상태를 표시한다"""
+        reports = [
+            TaskReport(
+                task_id="task_1",
+                status=TaskStatus.COMPLETED,
+                completed_at=datetime(2026, 2, 5, 10, 0, 0, tzinfo=timezone.utc),
+                elapsed_seconds=3600.0,
+                retries=0,
+                first_try=True,
+            ),
+        ]
+        result = generate_report(reports, 2026, 1)
+        assert "완료된 태스크 없음" in result or "없음" in result or "없습니다" in result
