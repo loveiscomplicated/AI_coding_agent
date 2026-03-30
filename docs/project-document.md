@@ -1,6 +1,6 @@
 # Multi-Agent Development System
 
-> 프로젝트 문서 v1.2 | 2026-03-31 — Phase 3 6단계 완료
+> 프로젝트 문서 v1.3 | 2026-03-31 — Phase 3 7단계 완료
 
 ---
 
@@ -418,7 +418,7 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
   상세 설계: docs/project-document-after_Phase_2.md
 ```
 
-### Phase 3: 멀티 에이전트 + 운영 ✅ 6단계 완료
+### Phase 3: 멀티 에이전트 + 운영 ✅ 7단계 완료
 
 ```
 6단계 - 병렬 에이전트 ✅ 완료 (2026-03-31)
@@ -431,10 +431,20 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
   └── StructureUpdater 파이프라인 통합 ✅
         그룹 머지 후 PROJECT_STRUCTURE.md 자동 갱신 → 다음 그룹 에이전트에 주입
 
-7단계 - 보고서 및 모니터링
-  ├── Daily / Milestone 보고서 자동 생성
-  ├── 컨텍스트 압축 파이프라인
-  └── 대시보드 UI
+7단계 - 보고서 및 모니터링 ✅ 완료 (2026-03-31)
+  ├── Milestone Report 자동 생성 ✅
+  │     orchestrator/milestone.py — 파이프라인 완료 시 Sonnet이 마크다운 요약 생성
+  │     data/reports/milestones/ 에 타임스탬프 파일로 저장
+  ├── 대시보드 백엔드 API ✅
+  │     backend/routers/dashboard.py
+  │     GET /api/dashboard/summary   — 메트릭 집계 (성공률, 재시도, 소요 시간 등)
+  │     GET /api/dashboard/tasks     — tasks.yaml + Task Report 조인
+  │     GET /api/dashboard/milestones — 마일스톤 보고서 목록
+  │     GET /api/dashboard/milestones/{filename} — 보고서 본문 (path traversal 방지)
+  └── 대시보드 프론트엔드 UI ✅
+        frontend/src/components/DashboardPage.tsx
+        메트릭 카드 8개, 태스크 목록 테이블, 마일스톤 사이드 패널 뷰어
+        다크모드 완전 지원
 
 8단계 - 음성 인터페이스 (선택, 별도)
   ├── STT 입력 (Web Speech API)
@@ -458,4 +468,5 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
 | 병렬 실행 시 git 충돌 | **확정**: git worktree 기반 GitWorkflow — HEAD 불변, 병렬 안전 | ✅ 완료 |
 | 머지 충돌 자동 해결 | **확정**: MergeAgent (Haiku LLM 1회 호출/파일) | ✅ 완료 |
 | DB 전환 | JSON/YAML → SQLite or PostgreSQL | 데이터 복잡도 증가 시 |
-| CI/CD 통합 | GitHub Actions 유력 | Phase 3 7단계에서 검토 |
+| Milestone Report 컨텍스트 압축 | Daily Summary 계층 미구현 — Milestone만 있음 | 운영 중 필요 시 |
+| CI/CD 통합 | GitHub Actions 유력 | 8단계 또는 별도 |
