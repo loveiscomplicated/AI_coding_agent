@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /workspace
 
 # 기본 테스트 의존성
-RUN pip install --no-cache-dir pytest pytest-cov
+RUN pip install --no-cache-dir pytest pytest-cov pyyaml
 
 # 실행 시 workspace 안의 requirements.txt가 있으면 먼저 설치
 # (프로젝트별 의존성 지원)

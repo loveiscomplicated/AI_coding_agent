@@ -24,8 +24,7 @@ tasks:
 
     마지막 오류:
 
-    이미지 ''ai-coding-agent-test-runner'' 없음. DockerTestRunner().build_image() 를 먼저
-    실행하세요.'
+    2 warnings, 1 error in 0.08s'
   id: task-001
   last_error: ''
   pr_url: ''
@@ -57,12 +56,7 @@ tasks:
     \ 딕셔너리를 반환한다.\n- generate_report(reports: list[TaskReport], year: int, week: int)\
     \ -> str:\n  마크다운 문자열을 반환한다. 제목 형식은 \"# 주간 보고서: {year}년 {week}주차\"이며\n  집계 지표와\
     \ 태스크 목록을 포함한다.\n\n주의: TaskReport는 metrics.collector에서 임포트한다.\n"
-  failure_reason: '테스트가 3회 모두 실패했습니다.
-
-    마지막 오류:
-
-    이미지 ''ai-coding-agent-test-runner'' 없음. DockerTestRunner().build_image() 를 먼저
-    실행하세요.'
+  failure_reason: 'Implementer 실패: 최대 반복 횟수(20회)를 초과했습니다. 작업을 더 작게 나눠 시도해주세요.'
   id: task-002
   last_error: ''
   pr_url: ''
@@ -97,10 +91,32 @@ tasks:
     ) -> Path:\n  scan_directory → generate_markdown → 파일 저장 후 경로를 반환한다.\n"
   failure_reason: 'Implementer 실패: 최대 반복 횟수(20회)를 초과했습니다. 작업을 더 작게 나눠 시도해주세요.'
   id: task-003
-  last_error: ''
-  pr_url: ''
-  retry_count: 0
-  status: pending
+  last_error: "............................F......                               \
+    \       [100%]\n=================================== FAILURES ===================================\n\
+    __________________ TestUpdate.test_update_default_output_path __________________\n\
+    tests/test_updater.py:338: in test_update_default_output_path\n    result = update(str(complex_directory_structure))\n\
+    \             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nsrc/structure/updater.py:230:\
+    \ in update\n    output_path.write_text(markdown_content, encoding='utf-8')\n\
+    /usr/local/lib/python3.12/pathlib.py:1047: in write_text\n    with self.open(mode='w',\
+    \ encoding=encoding, errors=errors, newline=newline) as f:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\
+    /usr/local/lib/python3.12/pathlib.py:1013: in open\n    return io.open(self, mode,\
+    \ buffering, encoding, errors, newline)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\
+    E   OSError: [Errno 30] Read-only file system: 'PROJECT_STRUCTURE.md'\n===============================\
+    \ warnings summary ===============================\n../usr/local/lib/python3.12/site-packages/_pytest/cacheprovider.py:475\n\
+    \  /usr/local/lib/python3.12/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning:\
+    \ could not create cache path /workspace/.pytest_cache/v/cache/nodeids: [Errno\
+    \ 30] Read-only file system: '/workspace/pytest-cache-files-hilwo9vz'\n    config.cache.set(\"\
+    cache/nodeids\", sorted(self.cached_nodeids))\n\n../usr/local/lib/python3.12/site-packages/_pytest/cacheprovider.py:429\n\
+    \  /usr/local/lib/python3.12/site-packages/_pytest/cacheprovider.py:429: PytestCacheWarning:\
+    \ could not create cache path /workspace/.pytest_cache/v/cache/lastfailed: [Errno\
+    \ 30] Read-only file system: '/workspace/pytest-cache-files-js2mh3vu'\n    config.cache.set(\"\
+    cache/lastfailed\", self.lastfailed)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n\
+    =========================== short test summary info ============================\n\
+    FAILED tests/test_updater.py::TestUpdate::test_update_default_output_path - O...\n\
+    1 failed, 34 passed, 2 warnings in 0.07s\n"
+  pr_url: https://github.com/loveiscomplicated/AI_coding_agent/pull/1
+  retry_count: 2
+  status: done
   target_files:
   - structure/__init__.py
   - structure/updater.py
@@ -129,9 +145,9 @@ tasks:
   failure_reason: 'Implementer 실패: 최대 반복 횟수(20회)를 초과했습니다. 작업을 더 작게 나눠 시도해주세요.'
   id: task-004
   last_error: ''
-  pr_url: ''
+  pr_url: https://github.com/loveiscomplicated/AI_coding_agent/pull/3
   retry_count: 0
-  status: pending
+  status: done
   target_files:
   - reports/execution_brief.py
   test_framework: pytest
@@ -162,9 +178,9 @@ tasks:
     실행하세요.'
   id: task-005
   last_error: ''
-  pr_url: ''
+  pr_url: https://github.com/loveiscomplicated/AI_coding_agent/pull/2
   retry_count: 0
-  status: pending
+  status: done
   target_files:
   - orchestrator/dependency.py
   test_framework: pytest

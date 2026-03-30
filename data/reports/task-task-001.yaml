@@ -1,7 +1,7 @@
 task_id: task-001
 title: 메트릭 수집기 구현
 status: FAILED
-completed_at: '2026-03-30T14:52:16.554487+00:00'
+completed_at: '2026-03-30T15:12:04.190577+00:00'
 metrics:
   retry_count: 3
   total_tokens: 0
@@ -9,14 +9,13 @@ metrics:
   test_count: 0
   test_pass_first_try: false
   reviewer_verdict: ''
-  time_elapsed_seconds: 139.9
+  time_elapsed_seconds: 327.7
   failure_reasons:
   - '테스트가 3회 모두 실패했습니다.
 
     마지막 오류:
 
-    이미지 ''ai-coding-agent-test-runner'' 없음. DockerTestRunner().build_image() 를 먼저
-    실행하세요.'
+    2 warnings, 1 error in 0.08s'
 pipeline_result:
   test_output_summary: ''
   reviewer_feedback: ''
