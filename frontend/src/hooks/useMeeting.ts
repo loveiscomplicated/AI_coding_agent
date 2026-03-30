@@ -3,7 +3,7 @@ import { ChatAttachment, ChatMessage, MeetingContext, MeetingRecord, emptyMeetin
 import { streamingVisibleText, parseContextDoc } from '../utils/contextParser'
 import { parseChoices } from '../utils/choiceParser'
 import { MeetingStorage } from '../storage/meetingStorage'
-import { useAnthropicStream, generateChatTitle, generateContextDocWithOpus, generateContextDocWithOpusStream } from './useAnthropicStream'
+import { useAnthropicStream, buildSystemPrompt, generateChatTitle, generateContextDocWithOpus, generateContextDocWithOpusStream } from './useAnthropicStream'
 
 function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
@@ -19,7 +19,12 @@ export interface MeetingState {
   isRefreshing: boolean
 }
 
-export function useMeeting(initialRecord?: MeetingRecord, onTitleGenerated?: () => void) {
+export function useMeeting(
+  initialRecord?: MeetingRecord,
+  onTitleGenerated?: () => void,
+  meetingType: 'project' | 'system' = 'project',
+  executionBrief?: string,
+) {
   const storage = useRef(new MeetingStorage()).current
   const meetingId = useRef(initialRecord?.id ?? generateId()).current
 
@@ -33,7 +38,11 @@ export function useMeeting(initialRecord?: MeetingRecord, onTitleGenerated?: () 
   const [refreshingDoc, setRefreshingDoc] = useState('')
   const abortControllerRef = useRef<AbortController | null>(null)
 
-  const { sendMessage, isStreaming } = useAnthropicStream()
+  const systemPrompt = buildSystemPrompt(
+    initialRecord?.meetingType ?? meetingType,
+    executionBrief,
+  )
+  const { sendMessage, isStreaming } = useAnthropicStream(systemPrompt)
 
   const persistState = useCallback(
     (msgs: ChatMessage[], ctx: MeetingContext, finished: boolean, titleOverride?: string, doc?: string) => {
@@ -42,6 +51,7 @@ export function useMeeting(initialRecord?: MeetingRecord, onTitleGenerated?: () 
       const record: MeetingRecord = {
         id: meetingId,
         title: titleOverride ?? existing?.title ?? '새 회의',
+        meetingType: initialRecord?.meetingType ?? meetingType,
         createdAt: initialRecord?.createdAt ?? now,
         updatedAt: now,
         messages: msgs,
@@ -51,7 +61,7 @@ export function useMeeting(initialRecord?: MeetingRecord, onTitleGenerated?: () 
       }
       storage.save(record)
     },
-    [meetingId, initialRecord, storage]
+    [meetingId, initialRecord, meetingType, storage]
   )
 
   const applyGeneratedTitle = useCallback(

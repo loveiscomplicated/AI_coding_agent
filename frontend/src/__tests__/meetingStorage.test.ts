@@ -12,6 +12,7 @@ function makeRecord(overrides: Partial<{ id: string; title: string }> = {}): Mee
   return {
     id: overrides.id ?? 'test-id-001',
     title: overrides.title ?? '테스트 회의',
+    meetingType: 'project',
     createdAt: '2026-03-29T10:00:00Z',
     updatedAt: '2026-03-29T10:00:00Z',
     messages: [] as ChatMessage[],

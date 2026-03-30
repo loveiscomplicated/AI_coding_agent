@@ -52,6 +52,9 @@ class Task:
     target_files: list[str]
     test_framework: str = "pytest"
 
+    # ── 선택 필드 ─────────────────────────────────────────────────────────────
+    depends_on: list[str] = field(default_factory=list)  # 선행 태스크 ID 목록
+
     # ── 런타임 상태 (YAML 저장/복원 가능) ────────────────────────────────────
     status: TaskStatus = TaskStatus.PENDING
     retry_count: int = 0
@@ -86,6 +89,7 @@ class Task:
             "acceptance_criteria": self.acceptance_criteria,
             "target_files": self.target_files,
             "test_framework": self.test_framework,
+            "depends_on": self.depends_on,
             "status": self.status.value,
             "retry_count": self.retry_count,
             "last_error": self.last_error,
@@ -102,6 +106,7 @@ class Task:
             acceptance_criteria=data.get("acceptance_criteria", []),
             target_files=data.get("target_files", []),
             test_framework=data.get("test_framework", "pytest"),
+            depends_on=data.get("depends_on", []),
             status=TaskStatus(data.get("status", TaskStatus.PENDING.value)),
             retry_count=data.get("retry_count", 0),
             last_error=data.get("last_error", ""),

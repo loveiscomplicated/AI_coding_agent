@@ -100,6 +100,8 @@ export interface ChatMessage {
 export interface MeetingRecord {
   id: string
   title: string
+  /** 'project': 프로젝트 기획 회의 | 'system': 시스템 개선 회의 */
+  meetingType: 'project' | 'system'
   createdAt: string
   updatedAt: string
   messages: ChatMessage[]

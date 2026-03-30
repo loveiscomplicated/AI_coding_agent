@@ -127,12 +127,17 @@ export function ChatListPage({ records, onSelect, onNew, onRename, onDelete }: P
                     className="flex-1 min-w-0 text-left mr-3"
                     onClick={() => onSelect(r)}
                   >
-                    <p className="font-semibold text-sm text-white truncate leading-snug">
-                      {r.title || '(제목 없음)'}
-                      {r.isFinished && (
-                        <span className="ml-2 text-xs font-normal text-zinc-500">완료</span>
+                    <div className="flex items-center gap-1.5">
+                      {r.meetingType === 'system' && (
+                        <span className="text-xs text-zinc-500 shrink-0" title="시스템 회의">⚙️</span>
                       )}
-                    </p>
+                      <p className="font-semibold text-sm text-white truncate leading-snug">
+                        {r.title || '(제목 없음)'}
+                        {r.isFinished && (
+                          <span className="ml-2 text-xs font-normal text-zinc-500">완료</span>
+                        )}
+                      </p>
+                    </div>
                     <p className="text-xs text-zinc-500 mt-1">
                       마지막 메시지 {relativeTime(r.updatedAt)}
                     </p>

@@ -6,7 +6,10 @@ export class MeetingStorage {
   private readAll(): MeetingRecord[] {
     try {
       const raw = localStorage.getItem(STORAGE_KEY)
-      return raw ? (JSON.parse(raw) as MeetingRecord[]) : []
+      if (!raw) return []
+      const parsed = JSON.parse(raw) as MeetingRecord[]
+      // backward compat: 기존 레코드에 meetingType이 없으면 'project'로 설정
+      return parsed.map(r => ({ meetingType: 'project' as const, ...r }))
     } catch {
       return []
     }

@@ -37,6 +37,12 @@ export default function App() {
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
+
+  // 새 회의 타입 선택
+  const [newMeetingMenu, setNewMeetingMenu] = useState(false)
+  const [activeMeetingType, setActiveMeetingType] = useState<'project' | 'system'>('project')
+  const [activeExecutionBrief, setActiveExecutionBrief] = useState<string>('')
+  const [loadingBrief, setLoadingBrief] = useState(false)
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('darkMode')
     return saved ? saved === 'true' : window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -56,15 +62,38 @@ export default function App() {
     !search || r.title.toLowerCase().includes(search.toLowerCase())
   )
 
-  const startNew = () => {
+  const startNew = (type: 'project' | 'system' = 'project', brief = '') => {
+    setNewMeetingMenu(false)
     setShowListPage(false)
     setActiveId(null)
+    setActiveMeetingType(type)
+    setActiveExecutionBrief(brief)
     setChatKey(k => k + 1)
+  }
+
+  const startSystemMeeting = async () => {
+    setNewMeetingMenu(false)
+    setLoadingBrief(true)
+    try {
+      const res = await fetch(`${API_BASE}/api/execution-brief`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      const data = res.ok ? await res.json() : { brief: '' }
+      startNew('system', data.brief ?? '')
+    } catch {
+      startNew('system', '')
+    } finally {
+      setLoadingBrief(false)
+    }
   }
 
   const handleSelect = (record: MeetingRecord) => {
     setShowListPage(false)
     setActiveId(record.id)
+    setActiveMeetingType(record.meetingType ?? 'project')
+    setActiveExecutionBrief('')
     setChatKey(k => k + 1)
   }
 
@@ -90,11 +119,11 @@ export default function App() {
 
   // 메뉴 외부 클릭 시 닫기
   useEffect(() => {
-    if (!menuOpenId) return
-    const close = () => setMenuOpenId(null)
+    if (!menuOpenId && !newMeetingMenu) return
+    const close = () => { setMenuOpenId(null); setNewMeetingMenu(false) }
     document.addEventListener('mousedown', close)
     return () => document.removeEventListener('mousedown', close)
-  }, [menuOpenId])
+  }, [menuOpenId, newMeetingMenu])
 
   const handleFinished = (record: MeetingRecord) => {
     setRecords(storage.list())
@@ -149,15 +178,39 @@ export default function App() {
         <div className="flex items-center px-2 py-2.5 gap-1 flex-shrink-0">
           {sidebarToggle}
           <div className="flex-1" />
-          <button
-            onClick={startNew}
-            className="p-1.5 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
-            title="새 대화"
-          >
-            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-          </button>
+          {/* 새 회의 버튼 + 타입 드롭다운 */}
+          <div className="relative">
+            <button
+              onClick={() => setNewMeetingMenu(m => !m)}
+              className="p-1.5 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+              title="새 회의"
+              disabled={loadingBrief}
+            >
+              {loadingBrief ? (
+                <div className="w-4 h-4 border border-zinc-400 border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+              )}
+            </button>
+            {newMeetingMenu && (
+              <div className="absolute right-0 top-8 z-30 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl py-1 w-40">
+                <button
+                  onClick={() => startNew('project')}
+                  className="w-full text-left px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-700 transition-colors flex items-center gap-2"
+                >
+                  <span>🏗️</span> 프로젝트 회의
+                </button>
+                <button
+                  onClick={startSystemMeeting}
+                  className="w-full text-left px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-700 transition-colors flex items-center gap-2"
+                >
+                  <span>⚙️</span> 시스템 회의
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* 검색 */}
@@ -236,7 +289,12 @@ export default function App() {
                     className="flex-1 text-sm bg-zinc-600 text-zinc-100 rounded px-1.5 py-0.5 outline-none min-w-0"
                   />
                 ) : (
-                  <p className="flex-1 text-sm truncate">{r.title || '(제목 없음)'}</p>
+                  <div className="flex-1 min-w-0 flex items-center gap-1.5">
+                    {r.meetingType === 'system' && (
+                      <span className="text-[10px] text-zinc-500 shrink-0">⚙️</span>
+                    )}
+                    <p className="text-sm truncate">{r.title || '(제목 없음)'}</p>
+                  </div>
                 )}
 
                 {renamingId !== r.id && (
@@ -324,6 +382,8 @@ export default function App() {
           <MeetingApp
             key={chatKey}
             initialRecord={activeRecord}
+            meetingType={activeMeetingType}
+            executionBrief={activeExecutionBrief || undefined}
             onFinished={handleFinished}
             onTitleGenerated={() => setRecords(storage.list())}
             onGoToList={() => {

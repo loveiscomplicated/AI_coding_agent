@@ -26,4 +26,4 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["main"]
-packages   = ["core", "cli", "tools", "llm", "memory", "backend", "orchestrator", "docker", "agents"]
+packages   = ["core", "cli", "tools", "llm", "memory", "backend", "orchestrator", "docker", "agents", "hotline"]

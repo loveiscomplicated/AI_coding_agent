@@ -1,6 +1,6 @@
 # Multi-Agent Development System
 
-> 프로젝트 문서 v1.0 | 2026-03-22
+> 프로젝트 문서 v1.1 | 2026-03-30 — Phase 2 전체 완료
 
 ---
 
@@ -370,7 +370,7 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
   └── 컨텍스트 문서 뷰어 (📄 버튼) ✅
 ```
 
-### Phase 2: 에이전트 실행 환경 ✅ 4단계 완료
+### Phase 2: 에이전트 실행 환경 ✅ 완료
 
 ```
 4단계 - 단일 에이전트 파이프라인 ✅ 완료 (2026-03-30)
@@ -383,15 +383,33 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
   ├── GitWorkflow (브랜치 → 커밋 → PR 생성) ✅
   └── run.py CLI 진입점 + E2E 검증 ✅
 
-5단계 - 오케스트레이터 연결 ← 현재 단계
-  Step 1: FastAPI 백엔드 + API 프록시 (dangerouslyAllowBrowser 제거)
-  Step 2: 파이프라인 확장 (StructureUpdater, dev 머지 의존성, Task Report)
-  Step 3: 태스크 초안 생성 (context_doc → Sonnet → tasks.yaml + UI)
-  Step 4: 회의 인터페이스 확장 (회의 타입 분리, execution_brief 주입)
-  Step 5: Discord 핫라인 (알림 + 질의응답 양방향)
-  Step 6: 보고서 체계 (Weekly Report, 시스템 회의용 메트릭)
+5단계 - 오케스트레이터 연결 ✅ 완료 (2026-03-30)
+  Step 1: FastAPI 백엔드 + API 프록시 (dangerouslyAllowBrowser 제거) ✅
+  Step 2: 파이프라인 확장 (Task Report, 위상 정렬 의존성, 백엔드 API) ✅
+    ├── orchestrator/report.py  — TaskReport 저장/로드/집계
+    ├── orchestrator/run.py     — resolve_execution_groups() (Kahn's algorithm)
+    ├── backend/routers/pipeline.py  — POST /api/pipeline/run (비동기 job)
+    └── tests/test_report.py, tests/test_run.py
+  Step 3: 태스크 초안 생성 (context_doc → Sonnet → tasks.yaml + UI) ✅
+    ├── POST /api/tasks/draft  — Sonnet이 JSON 태스크 목록 생성
+    ├── frontend/src/components/TaskDraftPanel.tsx  — 편집 + 파이프라인 실행 UI
+    └── frontend/src/__tests__/components/TaskDraftPanel.test.tsx
+  Step 4: 회의 인터페이스 확장 (회의 타입 분리, execution_brief 주입) ✅
+    ├── MeetingApp: meetingType ('project' | 'system') 분리
+    ├── App.tsx: 시스템 회의 시작 시 execution_brief 자동 조회 후 주입
+    ├── backend/routers/reports.py  — POST /api/execution-brief
+    └── hooks/useAnthropicStream.ts — buildSystemPrompt(meetingType, brief)
+  Step 5: Discord 핫라인 (알림 + 질의응답 양방향) ✅
+    ├── hotline/notifier.py  — DiscordNotifier (send + wait_for_reply)
+    ├── orchestrator/run.py  — 파이프라인 알림 + 실패 시 힌트 수집
+    ├── backend/routers/discord_router.py  — GET /api/discord/status, POST /api/discord/test
+    └── tests/test_notifier.py
+  Step 6: 보고서 체계 (Weekly Report) ✅
+    ├── orchestrator/weekly.py  — ISO 주차 집계 + Sonnet 마크다운 생성
+    ├── backend/routers/reports.py  — POST/GET /api/reports/weekly
+    └── tests/test_weekly.py (30개 테스트)
 
-  [첫 실제 프로젝트] 유틸리티 모듈 5개 (셀프 호스팅 검증):
+  [다음] 첫 실제 프로젝트 — 유틸리티 모듈 5개 (셀프 호스팅 검증):
   ├── metrics/collector.py      — Task Report 저장/로드/집계
   ├── reports/weekly.py         — 주간 보고서 생성
   ├── structure/updater.py      — Python AST → PROJECT_STRUCTURE.md
@@ -430,7 +448,7 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
 | Task 정의 방식 | **확정**: YAML 수동 정의. Sonnet 자동 추출은 Phase 3에서 검토 | ✅ 결정 완료 |
 | Reviewer 판정 후 행동 | **확정**: CHANGES_REQUESTED여도 PR 생성. PR body에 피드백 포함 | ✅ 결정 완료 |
 | Phase 2 테스트 타겟 | **확정**: Python 전용. Node.js 지원은 Phase 3 | ✅ 결정 완료 |
-| 5단계 오케스트레이터 연결 방식 | Phase 1 UI ↔ Phase 2 파이프라인 연동 구체화 필요 | 5단계 시작 시 |
+| 5단계 오케스트레이터 연결 방식 | **확정**: FastAPI 백엔드 + React 프론트엔드 분리, Discord 핫라인 포함 | ✅ 완료 |
 | 에이전트 간 의존성 태스크 처리 | 순차 실행 vs DAG 기반 스케줄링 | Phase 3 시작 시 |
 | DB 전환 | JSON/YAML → SQLite or PostgreSQL | 데이터 복잡도 증가 시 |
 | CI/CD 통합 | GitHub Actions 유력 | Phase 3에서 검토 |
