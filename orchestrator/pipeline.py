@@ -84,18 +84,22 @@ class TDDPipeline:
     """
     단일 태스크를 TDD 흐름으로 실행하는 파이프라인.
 
-    agent_llm   : Haiku 클라이언트 (TestWriter / Implementer / Reviewer 공용)
-    test_runner : DockerTestRunner 인스턴스 (주입 가능, 테스트 시 mock 용이)
-    max_retries : Implementer 재시도 최대 횟수
+    agent_llm       : TestWriter / Reviewer 용 LLM (Haiku 권장)
+    implementer_llm : Implementer 전용 LLM. None이면 agent_llm 사용.
+                      복잡한 구현 태스크는 Sonnet을 권장한다.
+    test_runner     : DockerTestRunner 인스턴스 (주입 가능, 테스트 시 mock 용이)
+    max_retries     : Implementer 재시도 최대 횟수
     """
 
     def __init__(
         self,
         agent_llm,
+        implementer_llm=None,
         test_runner: DockerTestRunner | None = None,
         max_retries: int = MAX_RETRIES,
     ):
         self.agent_llm = agent_llm
+        self.implementer_llm = implementer_llm or agent_llm
         self.test_runner = test_runner or DockerTestRunner()
         self.max_retries = max_retries
 
@@ -179,7 +183,7 @@ class TDDPipeline:
 
     def _run_implementer(self, task: Task, workspace: WorkspaceManager) -> ScopedResult:
         loop = ScopedReactLoop(
-            llm=self.agent_llm,
+            llm=self.implementer_llm,
             role=IMPLEMENTER,
             workspace_dir=workspace.path,
         )

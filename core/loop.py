@@ -140,6 +140,7 @@ class ReactLoop:
         iterations: list[LoopIteration] = []
         total_input_tokens: int = 0
         total_output_tokens: int = 0
+        _consecutive_missing_tool_use = 0  # tool_use 블록 없이 연속 발생 횟수
 
         for i in range(self.max_iterations):
             t0 = time.perf_counter()
@@ -200,8 +201,22 @@ class ReactLoop:
             # ── Act: tool_use 블록 수집 ───────────────────────────────────────
             tool_calls = _extract_tool_calls(response.content)
             if not tool_calls:
-                # stop_reason이 tool_use인데 tool_use 블록이 없는 예외 상황
-                # → 모델에 재시도 힌트를 주고 루프 계속
+                _consecutive_missing_tool_use += 1
+                if _consecutive_missing_tool_use >= 3:
+                    # 3회 연속 tool_use 블록 없음 → 루프 종료 (무한 루프 방지)
+                    logger.warning(
+                        "tool_use stop_reason이지만 tool_use 블록이 %d회 연속 없음 — 루프 종료",
+                        _consecutive_missing_tool_use,
+                    )
+                    return LoopResult(
+                        answer=_extract_text(response.content),
+                        stop_reason=StopReason.END_TURN,
+                        iterations=iterations,
+                        messages=messages,
+                        total_input_tokens=total_input_tokens,
+                        total_output_tokens=total_output_tokens,
+                    )
+                # 재시도 힌트 전달
                 logger.warning(
                     "tool_use stop_reason이지만 tool_use 블록이 없음 — 재시도 힌트 전달 (반복 %d)", i + 1
                 )
@@ -212,6 +227,8 @@ class ReactLoop:
                             "write_file 등 필요한 도구를 명시적으로 호출해 주세요.",
                 ))
                 continue
+
+            _consecutive_missing_tool_use = 0  # 정상 tool_use → 카운터 리셋
 
             # assistant 턴을 히스토리에 추가
             messages.append(Message(role="assistant", content=response.content))
