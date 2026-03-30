@@ -1,3 +1,5 @@
-from .task import Task, TaskStatus, load_tasks, save_tasks
+"""
+orchestrator 패키지
 
-__all__ = ["Task", "TaskStatus", "load_tasks", "save_tasks"]
+태스크 의존성 관리 및 실행 순서 계산을 담당하는 패키지
+"""
