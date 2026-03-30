@@ -201,17 +201,17 @@ class ReactLoop:
             tool_calls = _extract_tool_calls(response.content)
             if not tool_calls:
                 # stop_reason이 tool_use인데 tool_use 블록이 없는 예외 상황
+                # → 모델에 재시도 힌트를 주고 루프 계속
                 logger.warning(
-                    "tool_use stop_reason이지만 tool_use 블록이 없음 — 텍스트 반환"
+                    "tool_use stop_reason이지만 tool_use 블록이 없음 — 재시도 힌트 전달 (반복 %d)", i + 1
                 )
-                return LoopResult(
-                    answer=_extract_text(response.content),
-                    stop_reason=StopReason.END_TURN,
-                    iterations=iterations,
-                    messages=messages,
-                    total_input_tokens=total_input_tokens,
-                    total_output_tokens=total_output_tokens,
-                )
+                messages.append(Message(role="assistant", content=response.content or []))
+                messages.append(Message(
+                    role="user",
+                    content="도구를 호출하려고 했지만 tool_use 블록이 전달되지 않았습니다. "
+                            "write_file 등 필요한 도구를 명시적으로 호출해 주세요.",
+                ))
+                continue
 
             # assistant 턴을 히스토리에 추가
             messages.append(Message(role="assistant", content=response.content))
