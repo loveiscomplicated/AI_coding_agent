@@ -138,11 +138,12 @@ def run_pipeline(
 
     # LLM 클라이언트 + 파이프라인 초기화
     haiku = create_client("claude", LLMConfig(model="claude-haiku-4-5", max_tokens=8192))
+    sonnet = create_client("claude", LLMConfig(model="claude-sonnet-4-6", max_tokens=8192))
     runner = DockerTestRunner()
     if not runner._image_exists():
         runner.build_image()
 
-    pipeline = TDDPipeline(agent_llm=haiku, test_runner=runner)
+    pipeline = TDDPipeline(agent_llm=haiku, implementer_llm=sonnet, test_runner=runner)
     git = GitWorkflow(repo_path, base_branch=base_branch)
     notifier = DiscordNotifier.from_env()
 
@@ -341,11 +342,12 @@ def main() -> int:
     # LLM 클라이언트
     try:
         haiku = create_client("claude", LLMConfig(model="claude-haiku-4-5", max_tokens=8192))
+        sonnet = create_client("claude", LLMConfig(model="claude-sonnet-4-6", max_tokens=8192))
     except ValueError as e:
         print(_fail(f"LLM 클라이언트 초기화 실패: {e}"))
         return 1
 
-    pipeline = TDDPipeline(agent_llm=haiku, test_runner=runner)
+    pipeline = TDDPipeline(agent_llm=haiku, implementer_llm=sonnet, test_runner=runner)
     git = GitWorkflow(repo_path, base_branch=args.base_branch)
 
     success_count = 0

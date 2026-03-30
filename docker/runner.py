@@ -96,15 +96,15 @@ class DockerTestRunner:
             )
 
         if not self._image_exists():
-            return RunResult(
-                passed=False,
-                returncode=-1,
-                stdout="",
-                summary=(
-                    f"이미지 '{self.image}' 없음. "
-                    "DockerTestRunner().build_image() 를 먼저 실행하세요."
-                ),
-            )
+            try:
+                self.build_image()
+            except RuntimeError as e:
+                return RunResult(
+                    passed=False,
+                    returncode=-1,
+                    stdout="",
+                    summary=f"Docker 이미지 빌드 실패: {e}",
+                )
 
         try:
             result = subprocess.run(

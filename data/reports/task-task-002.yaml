@@ -1,22 +1,17 @@
 task_id: task-002
 title: Weekly Report 생성기 구현
 status: FAILED
-completed_at: '2026-03-30T14:39:38.148462+00:00'
+completed_at: '2026-03-30T15:21:56.405047+00:00'
 metrics:
-  retry_count: 3
+  retry_count: 0
   total_tokens: 0
   cost_usd: 0.0
   test_count: 0
   test_pass_first_try: false
   reviewer_verdict: ''
-  time_elapsed_seconds: 293.4
+  time_elapsed_seconds: 191.7
   failure_reasons:
-  - '테스트가 3회 모두 실패했습니다.
-
-    마지막 오류:
-
-    이미지 ''ai-coding-agent-test-runner'' 없음. DockerTestRunner().build_image() 를 먼저
-    실행하세요.'
+  - 'Implementer 실패: 최대 반복 횟수(20회)를 초과했습니다. 작업을 더 작게 나눠 시도해주세요.'
 pipeline_result:
   test_output_summary: ''
   reviewer_feedback: ''
