@@ -39,6 +39,8 @@
 
 **핵심 흐름**: `tasks.yaml` 작성 → 파이프라인 실행 → 에이전트가 TDD로 코드 작성 → PR 생성 → 사람이 검토 후 머지.
 
+**멀티 프로젝트**: 이 도구 자체는 `AI_coding_agent/`에 있지만, 파이프라인은 `--repo` 플래그로 어떤 프로젝트에도 적용할 수 있다. 리포트와 tasks.yaml은 대상 프로젝트 디렉토리에 저장된다.
+
 ---
 
 ## 2. 사전 요구사항
@@ -120,8 +122,8 @@ cp frontend/.env.example frontend/.env
 ```
 
 ```dotenv
-VITE_ANTHROPIC_API_KEY=sk-ant-...   # 회의 UI에서 Opus 직접 호출용
-VITE_API_BASE_URL=http://localhost:8000   # 백엔드 주소 (기본값)
+VITE_ANTHROPIC_API_KEY=sk-ant-...        # 회의 UI에서 Opus 직접 호출용
+VITE_API_BASE_URL=http://localhost:8000  # 백엔드 주소 (기본값)
 ```
 
 > **주의**: `VITE_ANTHROPIC_API_KEY`는 브라우저에서 직접 Anthropic API를 호출하는 회의 기능에만 사용된다. 파이프라인 실행은 백엔드의 `ANTHROPIC_API_KEY`를 사용한다.
@@ -206,8 +208,9 @@ python -m orchestrator.run --tasks data/tasks.yaml --repo .
 | `--base-branch`, `-b` | PR base branch | `dev` |
 | `--id` | 특정 태스크 하나만 실행 | 전체 |
 | `--yes`, `-y` | 확인 없이 바로 시작 | false |
-| `--no-pr` | PR 생성 없이 로컬만 실행 | false |
+| `--no-pr` | PR 생성 없이 로컬 실행 | false |
 | `--parallel`, `-p` | 그룹 내 병렬 실행 수 | `1` |
+| `--reports-dir` | Task Report 저장 디렉토리 | `{repo}/data/reports` |
 | `--verbose`, `-v` | DEBUG 로그 출력 | false |
 
 ### 7.3 사용 예시
@@ -215,6 +218,11 @@ python -m orchestrator.run --tasks data/tasks.yaml --repo .
 ```bash
 # 전체 실행, 확인 없이
 python -m orchestrator.run -t data/tasks.yaml -y
+
+# 다른 프로젝트에 적용
+python -m orchestrator.run \
+  --tasks /path/to/my-project/tasks.yaml \
+  --repo /path/to/my-project
 
 # 특정 태스크 하나만 재실행
 python -m orchestrator.run -t data/tasks.yaml --id task-003
@@ -224,9 +232,6 @@ python -m orchestrator.run -t data/tasks.yaml -p 3
 
 # PR 없이 로컬 테스트만
 python -m orchestrator.run -t data/tasks.yaml --no-pr
-
-# 다른 저장소의 dev2 브랜치로 PR
-python -m orchestrator.run -t data/tasks.yaml --repo ../my-project --base-branch dev2
 ```
 
 ### 7.4 실행 흐름
@@ -243,38 +248,83 @@ python -m orchestrator.run -t data/tasks.yaml --repo ../my-project --base-branch
       - 성공 시 git worktree에서 브랜치 생성 → 커밋 → PR
    b. 그룹 완료 후 dev에 자동 머지 (MergeAgent로 충돌 자동 해결)
    c. PROJECT_STRUCTURE.md 자동 갱신
-6. 파이프라인 종료 후 Milestone Report 생성 (data/reports/milestones/)
+6. 파이프라인 종료 후 Milestone Report 생성
+   ({repo}/data/reports/milestones/)
 ```
 
 ### 7.5 실행 결과 확인
 
 - **tasks.yaml**: 각 태스크의 `status`, `pr_url`, `retry_count` 자동 업데이트
-- **data/reports/**: 태스크별 `task-{id}.yaml` 리포트 저장
-- **data/reports/milestones/**: 파이프라인 완료 후 마크다운 요약 보고서
+- **`{repo}/data/reports/`**: 태스크별 `task-{id}.yaml` 리포트 저장
+- **`{repo}/data/reports/milestones/`**: 파이프라인 완료 후 마크다운 요약 보고서
 
 ---
 
 ## 8. 파이프라인 실행 (UI)
 
-웹 UI에서도 파이프라인을 실행할 수 있다.
+### 8.1 실행 방법
 
 1. `http://localhost:5173` 접속
-2. 사이드바에서 **채팅** 탭 선택
-3. 회의 중 `+` → **프로젝트 회의** 시작
-4. 대화 후 **TagDraftPanel** 에서 태스크 편집 → **파이프라인 실행** 버튼
+2. 사이드바에서 `+` → **프로젝트 회의** 시작
+3. Opus와 대화 후 **태스크 초안 생성** 버튼 클릭
+4. 생성된 태스크를 편집
+5. 헤더의 경로 입력 후 **저장 & 파이프라인 시작** 클릭
 
-또는 백엔드 API를 직접 호출:
+### 8.2 경로 설정
 
-```bash
-curl -X POST http://localhost:8000/api/pipeline/run \
-  -H "Content-Type: application/json" \
-  -d '{"tasks_path": "data/tasks.yaml", "repo_path": "."}'
+태스크 초안 화면 헤더에 두 개의 입력창이 있다:
+
+| 입력 | 설명 | 예시 |
+|------|------|------|
+| **레포** | 에이전트가 코드를 짜는 대상 레포의 절대 경로 | `/path/to/my-project` |
+| **tasks** | tasks.yaml 저장 경로 | `/path/to/my-project/tasks.yaml` |
+
+리포트는 `{레포}/data/reports/`에 자동 저장된다.
+
+### 8.3 실시간 진행 로그
+
+파이프라인 실행 중에는 터미널 없이 UI에서 실시간으로 진행 상황을 볼 수 있다:
+
+```
+🚀 파이프라인 시작 — 9개 태스크
+▶ [task-001] MapService 인터페이스 정의
+  · TestWriter → Implementer → Docker → Reviewer…
+  ✓ 테스트 통과: 12 passed in 4.3s
+  · 리뷰: APPROVED — 인터페이스 설계가 명확합니다
+  · 브랜치 → 커밋 → 푸시 → PR 생성 중…
+✅ [task-001] MapService 인터페이스 정의 완료 (87.2s)  PR → https://...
+▶ [task-002] 경로 탐색 알고리즘 구현
+  ...
 ```
 
-반환된 `job_id`로 상태를 조회한다:
+완료되면 **결과 확인 →** 버튼이 나타난다.
+
+### 8.4 페이지 새로고침 후 재연결
+
+파이프라인 실행 중 페이지를 새로고침하거나 다른 화면으로 이동해도 자동으로 복원된다.
+
+- 앱 로드 시 백엔드에서 실행 중인 잡을 확인
+- 사이드바에 초록 펄스 배지 표시 → 클릭하면 로그 뷰 복원
+
+백엔드가 재시작된 경우 파이프라인 자체가 중단되므로 재연결이 불가능하다. 이 경우 대시보드에서 완료된 태스크의 리포트를 확인한다.
+
+### 8.5 API 직접 호출
 
 ```bash
+# 파이프라인 시작
+curl -X POST http://localhost:8000/api/pipeline/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tasks_path": "/path/to/project/tasks.yaml",
+    "repo_path": "/path/to/project"
+  }'
+# → {"job_id": "abc123...", "status": "running"}
+
+# 상태 조회
 curl http://localhost:8000/api/pipeline/status/{job_id}
+
+# 실시간 SSE 스트림 구독
+curl -N http://localhost:8000/api/pipeline/stream/{job_id}
 ```
 
 ---
@@ -317,9 +367,6 @@ tasks:
 | `test_framework` | ✅ | 현재 `pytest`만 지원 |
 | `depends_on` | ✅ | 선행 태스크 ID 목록. 빈 리스트면 독립 실행 |
 | `status` | - | `pending` / `implementing` / `reviewing` / `done` / `failed` |
-| `retry_count` | - | 현재 재시도 횟수 (자동 관리) |
-| `last_error` | - | 마지막 실패 오류 (자동 관리) |
-| `pr_url` | - | 생성된 PR URL (자동 관리) |
 
 ### 9.3 의존성 설정
 
@@ -351,7 +398,8 @@ description: |
 
   구현할 함수:
   - add(a: int, b: int) -> int: 두 정수의 합을 반환한다.
-  - divide(a: float, b: float) -> float: a를 b로 나눈다. b==0이면 ZeroDivisionError를 발생시킨다.
+  - divide(a: float, b: float) -> float: a를 b로 나눈다.
+    b==0이면 ZeroDivisionError를 발생시킨다.
 
   외부 라이브러리 없이 표준 라이브러리만 사용한다.
 ```
@@ -369,7 +417,18 @@ description: "계산기 모듈 만들어"
 
 사이드바에서 **대시보드** 탭(격자 아이콘) 클릭.
 
-### 10.2 화면 구성
+### 10.2 프로젝트 선택
+
+대시보드 상단의 경로 입력창으로 어느 프로젝트의 데이터든 조회할 수 있다.
+
+| 입력 | 설명 | 예시 |
+|------|------|------|
+| **레포** | 프로젝트의 Task Report 디렉토리 | `/path/to/project/data/reports` |
+| **tasks** | 프로젝트의 tasks.yaml 경로 | `/path/to/project/tasks.yaml` |
+
+**불러오기** 버튼 또는 Enter로 조회. 최근 5개 프로젝트는 **최근 ▾** 드롭다운으로 빠르게 전환할 수 있다.
+
+### 10.3 화면 구성
 
 **메트릭 카드 (상단)**
 
@@ -409,7 +468,7 @@ description: "계산기 모듈 만들어"
 
 | 알림 | 발생 시점 |
 |------|-----------|
-| `📋 파이프라인 시작` | `run_pipeline()` 호출 시 |
+| `📋 파이프라인 시작` | 파이프라인 시작 시 |
 | `🚀 [task-xxx] 시작` | 각 태스크 실행 시작 시 |
 | `✅ [task-xxx] 완료!` | PR 생성 성공 시 (PR URL 포함) |
 | `❌ [task-xxx] 실패` | 파이프라인 실패 시 (원인 포함) |
@@ -425,9 +484,7 @@ description: "계산기 모듈 만들어"
 
 ```bash
 curl http://localhost:8000/api/discord/status
-```
 
-```bash
 # 테스트 메시지 전송
 curl -X POST http://localhost:8000/api/discord/test
 ```
@@ -445,16 +502,16 @@ curl -X POST http://localhost:8000/api/discord/test
 | GET | `/api/health` | 서버 상태 확인 |
 | POST | `/api/pipeline/run` | 파이프라인 실행 (비동기 job 반환) |
 | GET | `/api/pipeline/status/{job_id}` | 파이프라인 실행 상태 조회 |
+| GET | `/api/pipeline/stream/{job_id}` | **SSE 실시간 이벤트 스트림** |
 | GET | `/api/pipeline/jobs` | 전체 job 목록 |
 | GET | `/api/tasks` | tasks.yaml 목록 조회 |
 | POST | `/api/tasks/draft` | Sonnet으로 태스크 초안 생성 |
-| GET | `/api/dashboard/summary` | 메트릭 요약 |
+| GET | `/api/dashboard/summary` | 메트릭 요약 (`?reports_dir=&tasks_path=`) |
 | GET | `/api/dashboard/tasks` | 태스크 + 리포트 조인 목록 |
 | GET | `/api/dashboard/milestones` | 마일스톤 보고서 목록 |
 | GET | `/api/dashboard/milestones/{filename}` | 마일스톤 보고서 내용 |
 | POST | `/api/execution-brief` | 시스템 회의용 실행 요약 생성 |
 | POST | `/api/reports/weekly` | 주간 보고서 생성 |
-| GET | `/api/reports/weekly` | 주간 보고서 목록 |
 | GET | `/api/discord/status` | Discord 연결 상태 |
 | POST | `/api/discord/test` | Discord 테스트 메시지 전송 |
 
@@ -462,14 +519,30 @@ curl -X POST http://localhost:8000/api/discord/test
 
 ```json
 {
-  "tasks_path": "data/tasks.yaml",
-  "repo_path": ".",
+  "tasks_path": "/path/to/project/tasks.yaml",
+  "repo_path": "/path/to/project",
   "base_branch": "dev",
   "task_id": null,
   "no_pr": false,
-  "verbose": false
+  "reports_dir": null
 }
 ```
+
+`reports_dir`가 `null`이면 `{repo_path}/data/reports`에 자동 저장된다.
+
+### SSE 이벤트 형식
+
+`/api/pipeline/stream/{job_id}` 스트림에서 수신되는 이벤트 타입:
+
+| type | 설명 | 주요 필드 |
+|------|------|-----------|
+| `pipeline_start` | 파이프라인 시작 | `total` |
+| `task_start` | 태스크 시작 | `task_id`, `title` |
+| `step` | 단계별 진행 | `task_id`, `step`, `message` |
+| `task_done` | 태스크 성공 완료 | `task_id`, `title`, `elapsed`, `pr_url` |
+| `task_fail` | 태스크 실패 | `task_id`, `title`, `reason`, `elapsed` |
+| `pipeline_done` | 전체 완료 | `success`, `fail` |
+| `end` | 스트림 종료 sentinel | `status` |
 
 ---
 
@@ -477,14 +550,9 @@ curl -X POST http://localhost:8000/api/discord/test
 
 ### "백엔드 서버에 연결할 수 없습니다"
 
-프론트엔드가 백엔드에 연결하지 못하는 경우다.
-
 ```bash
-# 백엔드 실행 확인
 uvicorn backend.main:app --reload --port 8000
-
-# 포트 충돌 확인
-lsof -i :8000
+lsof -i :8000   # 포트 충돌 확인
 ```
 
 ### "Docker 이미지 없음" 오류
@@ -502,76 +570,73 @@ gh auth login
 gh auth status
 ```
 
-### git worktree 오류 (이미 존재하는 브랜치)
+### git worktree 오류
 
 ```bash
-# 고아 워크트리 정리
-git worktree prune
-
-# 브랜치 강제 삭제 후 재실행
-git branch -D agent/task-xxx
+git worktree prune          # 고아 워크트리 정리
+git branch -D agent/task-xxx  # 브랜치 강제 삭제 후 재실행
 ```
 
 ### 태스크 실패 후 재실행
 
-`tasks.yaml`에서 해당 태스크의 `status`를 `pending`으로 변경한 후 다시 실행한다. 또는 `--id` 옵션 사용 시 자동으로 pending으로 강제된다:
+`--id` 옵션 사용 시 해당 태스크가 자동으로 pending으로 강제된다:
 
 ```bash
-python -m orchestrator.run -t data/tasks.yaml --id task-003
+python -m orchestrator.run -t /path/to/project/tasks.yaml --id task-003 --repo /path/to/project
 ```
+
+또는 `tasks.yaml`에서 해당 태스크의 `status`를 `pending`으로 직접 수정.
 
 ### Implementer 무한 재시도
 
 `last_error` 내용을 확인하고 `description`이나 `acceptance_criteria`를 더 명확하게 수정한 뒤 재실행한다.
 
-### MergeAgent 머지 실패
+### 태스크 초안 생성이 중간에 잘림
 
-자동 머지에 실패해도 태스크 자체는 `done`이다. PR은 정상 생성되어 있으므로 GitHub에서 수동으로 머지하면 된다.
+컨텍스트 문서가 너무 길거나 태스크가 너무 많은 경우다. 컨텍스트 문서를 줄이거나 태스크를 나눠서 두 번 생성한다.
 
-```bash
-# dev 브랜치 상태 확인
-git log dev --oneline -10
+### 파이프라인 실행 중 페이지를 새로고침했을 때
 
-# 수동 머지
-git checkout dev
-git merge agent/task-xxx
-```
+사이드바에 초록 펄스 배지가 표시된다. 클릭하면 실행 중인 파이프라인의 로그 뷰로 자동 복원된다.
 
 ---
 
 ## 부록: 디렉토리 구조
 
 ```
-AI_coding_agent/
+AI_coding_agent/              ← 파이프라인 도구 (이 레포)
 ├── agents/
-│   ├── roles.py               # 에이전트 역할 설정 (TestWriter, Implementer, Reviewer)
-│   ├── scoped_loop.py         # ScopedReactLoop — 도구 제한 + workspace 격리
-│   └── prompts/               # 역할별 시스템 프롬프트 (.md)
+│   ├── roles.py              # 에이전트 역할 설정 (TestWriter, Implementer, Reviewer)
+│   ├── scoped_loop.py        # ScopedReactLoop — 도구 제한 + workspace 격리
+│   └── prompts/              # 역할별 시스템 프롬프트 (.md)
 ├── backend/
-│   ├── main.py                # FastAPI 앱 진입점
-│   └── routers/               # API 라우터
-├── data/
-│   ├── tasks.yaml             # 태스크 정의 (직접 편집)
-│   └── reports/               # Task Report + 마일스톤 보고서 자동 저장
-│       └── milestones/
+│   ├── main.py               # FastAPI 앱 진입점
+│   └── routers/              # API 라우터
 ├── docker/
-│   ├── Dockerfile.test        # pytest 격리 실행 이미지
-│   └── runner.py              # DockerTestRunner
-├── docs/                      # 프로젝트 문서
-├── frontend/                  # React + Vite 프론트엔드
-│   └── src/
-│       └── components/
+│   ├── Dockerfile.test       # pytest 격리 실행 이미지
+│   └── runner.py             # DockerTestRunner
+├── docs/                     # 프로젝트 문서
+├── frontend/                 # React + Vite 프론트엔드
+│   └── src/components/
+│       ├── DashboardPage.tsx     # 프로젝트별 메트릭 대시보드
+│       ├── PipelineLogView.tsx   # 실시간 파이프라인 로그 (SSE)
+│       └── TaskDraftPanel.tsx    # 태스크 편집 + 파이프라인 실행
 ├── hotline/
-│   └── notifier.py            # Discord 알림 클라이언트
-├── llm/                       # LLM 클라이언트 래퍼
+│   └── notifier.py           # Discord 알림 클라이언트
 ├── orchestrator/
-│   ├── run.py                 # CLI 진입점
-│   ├── pipeline.py            # TDD 파이프라인 상태 머신
-│   ├── workspace.py           # 태스크별 격리 작업 디렉토리 관리
-│   ├── git_workflow.py        # git worktree 기반 브랜치/커밋/PR
-│   ├── merge_agent.py         # LLM 기반 머지 충돌 자동 해결
-│   ├── milestone.py           # 마일스톤 보고서 생성
-│   ├── report.py              # Task Report 저장/로드
-│   └── task.py                # Task 데이터 모델 + YAML 로드/저장
-└── .env                       # API 키 (git 추적 제외)
+│   ├── run.py                # CLI 진입점 + on_progress 이벤트 발행
+│   ├── pipeline.py           # TDD 파이프라인 상태 머신
+│   ├── workspace.py          # 태스크별 격리 작업 디렉토리 (/tmp)
+│   ├── git_workflow.py       # git worktree 기반 브랜치/커밋/PR
+│   ├── merge_agent.py        # LLM 기반 머지 충돌 자동 해결
+│   ├── milestone.py          # 마일스톤 보고서 생성
+│   ├── report.py             # Task Report 저장/로드
+│   └── task.py               # Task 데이터 모델 + YAML 로드/저장
+└── .env                      # API 키 (git 추적 제외)
+
+/path/to/my-project/          ← 대상 프로젝트 (별도 레포)
+├── tasks.yaml                # 파이프라인 태스크 정의
+└── data/
+    └── reports/              # Task Report + 마일스톤 보고서 자동 저장
+        └── milestones/
 ```

@@ -9,6 +9,10 @@ backend/routers/dashboard.py — 대시보드 데이터 API
   GET /api/dashboard/tasks     — 태스크 목록 + 상태 (tasks.yaml 기반)
   GET /api/dashboard/milestones — 마일스톤 보고서 목록
   GET /api/dashboard/milestones/{filename} — 마일스톤 보고서 본문
+
+모든 엔드포인트는 ?reports_dir=&tasks_path= 쿼리 파라미터로
+프로젝트별 경로를 지정할 수 있다.
+기본값: reports_dir=data/reports, tasks_path=data/tasks.yaml
 """
 
 from __future__ import annotations
@@ -18,37 +22,35 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from orchestrator.milestone import load_milestone_reports, _MILESTONES_DIR
+from orchestrator.milestone import load_milestone_reports
 from orchestrator.report import load_reports
 from orchestrator.task import load_tasks
 
 router = APIRouter()
-
-_TASKS_PATH = Path("data/tasks.yaml")
 
 
 # ── 전체 요약 ─────────────────────────────────────────────────────────────────
 
 
 @router.get("/dashboard/summary")
-def get_dashboard_summary() -> dict[str, Any]:
-    """
-    대시보드 메인에 표시할 전체 요약을 반환한다.
+def get_dashboard_summary(
+    reports_dir: str = "data/reports",
+    tasks_path: str = "data/tasks.yaml",
+) -> dict[str, Any]:
+    reports_path = Path(reports_dir)
+    milestones_dir = reports_path / "milestones"
 
-    - 태스크 상태별 카운트
-    - 최근 실행 집계 지표 (Task Report 전체 기준)
-    - 마일스톤 보고서 수
-    """
     # 태스크 현황
     task_stats: dict[str, int] = {}
-    if _TASKS_PATH.exists():
-        tasks = load_tasks(_TASKS_PATH)
+    tp = Path(tasks_path)
+    if tp.exists():
+        tasks = load_tasks(tp)
         for task in tasks:
             status = task.status.value
             task_stats[status] = task_stats.get(status, 0) + 1
 
     # Task Report 집계
-    reports = load_reports()
+    reports = load_reports(reports_dir=reports_path)
     total = len(reports)
     completed = sum(1 for r in reports if r.status == "COMPLETED")
     failed = total - completed
@@ -61,7 +63,7 @@ def get_dashboard_summary() -> dict[str, Any]:
     first_try = sum(1 for r in reports if r.test_pass_first_try)
     first_try_rate = round(first_try / completed * 100) if completed else 0
 
-    milestone_count = len(load_milestone_reports())
+    milestone_count = len(load_milestone_reports(milestones_dir=milestones_dir))
 
     return {
         "task_status": task_stats,
@@ -84,15 +86,16 @@ def get_dashboard_summary() -> dict[str, Any]:
 
 
 @router.get("/dashboard/tasks")
-def get_dashboard_tasks() -> dict[str, Any]:
-    """
-    tasks.yaml 의 태스크 목록과 각 태스크의 최신 Report 지표를 반환한다.
-    """
-    if not _TASKS_PATH.exists():
+def get_dashboard_tasks(
+    reports_dir: str = "data/reports",
+    tasks_path: str = "data/tasks.yaml",
+) -> dict[str, Any]:
+    tp = Path(tasks_path)
+    if not tp.exists():
         return {"tasks": []}
 
-    tasks = load_tasks(_TASKS_PATH)
-    reports = {r.task_id: r for r in load_reports()}
+    tasks = load_tasks(tp)
+    reports = {r.task_id: r for r in load_reports(reports_dir=Path(reports_dir))}
 
     result = []
     for task in tasks:
@@ -119,19 +122,17 @@ def get_dashboard_tasks() -> dict[str, Any]:
 
 
 @router.get("/dashboard/milestones")
-def list_milestones() -> dict[str, Any]:
-    """마일스톤 보고서 목록을 최신순으로 반환한다."""
-    return {"milestones": load_milestone_reports()}
+def list_milestones(reports_dir: str = "data/reports") -> dict[str, Any]:
+    milestones_dir = Path(reports_dir) / "milestones"
+    return {"milestones": load_milestone_reports(milestones_dir=milestones_dir)}
 
 
 @router.get("/dashboard/milestones/{filename}")
-def get_milestone(filename: str) -> dict[str, Any]:
-    """마일스톤 보고서 본문을 반환한다."""
-    # path traversal 방지
+def get_milestone(filename: str, reports_dir: str = "data/reports") -> dict[str, Any]:
     if "/" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="잘못된 파일명입니다.")
 
-    path = _MILESTONES_DIR / filename
+    path = Path(reports_dir) / "milestones" / filename
     if not path.exists():
         raise HTTPException(status_code=404, detail="보고서를 찾을 수 없습니다.")
 

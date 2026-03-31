@@ -7,7 +7,8 @@
  *   generating → editing → saving → running | error
  */
 
-import { useEffect, useReducer, useRef } from 'react'
+import { useEffect, useReducer, useState } from 'react'
+import { PipelineLogView, ACTIVE_JOB_KEY } from './PipelineLogView'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000') as string
 
@@ -30,6 +31,7 @@ interface State {
   errorMsg: string
   jobId: string
   tasksPath: string
+  repoPath: string
 }
 
 type Action =
@@ -40,6 +42,7 @@ type Action =
   | { type: 'ADD_TASK' }
   | { type: 'MOVE_TASK'; idx: number; dir: -1 | 1 }
   | { type: 'SET_PATH'; path: string }
+  | { type: 'SET_REPO'; path: string }
   | { type: 'SAVING' }
   | { type: 'RUNNING'; jobId: string }
   | { type: 'DONE' }
@@ -78,6 +81,8 @@ function reducer(state: State, action: Action): State {
     }
     case 'SET_PATH':
       return { ...state, tasksPath: action.path }
+    case 'SET_REPO':
+      return { ...state, repoPath: action.path }
     case 'SAVING':
       return { ...state, phase: 'saving' }
     case 'RUNNING':
@@ -105,6 +110,7 @@ export function TaskDraftPanel({ contextDoc, onBack }: Props) {
     errorMsg: '',
     jobId: '',
     tasksPath: 'data/tasks.yaml',
+    repoPath: '.',
   })
 
   // 마운트 시 즉시 초안 생성 요청
@@ -131,22 +137,32 @@ export function TaskDraftPanel({ contextDoc, onBack }: Props) {
     return () => { cancelled = true }
   }, [contextDoc])
 
-  // 파이프라인 상태 폴링
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  useEffect(() => {
-    if (state.phase !== 'running' || !state.jobId) return
-    pollRef.current = setInterval(async () => {
-      try {
-        const res = await fetch(`${API_BASE}/api/pipeline/status/${state.jobId}`)
-        const data = await res.json()
-        if (data.status === 'done' || data.status === 'error') {
-          clearInterval(pollRef.current!)
-          dispatch({ type: 'DONE' })
-        }
-      } catch {/* 네트워크 오류 시 재시도 */}
-    }, 2000)
-    return () => clearInterval(pollRef.current!)
-  }, [state.phase, state.jobId])
+
+  const [browsing, setBrowsing] = useState<'repo' | 'tasks' | null>(null)
+
+  async function browseRepo() {
+    setBrowsing('repo')
+    try {
+      const initial = state.repoPath && state.repoPath !== '.' ? state.repoPath : '~'
+      const res = await fetch(`${API_BASE}/api/utils/browse?type=folder&initial=${encodeURIComponent(initial)}`)
+      const data = await res.json()
+      if (!data.cancelled && data.path) dispatch({ type: 'SET_REPO', path: data.path })
+    } finally {
+      setBrowsing(null)
+    }
+  }
+
+  async function browseTasks() {
+    setBrowsing('tasks')
+    try {
+      const initial = state.repoPath && state.repoPath !== '.' ? state.repoPath : '~'
+      const res = await fetch(`${API_BASE}/api/utils/browse?type=file&initial=${encodeURIComponent(initial)}`)
+      const data = await res.json()
+      if (!data.cancelled && data.path) dispatch({ type: 'SET_PATH', path: data.path })
+    } finally {
+      setBrowsing(null)
+    }
+  }
 
   async function handleSaveAndRun() {
     dispatch({ type: 'SAVING' })
@@ -165,13 +181,18 @@ export function TaskDraftPanel({ contextDoc, onBack }: Props) {
       const runRes = await fetch(`${API_BASE}/api/pipeline/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tasks_path: state.tasksPath, no_pr: false }),
+        body: JSON.stringify({
+          tasks_path: state.tasksPath,
+          repo_path: state.repoPath,
+          no_pr: false,
+        }),
       })
       if (!runRes.ok) {
         const err = await runRes.json().catch(() => ({ detail: runRes.statusText }))
         throw new Error(err.detail ?? '파이프라인 시작 실패')
       }
       const runData = await runRes.json()
+      localStorage.setItem(ACTIVE_JOB_KEY, runData.job_id)
       dispatch({ type: 'RUNNING', jobId: runData.job_id })
     } catch (e: unknown) {
       dispatch({ type: 'ERROR', msg: e instanceof Error ? e.message : String(e) })
@@ -205,13 +226,7 @@ export function TaskDraftPanel({ contextDoc, onBack }: Props) {
   }
 
   if (state.phase === 'running') {
-    return (
-      <div className="flex flex-col items-center justify-center h-full gap-4">
-        <div className="w-8 h-8 border-2 border-green-500 border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm text-gray-500 dark:text-zinc-400">파이프라인 실행 중… (job: {state.jobId.slice(0, 8)})</p>
-        <p className="text-xs text-gray-400 dark:text-zinc-500">터미널에서 로그를 확인하세요.</p>
-      </div>
-    )
+    return <PipelineLogView jobId={state.jobId} onDone={() => dispatch({ type: 'DONE' })} />
   }
 
   if (state.phase === 'done') {
@@ -249,13 +264,55 @@ export function TaskDraftPanel({ contextDoc, onBack }: Props) {
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {/* 저장 경로 */}
-          <input
-            className="text-xs rounded border border-gray-300 dark:border-zinc-600 px-2 py-1 bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 w-44"
-            value={state.tasksPath}
-            onChange={e => dispatch({ type: 'SET_PATH', path: e.target.value })}
-            title="저장 경로"
-          />
+          {/* 레포 경로 */}
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-400 dark:text-zinc-500 shrink-0">레포</span>
+            <input
+              className="text-xs rounded border border-gray-300 dark:border-zinc-600 px-2 py-1 bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 w-48"
+              value={state.repoPath}
+              onChange={e => dispatch({ type: 'SET_REPO', path: e.target.value })}
+              placeholder="/path/to/project"
+              title="작업 대상 레포 경로"
+            />
+            <button
+              onClick={browseRepo}
+              disabled={browsing !== null}
+              className="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300 disabled:opacity-40 px-1 py-1 rounded transition-colors"
+              title="파인더에서 폴더 선택"
+            >
+              {browsing === 'repo' ? (
+                <span className="inline-block w-3.5 h-3.5 border border-gray-400 border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M2 6a2 2 0 012-2h4l2 2h6a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+                </svg>
+              )}
+            </button>
+          </div>
+          {/* tasks 저장 경로 */}
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-400 dark:text-zinc-500 shrink-0">tasks</span>
+            <input
+              className="text-xs rounded border border-gray-300 dark:border-zinc-600 px-2 py-1 bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 w-40"
+              value={state.tasksPath}
+              onChange={e => dispatch({ type: 'SET_PATH', path: e.target.value })}
+              title="tasks.yaml 저장 경로"
+            />
+            <button
+              onClick={browseTasks}
+              disabled={browsing !== null}
+              className="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300 disabled:opacity-40 px-1 py-1 rounded transition-colors"
+              title="파인더에서 파일 선택"
+            >
+              {browsing === 'tasks' ? (
+                <span className="inline-block w-3.5 h-3.5 border border-gray-400 border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
+                </svg>
+              )}
+            </button>
+          </div>
           <button
             className="rounded-lg bg-blue-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
             onClick={handleSaveAndRun}
@@ -397,3 +454,4 @@ function TaskCard({ task, idx, total, onUpdate, onDelete, onMove }: CardProps) {
     </div>
   )
 }
+

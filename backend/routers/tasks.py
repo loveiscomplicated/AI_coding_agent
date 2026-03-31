@@ -61,7 +61,7 @@ async def generate_tasks_draft(body: DraftRequest) -> dict:
     """
     response = await _client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=4096,
+        max_tokens=16000,
         system=_DRAFT_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": body.context_doc}],
     )
@@ -74,6 +74,13 @@ async def generate_tasks_draft(body: DraftRequest) -> dict:
     try:
         data: Any = json.loads(cleaned)
     except json.JSONDecodeError as e:
+        # stop_reason이 max_tokens이면 응답이 잘린 것
+        stop = getattr(response, "stop_reason", None)
+        if stop == "max_tokens":
+            raise HTTPException(
+                status_code=502,
+                detail="태스크가 너무 많아 응답이 잘렸습니다. 컨텍스트 문서를 줄이거나 태스크를 분할하세요.",
+            )
         raise HTTPException(status_code=502, detail=f"Sonnet 응답 파싱 실패: {e}\n응답:\n{raw[:300]}")
 
     tasks = data.get("tasks", [])

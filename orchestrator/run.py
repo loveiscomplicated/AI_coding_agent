@@ -113,6 +113,7 @@ def run_pipeline(
     no_pr: bool = False,
     verbose: bool = False,
     on_progress: object = None,  # 향후 콜백 확장용
+    reports_dir: Path | None = None,
 ) -> dict:
     """
     파이프라인 실행 핵심 로직. CLI와 FastAPI 백엔드 양쪽에서 호출된다.
@@ -124,6 +125,10 @@ def run_pipeline(
         level=logging.DEBUG if verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
+
+    # reports_dir 기본값: 대상 레포 안의 data/reports
+    if reports_dir is None:
+        reports_dir = repo_path / "data" / "reports"
 
     # 태스크 로드
     all_tasks = load_tasks(tasks_path)
@@ -151,30 +156,47 @@ def run_pipeline(
     git = GitWorkflow(repo_path, base_branch=base_branch)
     notifier = DiscordNotifier.from_env()
 
+    def emit(event: dict) -> None:
+        if on_progress:
+            on_progress(event)  # type: ignore[operator]
+
     success_count = 0
     fail_count = 0
 
-    # 파이프라인 시작 알림
+    emit({"type": "pipeline_start", "total": len(pending),
+          "tasks": [t.id for t in pending]})
     _notify(notifier, f"📋 파이프라인 시작 — {len(pending)}개 태스크")
 
     for group in groups:
         for task in group:
             start_time = time.monotonic()
 
-            # 태스크 시작 알림
+            emit({"type": "task_start", "task_id": task.id, "title": task.title})
             _notify(notifier, f"🚀 [{task.id}] \"{task.title}\" 시작")
 
             with WorkspaceManager(task, repo_path, keep_on_failure=True) as ws:
+                emit({"type": "step", "task_id": task.id, "step": "testing",
+                      "message": "TestWriter → Implementer → Docker → Reviewer…"})
                 result = pipeline.run(task, ws)
                 elapsed = time.monotonic() - start_time
 
                 pr_url = ""
                 if result.succeeded and not no_pr:
+                    if result.test_result:
+                        emit({"type": "step", "task_id": task.id, "step": "test_pass",
+                              "message": f"테스트 통과: {result.test_result.summary}"})
+                    if result.review:
+                        emit({"type": "step", "task_id": task.id, "step": "review",
+                              "message": f"리뷰: {result.review.verdict} — {result.review.summary}"})
+                    emit({"type": "step", "task_id": task.id, "step": "git",
+                          "message": "브랜치 → 커밋 → 푸시 → PR 생성 중…"})
                     try:
                         pr_url = git.run(task, ws, result)
                         task.pr_url = pr_url
                         task.status = TaskStatus.DONE
                         success_count += 1
+                        emit({"type": "task_done", "task_id": task.id, "title": task.title,
+                              "pr_url": pr_url, "elapsed": round(elapsed, 1)})
                         _notify(
                             notifier,
                             f"✅ [{task.id}] \"{task.title}\" 완료! "
@@ -183,28 +205,32 @@ def run_pipeline(
                     except GitWorkflowError as e:
                         result = type(result).failed(task, str(e))  # type: ignore[attr-defined]
                         fail_count += 1
+                        emit({"type": "task_fail", "task_id": task.id, "title": task.title,
+                              "reason": str(e), "elapsed": round(elapsed, 1)})
                         _notify_failure(notifier, task, str(e), elapsed)
                 elif result.succeeded:
                     task.status = TaskStatus.DONE
                     success_count += 1
+                    emit({"type": "task_done", "task_id": task.id, "title": task.title,
+                          "elapsed": round(elapsed, 1)})
                     _notify(
                         notifier,
                         f"✅ [{task.id}] \"{task.title}\" 완료! (⏱ {elapsed:.0f}s)",
                     )
                 else:
                     fail_count += 1
+                    emit({"type": "task_fail", "task_id": task.id, "title": task.title,
+                          "reason": result.failure_reason or "알 수 없음", "elapsed": round(elapsed, 1)})
                     hint = _notify_failure(notifier, task, result.failure_reason or "알 수 없음", elapsed)
                     if hint:
-                        # 사용자 힌트를 last_error에 추가해 report에 기록
                         task.last_error = f"[Discord 힌트] {hint}\n{task.last_error}"
 
-                # Task Report 저장
                 report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url)
-                save_report(report)
+                save_report(report, reports_dir=reports_dir)
 
-            # tasks.yaml 체크포인트
             save_tasks(all_tasks, tasks_path)
 
+    emit({"type": "pipeline_done", "success": success_count, "fail": fail_count})
     _notify(
         notifier,
         f"🏁 파이프라인 완료 — 성공: {success_count}  실패: {fail_count}",
@@ -230,6 +256,8 @@ def _run_single_task(
     save_lock: threading.Lock,
     all_tasks: list[Task],
     tasks_path: Path,
+    reports_dir: Path = Path("data/reports"),
+    on_progress=None,   # Callable[[dict], None] | None
 ) -> tuple[bool, str]:
     """
     태스크 하나를 실행하고 (succeeded, branch_name) 을 반환한다.
@@ -239,6 +267,10 @@ def _run_single_task(
     - GitWorkflow.run() 은 worktree 기반으로 main repo HEAD 불변
     - save_lock 은 tasks.yaml 파일 쓰기 직렬화에 사용
     """
+    def emit(event: dict) -> None:
+        if on_progress:
+            on_progress(event)
+
     print(f"\n{'─' * 60}")
     print(f"{_BOLD}[{task.id}]{_RESET} {task.title}")
     if task.depends_on:
@@ -247,8 +279,10 @@ def _run_single_task(
 
     start_time = time.monotonic()
     _notify(notifier, f"🚀 [{task.id}] \"{task.title}\" 시작")
+    emit({"type": "task_start", "task_id": task.id, "title": task.title})
 
     with WorkspaceManager(task, repo_path, keep_on_failure=True) as ws:
+        emit({"type": "step", "task_id": task.id, "step": "testing", "message": "TestWriter → 테스트 작성 중…"})
         print(_info(f"[{task.id}] TestWriter → Implementer → Docker → Reviewer ..."))
         result = pipeline.run(task, ws)
         elapsed = time.monotonic() - start_time
@@ -260,21 +294,30 @@ def _run_single_task(
         if not result.succeeded:
             print(_fail(f"[{task.id}] 파이프라인 실패: {result.failure_reason}"))
             print(f"  workspace 보존됨: {ws.path}")
+            emit({"type": "task_fail", "task_id": task.id, "title": task.title,
+                  "reason": result.failure_reason or "알 수 없음", "elapsed": round(elapsed, 1)})
             _notify_failure(notifier, task, result.failure_reason or "알 수 없음", elapsed)
         else:
             if result.test_result:
                 print(_ok(f"[{task.id}] 테스트: {result.test_result.summary}"))
+                emit({"type": "step", "task_id": task.id, "step": "test_pass",
+                      "message": f"테스트 통과: {result.test_result.summary}"})
             if result.review:
                 icon = "✅" if result.review.approved else "⚠️"
                 print(f"  {icon} [{task.id}] 리뷰: {result.review.verdict} — {result.review.summary}")
+                emit({"type": "step", "task_id": task.id, "step": "review",
+                      "message": f"리뷰: {result.review.verdict} — {result.review.summary}"})
 
             if no_pr:
                 print(_warn(f"[{task.id}] --no-pr: PR 생성 건너뜀"))
                 task.status = TaskStatus.DONE
                 succeeded = True
+                emit({"type": "task_done", "task_id": task.id, "title": task.title,
+                      "elapsed": round(elapsed, 1)})
                 _notify(notifier, f"✅ [{task.id}] \"{task.title}\" 완료! (⏱ {elapsed:.0f}s)")
             else:
                 print(_info(f"[{task.id}] 브랜치 → 커밋 → 푸시 → PR ..."))
+                emit({"type": "step", "task_id": task.id, "step": "git", "message": "브랜치 → 커밋 → 푸시 → PR 생성 중…"})
                 try:
                     pr_url = git.run(task, ws, result)
                     task.pr_url = pr_url
@@ -282,16 +325,20 @@ def _run_single_task(
                     branch = task.branch_name
                     succeeded = True
                     print(_ok(f"[{task.id}] PR: {pr_url}"))
+                    emit({"type": "task_done", "task_id": task.id, "title": task.title,
+                          "pr_url": pr_url, "elapsed": round(elapsed, 1)})
                     _notify(
                         notifier,
                         f"✅ [{task.id}] \"{task.title}\" 완료! PR: {pr_url}  (⏱ {elapsed:.0f}s)",
                     )
                 except GitWorkflowError as e:
                     print(_fail(f"[{task.id}] Git 워크플로우 실패: {e}"))
+                    emit({"type": "task_fail", "task_id": task.id, "title": task.title,
+                          "reason": str(e), "elapsed": round(elapsed, 1)})
                     _notify_failure(notifier, task, str(e), elapsed)
 
         report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url)
-        report_path = save_report(report)
+        report_path = save_report(report, reports_dir=reports_dir)
         print(f"  [{task.id}] 리포트: {report_path}")
 
         with save_lock:
@@ -522,6 +569,9 @@ def main() -> int:
     git = GitWorkflow(repo_path, base_branch=args.base_branch)
     merge_agent = MergeAgent(llm=haiku, repo_path=repo_path)
 
+    # reports_dir: --reports-dir 명시 시 그 경로, 아니면 대상 레포 안의 data/reports
+    reports_dir = Path(args.reports_dir) if args.reports_dir != "data/reports" else repo_path / "data" / "reports"
+
     save_lock = threading.Lock()  # tasks.yaml 쓰기 직렬화
     success_count = 0
     fail_count = 0
@@ -541,6 +591,7 @@ def main() -> int:
                     task, pipeline, git, repo_path,
                     args.no_pr, None,  # notifier=None (CLI에서는 Discord 미사용)
                     save_lock, all_tasks, tasks_path,
+                    reports_dir,
                 ): task
                 for task in group
             }
@@ -594,10 +645,12 @@ def main() -> int:
             run_reports = [r for r in task_reports if r.task_id in run_ids]
 
             if run_reports:
+                milestones_dir = reports_dir / "milestones"
                 _, milestone_path = generate_milestone_report(
                     reports=run_reports,
                     llm_fn=_llm_fn,
                     run_label=run_label,
+                    milestones_dir=milestones_dir,
                 )
                 print(_ok(f"마일스톤 보고서: {milestone_path}"))
         except Exception as exc:
@@ -628,6 +681,9 @@ def _parse_args() -> argparse.Namespace:
                         help="그룹 내 태스크 병렬 실행 수 (기본값: 1 = 순차)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="DEBUG 로그 출력")
+    parser.add_argument("--reports-dir", default="data/reports",
+                        metavar="DIR",
+                        help="Task Report 저장 디렉토리 (기본값: data/reports)")
     return parser.parse_args()
 
 

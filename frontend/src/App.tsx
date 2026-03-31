@@ -4,6 +4,7 @@ import { MeetingStorage } from './storage/meetingStorage'
 import { MeetingApp } from './components/MeetingApp'
 import { ChatListPage } from './components/ChatListPage'
 import { DashboardPage } from './components/DashboardPage'
+import { PipelineLogView, ACTIVE_JOB_KEY } from './components/PipelineLogView'
 
 const storage = new MeetingStorage()
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000') as string
@@ -36,6 +37,7 @@ export default function App() {
   const [search, setSearch] = useState('')
   const [showListPage, setShowListPage] = useState(false)
   const [showDashboard, setShowDashboard] = useState(false)
+  const [resumeJobId, setResumeJobId] = useState<string | null>(null)
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -57,6 +59,23 @@ export default function App() {
 
   useEffect(() => {
     setRecords(storage.list())
+  }, [])
+
+  // 새로고침 후 실행 중이던 파이프라인 잡 복원
+  useEffect(() => {
+    const savedJobId = localStorage.getItem(ACTIVE_JOB_KEY)
+    if (!savedJobId) return
+    fetch(`${API_BASE}/api/pipeline/status/${savedJobId}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data && data.status === 'running') {
+          setResumeJobId(savedJobId)
+        } else {
+          // 이미 완료됐거나 백엔드에 없으면 제거
+          localStorage.removeItem(ACTIVE_JOB_KEY)
+        }
+      })
+      .catch(() => { /* 백엔드 미기동 상태면 무시 */ })
   }, [])
 
   const activeRecord = records.find(r => r.id === activeId)
@@ -93,6 +112,7 @@ export default function App() {
 
   const handleSelect = (record: MeetingRecord) => {
     setShowListPage(false)
+    setShowDashboard(false)
     setActiveId(record.id)
     setActiveMeetingType(record.meetingType ?? 'project')
     setActiveExecutionBrief('')
@@ -238,6 +258,23 @@ export default function App() {
             )}
           </div>
         </div>
+
+        {/* 실행 중인 파이프라인 배지 */}
+        {resumeJobId && (
+          <div className="px-2 pb-1 flex-shrink-0">
+            <button
+              onClick={() => {
+                setShowListPage(false)
+                setShowDashboard(false)
+                setActiveId(null)
+              }}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-green-900/40 text-green-400 hover:bg-green-900/60 transition-colors text-xs"
+            >
+              <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse shrink-0" />
+              파이프라인 실행 중 — 클릭해서 보기
+            </button>
+          </div>
+        )}
 
         {/* 네비게이션 링크 */}
         <div className="px-2 pb-1 flex-shrink-0 space-y-0.5">
@@ -386,7 +423,12 @@ export default function App() {
 
       {/* ── 메인 ── */}
       <div className="flex-1 flex flex-col min-w-0">
-        {showDashboard ? (
+        {resumeJobId && !showDashboard && !showListPage && !activeId ? (
+          <PipelineLogView
+            jobId={resumeJobId}
+            onDone={() => setResumeJobId(null)}
+          />
+        ) : showDashboard ? (
           <DashboardPage />
         ) : showListPage ? (
           <ChatListPage
