@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from orchestrator.run import run_pipeline
+from orchestrator.run import PauseController, run_pipeline
 
 router = APIRouter()
 
@@ -54,6 +54,7 @@ class RunRequest(BaseModel):
     no_pr: bool = False
     verbose: bool = False
     reports_dir: str | None = None   # None → run_pipeline 기본값 (repo_path/data/reports)
+    max_workers: int = 1             # 병렬 에이전트 수 (1=순차)
 
 
 # ── 엔드포인트 ────────────────────────────────────────────────────────────────
@@ -67,6 +68,8 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
     job_id = str(uuid.uuid4())
     q: _queue.Queue = _queue.Queue()
 
+    pause_ctrl = PauseController()
+
     with _lock:
         _jobs[job_id] = {
             "job_id": job_id,
@@ -77,6 +80,7 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
             "error": None,
             "events": [],
             "request": body.model_dump(),
+            "pause_ctrl": pause_ctrl,   # 제어용 (직렬화 제외)
         }
         _event_queues[job_id] = q
 
@@ -94,6 +98,8 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
                 verbose=body.verbose,
                 reports_dir=Path(body.reports_dir) if body.reports_dir else None,
                 on_progress=on_progress,
+                pause_controller=pause_ctrl,
+                max_workers=body.max_workers,
             )
             with _lock:
                 _jobs[job_id]["status"] = "done"
@@ -171,10 +177,57 @@ def get_job_status(job_id: str) -> dict:
     return job
 
 
+class ControlRequest(BaseModel):
+    action: str  # "pause" | "resume" | "stop"
+
+
+@router.post("/pipeline/control/{job_id}")
+def control_pipeline(job_id: str, body: ControlRequest) -> dict:
+    """
+    실행 중인 파이프라인에 제어 명령을 전송한다.
+
+    action:
+        pause  → 현재 태스크 완료 후 일시정지
+        resume → 일시정지 해제
+        stop   → 현재 태스크 완료 후 파이프라인 종료
+    """
+    with _lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"잡 '{job_id}'를 찾을 수 없습니다.")
+
+    ctrl: PauseController | None = job.get("pause_ctrl")
+    if ctrl is None:
+        raise HTTPException(status_code=409, detail="이 잡은 제어를 지원하지 않습니다.")
+
+    action = body.action.lower()
+    if action == "pause":
+        result_cmd = ctrl.handle_command("멈춰")
+        if result_cmd:
+            with _lock:
+                _jobs[job_id]["paused"] = True
+    elif action == "resume":
+        result_cmd = ctrl.handle_command("계속")
+        if result_cmd:
+            with _lock:
+                _jobs[job_id]["paused"] = False
+    elif action == "stop":
+        result_cmd = ctrl.handle_command("중단")
+        if result_cmd:
+            with _lock:
+                _jobs[job_id]["paused"] = False
+    else:
+        raise HTTPException(status_code=422, detail=f"알 수 없는 action: {action!r}")
+
+    return {"job_id": job_id, "action": action, "applied": result_cmd is not None}
+
+
 @router.get("/pipeline/jobs")
 def list_jobs() -> dict:
     """모든 잡의 요약 목록을 반환한다."""
     with _lock:
-        jobs = list(_jobs.values())
+        raw = list(_jobs.values())
+    # pause_ctrl은 Python 객체라 직렬화 불가 — 제외
+    jobs = [{k: v for k, v in j.items() if k != "pause_ctrl"} for j in raw]
     jobs.sort(key=lambda j: j["started_at"], reverse=True)
     return {"jobs": jobs}

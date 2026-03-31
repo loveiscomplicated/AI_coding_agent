@@ -19,6 +19,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+
+logger = logging.getLogger(__name__)
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -103,6 +105,81 @@ def resolve_execution_groups(tasks: list[Task]) -> list[list[Task]]:
     return groups
 
 
+# ── 일시정지 컨트롤러 ─────────────────────────────────────────────────────────
+
+class PauseController:
+    """
+    파이프라인 일시정지/재개/중단 상태를 스레드 안전하게 관리한다.
+
+    Discord 명령 리스너 스레드가 상태를 변경하고,
+    파이프라인 루프가 각 태스크 완료 후 wait_if_paused()를 호출한다.
+
+    명령어:
+        멈춰 / pause  → 다음 태스크 전 일시정지
+        계속 / resume → 일시정지 해제 후 재개
+        중단 / stop   → 파이프라인 즉시 종료
+    """
+
+    _PAUSE_KEYWORDS  = {"멈춰", "pause", "멈춤", "정지"}
+    _RESUME_KEYWORDS = {"계속", "resume", "재개"}
+    _STOP_KEYWORDS   = {"중단", "stop", "종료", "abort"}
+
+    def __init__(self) -> None:
+        self._paused = False
+        self._stopped = False
+        self._resume_event = threading.Event()
+        self._resume_event.set()  # 초기엔 정지 안 됨
+
+    # ── 상태 변경 (리스너 스레드 호출) ────────────────────────────────────────
+
+    def handle_command(self, text: str) -> str | None:
+        """
+        Discord 메시지 텍스트를 파싱하여 명령을 처리한다.
+
+        Returns:
+            처리된 명령 문자열('paused'|'resumed'|'stopped'), 무관한 메시지는 None.
+        """
+        lower = text.lower().strip()
+        if lower in self._PAUSE_KEYWORDS:
+            self._paused = True
+            self._resume_event.clear()
+            logger.info("PauseController: 일시정지 요청")
+            return "paused"
+        if lower in self._RESUME_KEYWORDS:
+            if self._paused:
+                self._paused = False
+                self._resume_event.set()
+                logger.info("PauseController: 재개 요청")
+                return "resumed"
+        if lower in self._STOP_KEYWORDS:
+            self._stopped = True
+            self._resume_event.set()  # 대기 중인 wait_if_paused 해제
+            logger.info("PauseController: 중단 요청")
+            return "stopped"
+        return None
+
+    # ── 파이프라인 루프에서 호출 ───────────────────────────────────────────────
+
+    @property
+    def is_stopped(self) -> bool:
+        return self._stopped
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
+
+    def wait_if_paused(self) -> bool:
+        """
+        일시정지 상태면 재개될 때까지 블로킹한다.
+
+        Returns:
+            True  → 중단 요청이 들어와 파이프라인을 종료해야 함
+            False → 정상 재개
+        """
+        self._resume_event.wait()
+        return self._stopped
+
+
 # ── 파이프라인 실행 (CLI + API 공용) ──────────────────────────────────────────
 
 def run_pipeline(
@@ -112,8 +189,10 @@ def run_pipeline(
     task_id: str | None = None,
     no_pr: bool = False,
     verbose: bool = False,
-    on_progress: object = None,  # 향후 콜백 확장용
+    on_progress: object = None,
     reports_dir: Path | None = None,
+    pause_controller: "PauseController | None" = None,
+    max_workers: int = 1,
 ) -> dict:
     """
     파이프라인 실행 핵심 로직. CLI와 FastAPI 백엔드 양쪽에서 호출된다.
@@ -160,75 +239,152 @@ def run_pipeline(
         if on_progress:
             on_progress(event)  # type: ignore[operator]
 
+    # ── 일시정지 컨트롤러 + Discord 명령 리스너 스레드 ──────────────────────────
+    pause_ctrl = pause_controller if pause_controller is not None else PauseController()
+    _listener_stop = threading.Event()
+
+    def _on_discord_command(text: str) -> None:
+        result_cmd = pause_ctrl.handle_command(text)
+        if result_cmd == "paused":
+            _notify(notifier, "⏸ 파이프라인 일시정지 예약됨. 현재 태스크 완료 후 대기합니다.\n재개하려면 '계속', 완전 중단은 '중단'을 입력하세요.")
+            emit({"type": "step", "step": "paused",
+                  "message": "일시정지 예약됨 — 현재 태스크 완료 후 대기"})
+        elif result_cmd == "resumed":
+            _notify(notifier, "▶ 파이프라인 재개합니다.")
+            emit({"type": "step", "step": "resumed", "message": "파이프라인 재개"})
+        elif result_cmd == "stopped":
+            _notify(notifier, "🛑 파이프라인 중단 요청 수신. 현재 태스크 완료 후 종료합니다.")
+            emit({"type": "step", "step": "stopped",
+                  "message": "중단 요청 — 현재 태스크 완료 후 종료"})
+
+    if notifier:
+        # 파이프라인 시작 전 최신 메시지 ID를 기준점으로 사용
+        _baseline_id = notifier.get_latest_message_id()
+        _listener_thread = threading.Thread(
+            target=notifier.listen_for_commands,
+            kwargs={
+                "callback": _on_discord_command,
+                "after_message_id": _baseline_id,
+                "stop_event": _listener_stop,
+            },
+            daemon=True,
+            name="discord-command-listener",
+        )
+        _listener_thread.start()
+
     success_count = 0
     fail_count = 0
+    _save_lock = threading.Lock()   # tasks.yaml 파일 쓰기 직렬화
+
+    def run_one(task: Task) -> None:
+        """태스크 하나를 실행한다. 병렬/순차 양쪽에서 호출된다."""
+        nonlocal success_count, fail_count
+
+        start_time = time.monotonic()
+        emit({"type": "task_start", "task_id": task.id, "title": task.title})
+        _notify(notifier, f"🚀 [{task.id}] \"{task.title}\" 시작")
+
+        with WorkspaceManager(task, repo_path, keep_on_failure=True) as ws:
+            emit({"type": "step", "task_id": task.id, "step": "testing",
+                  "message": "TestWriter → Implementer → Docker → Reviewer…"})
+            result = pipeline.run(task, ws)
+            elapsed = time.monotonic() - start_time
+
+            pr_url = ""
+            if result.succeeded and not no_pr:
+                if result.test_result:
+                    emit({"type": "step", "task_id": task.id, "step": "test_pass",
+                          "message": f"테스트 통과: {result.test_result.summary}"})
+                if result.review:
+                    emit({"type": "step", "task_id": task.id, "step": "review",
+                          "message": f"리뷰: {result.review.verdict} — {result.review.summary}"})
+                emit({"type": "step", "task_id": task.id, "step": "git",
+                      "message": "브랜치 → 커밋 → 푸시 → PR 생성 중…"})
+                try:
+                    pr_url = git.run(task, ws, result)
+                    task.pr_url = pr_url
+                    task.status = TaskStatus.DONE
+                    with _save_lock:
+                        success_count += 1
+                    emit({"type": "task_done", "task_id": task.id, "title": task.title,
+                          "pr_url": pr_url, "elapsed": round(elapsed, 1)})
+                    _notify(notifier,
+                            f"✅ [{task.id}] \"{task.title}\" 완료! PR: {pr_url}  (⏱ {elapsed:.0f}s)")
+                except GitWorkflowError as e:
+                    result = type(result).failed(task, str(e))  # type: ignore[attr-defined]
+                    with _save_lock:
+                        fail_count += 1
+                    emit({"type": "task_fail", "task_id": task.id, "title": task.title,
+                          "reason": str(e), "elapsed": round(elapsed, 1)})
+                    _notify_failure(notifier, task, str(e), elapsed)
+            elif result.succeeded:
+                task.status = TaskStatus.DONE
+                with _save_lock:
+                    success_count += 1
+                emit({"type": "task_done", "task_id": task.id, "title": task.title,
+                      "elapsed": round(elapsed, 1)})
+                _notify(notifier, f"✅ [{task.id}] \"{task.title}\" 완료! (⏱ {elapsed:.0f}s)")
+            else:
+                with _save_lock:
+                    fail_count += 1
+                emit({"type": "task_fail", "task_id": task.id, "title": task.title,
+                      "reason": result.failure_reason or "알 수 없음", "elapsed": round(elapsed, 1)})
+                hint = _notify_failure(notifier, task, result.failure_reason or "알 수 없음", elapsed)
+                if hint:
+                    task.last_error = f"[Discord 힌트] {hint}\n{task.last_error}"
+
+            report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url)
+            save_report(report, reports_dir=reports_dir)
+
+        with _save_lock:
+            save_tasks(all_tasks, tasks_path)
 
     emit({"type": "pipeline_start", "total": len(pending),
           "tasks": [t.id for t in pending]})
-    _notify(notifier, f"📋 파이프라인 시작 — {len(pending)}개 태스크")
+    _notify(notifier, f"📋 파이프라인 시작 — {len(pending)}개 태스크 / 에이전트 {max_workers}개\n'멈춰' 입력 시 일시정지, '중단' 입력 시 종료")
 
-    for group in groups:
-        for task in group:
-            start_time = time.monotonic()
+    try:
+        for group in groups:
+            # ── 그룹 시작 전 일시정지/중단 체크 ─────────────────────────────────
+            if pause_ctrl.is_paused:
+                first_id = group[0].id if group else "?"
+                _notify(notifier,
+                        f"⏸ 일시정지됨. '계속' 입력 시 다음 그룹 [{first_id}…] 부터 재개합니다.")
+                emit({"type": "paused", "next_task_id": first_id,
+                      "message": f"일시정지 — '계속' 입력 시 {first_id} 재개"})
+                should_stop = pause_ctrl.wait_if_paused()
+                if should_stop:
+                    emit({"type": "pipeline_aborted",
+                          "message": "사용자 중단 요청으로 파이프라인 종료"})
+                    break
+                emit({"type": "resumed", "task_id": first_id, "message": f"{first_id} 재개"})
 
-            emit({"type": "task_start", "task_id": task.id, "title": task.title})
-            _notify(notifier, f"🚀 [{task.id}] \"{task.title}\" 시작")
+            if pause_ctrl.is_stopped:
+                break
 
-            with WorkspaceManager(task, repo_path, keep_on_failure=True) as ws:
-                emit({"type": "step", "task_id": task.id, "step": "testing",
-                      "message": "TestWriter → Implementer → Docker → Reviewer…"})
-                result = pipeline.run(task, ws)
-                elapsed = time.monotonic() - start_time
+            # ── 그룹 내 태스크 실행 ───────────────────────────────────────────
+            workers = min(max_workers, len(group))
+            if workers > 1:
+                emit({"type": "step", "step": "parallel",
+                      "message": f"그룹 {len(group)}개 태스크를 에이전트 {workers}개로 병렬 실행"})
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = {executor.submit(run_one, task): task for task in group}
+                    for future in as_completed(futures):
+                        exc = future.exception()
+                        if exc:
+                            t = futures[future]
+                            logging.getLogger(__name__).error(
+                                "[%s] 예외 발생: %s", t.id, exc)
+            else:
+                for task in group:
+                    run_one(task)
 
-                pr_url = ""
-                if result.succeeded and not no_pr:
-                    if result.test_result:
-                        emit({"type": "step", "task_id": task.id, "step": "test_pass",
-                              "message": f"테스트 통과: {result.test_result.summary}"})
-                    if result.review:
-                        emit({"type": "step", "task_id": task.id, "step": "review",
-                              "message": f"리뷰: {result.review.verdict} — {result.review.summary}"})
-                    emit({"type": "step", "task_id": task.id, "step": "git",
-                          "message": "브랜치 → 커밋 → 푸시 → PR 생성 중…"})
-                    try:
-                        pr_url = git.run(task, ws, result)
-                        task.pr_url = pr_url
-                        task.status = TaskStatus.DONE
-                        success_count += 1
-                        emit({"type": "task_done", "task_id": task.id, "title": task.title,
-                              "pr_url": pr_url, "elapsed": round(elapsed, 1)})
-                        _notify(
-                            notifier,
-                            f"✅ [{task.id}] \"{task.title}\" 완료! "
-                            f"PR: {pr_url}  (⏱ {elapsed:.0f}s)",
-                        )
-                    except GitWorkflowError as e:
-                        result = type(result).failed(task, str(e))  # type: ignore[attr-defined]
-                        fail_count += 1
-                        emit({"type": "task_fail", "task_id": task.id, "title": task.title,
-                              "reason": str(e), "elapsed": round(elapsed, 1)})
-                        _notify_failure(notifier, task, str(e), elapsed)
-                elif result.succeeded:
-                    task.status = TaskStatus.DONE
-                    success_count += 1
-                    emit({"type": "task_done", "task_id": task.id, "title": task.title,
-                          "elapsed": round(elapsed, 1)})
-                    _notify(
-                        notifier,
-                        f"✅ [{task.id}] \"{task.title}\" 완료! (⏱ {elapsed:.0f}s)",
-                    )
-                else:
-                    fail_count += 1
-                    emit({"type": "task_fail", "task_id": task.id, "title": task.title,
-                          "reason": result.failure_reason or "알 수 없음", "elapsed": round(elapsed, 1)})
-                    hint = _notify_failure(notifier, task, result.failure_reason or "알 수 없음", elapsed)
-                    if hint:
-                        task.last_error = f"[Discord 힌트] {hint}\n{task.last_error}"
+            if pause_ctrl.is_stopped:
+                break
 
-                report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url)
-                save_report(report, reports_dir=reports_dir)
-
-            save_tasks(all_tasks, tasks_path)
+    finally:
+        # 리스너 스레드 종료
+        _listener_stop.set()
 
     emit({"type": "pipeline_done", "success": success_count, "fail": fail_count})
     _notify(

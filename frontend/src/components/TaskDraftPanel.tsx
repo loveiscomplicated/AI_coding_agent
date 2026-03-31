@@ -30,8 +30,8 @@ interface State {
   tasks: DraftTask[]
   errorMsg: string
   jobId: string
-  tasksPath: string
-  repoPath: string
+  rootDir: string    // 프로젝트 루트 = repo_path; tasks.yaml은 항상 rootDir/data/tasks.yaml
+  agentCount: number
 }
 
 type Action =
@@ -41,8 +41,8 @@ type Action =
   | { type: 'DELETE_TASK'; idx: number }
   | { type: 'ADD_TASK' }
   | { type: 'MOVE_TASK'; idx: number; dir: -1 | 1 }
-  | { type: 'SET_PATH'; path: string }
-  | { type: 'SET_REPO'; path: string }
+  | { type: 'SET_ROOT'; path: string }
+  | { type: 'SET_AGENT_COUNT'; count: number }
   | { type: 'SAVING' }
   | { type: 'RUNNING'; jobId: string }
   | { type: 'DONE' }
@@ -79,10 +79,10 @@ function reducer(state: State, action: Action): State {
       ;[tasks[action.idx], tasks[j]] = [tasks[j], tasks[action.idx]]
       return { ...state, tasks }
     }
-    case 'SET_PATH':
-      return { ...state, tasksPath: action.path }
-    case 'SET_REPO':
-      return { ...state, repoPath: action.path }
+    case 'SET_ROOT':
+      return { ...state, rootDir: action.path }
+    case 'SET_AGENT_COUNT':
+      return { ...state, agentCount: Math.max(1, Math.min(8, action.count)) }
     case 'SAVING':
       return { ...state, phase: 'saving' }
     case 'RUNNING':
@@ -99,19 +99,25 @@ function reducer(state: State, action: Action): State {
 interface Props {
   contextDoc: string
   onBack: () => void
+  onPipelineStarted?: (jobId: string) => void
 }
 
 // ── 컴포넌트 ──────────────────────────────────────────────────────────────────
 
-export function TaskDraftPanel({ contextDoc, onBack }: Props) {
+export function TaskDraftPanel({ contextDoc, onBack, onPipelineStarted }: Props) {
   const [state, dispatch] = useReducer(reducer, {
     phase: 'generating',
     tasks: [],
     errorMsg: '',
     jobId: '',
-    tasksPath: 'data/tasks.yaml',
-    repoPath: '.',
+    rootDir: '.',
+    agentCount: 1,
   })
+
+  // tasks.yaml은 항상 rootDir/data/tasks.yaml
+  const tasksFilePath = state.rootDir === '.'
+    ? 'data/tasks.yaml'
+    : state.rootDir.replace(/\/+$/, '') + '/data/tasks.yaml'
 
   // 마운트 시 즉시 초안 생성 요청
   useEffect(() => {
@@ -138,40 +144,28 @@ export function TaskDraftPanel({ contextDoc, onBack }: Props) {
   }, [contextDoc])
 
 
-  const [browsing, setBrowsing] = useState<'repo' | 'tasks' | null>(null)
+  const [browsing, setBrowsing] = useState(false)
 
-  async function browseRepo() {
-    setBrowsing('repo')
+  async function browseRoot() {
+    setBrowsing(true)
     try {
-      const initial = state.repoPath && state.repoPath !== '.' ? state.repoPath : '~'
+      const initial = state.rootDir && state.rootDir !== '.' ? state.rootDir : '~'
       const res = await fetch(`${API_BASE}/api/utils/browse?type=folder&initial=${encodeURIComponent(initial)}`)
       const data = await res.json()
-      if (!data.cancelled && data.path) dispatch({ type: 'SET_REPO', path: data.path })
+      if (!data.cancelled && data.path) dispatch({ type: 'SET_ROOT', path: data.path })
     } finally {
-      setBrowsing(null)
-    }
-  }
-
-  async function browseTasks() {
-    setBrowsing('tasks')
-    try {
-      const initial = state.repoPath && state.repoPath !== '.' ? state.repoPath : '~'
-      const res = await fetch(`${API_BASE}/api/utils/browse?type=file&initial=${encodeURIComponent(initial)}`)
-      const data = await res.json()
-      if (!data.cancelled && data.path) dispatch({ type: 'SET_PATH', path: data.path })
-    } finally {
-      setBrowsing(null)
+      setBrowsing(false)
     }
   }
 
   async function handleSaveAndRun() {
     dispatch({ type: 'SAVING' })
     try {
-      // 1. tasks.yaml 저장
+      // 1. tasks.yaml 저장 (rootDir/data/tasks.yaml)
       const saveRes = await fetch(`${API_BASE}/api/tasks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tasks: state.tasks, tasks_path: state.tasksPath }),
+        body: JSON.stringify({ tasks: state.tasks, tasks_path: tasksFilePath }),
       })
       if (!saveRes.ok) {
         const err = await saveRes.json().catch(() => ({ detail: saveRes.statusText }))
@@ -182,9 +176,10 @@ export function TaskDraftPanel({ contextDoc, onBack }: Props) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          tasks_path: state.tasksPath,
-          repo_path: state.repoPath,
+          tasks_path: tasksFilePath,
+          repo_path: state.rootDir === '.' ? '.' : state.rootDir,
           no_pr: false,
+          max_workers: state.agentCount,
         }),
       })
       if (!runRes.ok) {
@@ -193,6 +188,7 @@ export function TaskDraftPanel({ contextDoc, onBack }: Props) {
       }
       const runData = await runRes.json()
       localStorage.setItem(ACTIVE_JOB_KEY, runData.job_id)
+      onPipelineStarted?.(runData.job_id)
       dispatch({ type: 'RUNNING', jobId: runData.job_id })
     } catch (e: unknown) {
       dispatch({ type: 'ERROR', msg: e instanceof Error ? e.message : String(e) })
@@ -264,23 +260,28 @@ export function TaskDraftPanel({ contextDoc, onBack }: Props) {
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {/* 레포 경로 */}
+          {/* 프로젝트 루트 (= repo_path, tasks는 rootDir/data/tasks.yaml 고정) */}
           <div className="flex items-center gap-1">
-            <span className="text-xs text-gray-400 dark:text-zinc-500 shrink-0">레포</span>
-            <input
-              className="text-xs rounded border border-gray-300 dark:border-zinc-600 px-2 py-1 bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 w-48"
-              value={state.repoPath}
-              onChange={e => dispatch({ type: 'SET_REPO', path: e.target.value })}
-              placeholder="/path/to/project"
-              title="작업 대상 레포 경로"
-            />
+            <span className="text-xs text-gray-400 dark:text-zinc-500 shrink-0">프로젝트 루트</span>
+            <div className="flex flex-col">
+              <input
+                className="text-xs rounded border border-gray-300 dark:border-zinc-600 px-2 py-1 bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 w-52"
+                value={state.rootDir === '.' ? '' : state.rootDir}
+                onChange={e => dispatch({ type: 'SET_ROOT', path: e.target.value || '.' })}
+                placeholder="/path/to/project"
+                title="프로젝트 루트 디렉토리 (tasks.yaml은 여기/data/tasks.yaml에 저장됩니다)"
+              />
+              <span className="text-[10px] text-gray-400 dark:text-zinc-600 px-0.5 mt-0.5 truncate w-52">
+                → {tasksFilePath}
+              </span>
+            </div>
             <button
-              onClick={browseRepo}
-              disabled={browsing !== null}
+              onClick={browseRoot}
+              disabled={browsing}
               className="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300 disabled:opacity-40 px-1 py-1 rounded transition-colors"
-              title="파인더에서 폴더 선택"
+              title="파인더에서 프로젝트 루트 선택"
             >
-              {browsing === 'repo' ? (
+              {browsing ? (
                 <span className="inline-block w-3.5 h-3.5 border border-gray-400 border-t-transparent rounded-full animate-spin" />
               ) : (
                 <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
@@ -289,29 +290,18 @@ export function TaskDraftPanel({ contextDoc, onBack }: Props) {
               )}
             </button>
           </div>
-          {/* tasks 저장 경로 */}
+          {/* 에이전트 수 */}
           <div className="flex items-center gap-1">
-            <span className="text-xs text-gray-400 dark:text-zinc-500 shrink-0">tasks</span>
+            <span className="text-xs text-gray-400 dark:text-zinc-500 shrink-0">에이전트</span>
             <input
-              className="text-xs rounded border border-gray-300 dark:border-zinc-600 px-2 py-1 bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 w-40"
-              value={state.tasksPath}
-              onChange={e => dispatch({ type: 'SET_PATH', path: e.target.value })}
-              title="tasks.yaml 저장 경로"
+              type="number"
+              min={1}
+              max={8}
+              className="text-xs rounded border border-gray-300 dark:border-zinc-600 px-2 py-1 bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 w-12 text-center"
+              value={state.agentCount}
+              onChange={e => dispatch({ type: 'SET_AGENT_COUNT', count: parseInt(e.target.value) || 1 })}
+              title="병렬 에이전트 수 (1~8)"
             />
-            <button
-              onClick={browseTasks}
-              disabled={browsing !== null}
-              className="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300 disabled:opacity-40 px-1 py-1 rounded transition-colors"
-              title="파인더에서 파일 선택"
-            >
-              {browsing === 'tasks' ? (
-                <span className="inline-block w-3.5 h-3.5 border border-gray-400 border-t-transparent rounded-full animate-spin" />
-              ) : (
-                <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
-                </svg>
-              )}
-            </button>
           </div>
           <button
             className="rounded-lg bg-blue-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"

@@ -5,6 +5,8 @@ import { MeetingApp } from './components/MeetingApp'
 import { ChatListPage } from './components/ChatListPage'
 import { DashboardPage } from './components/DashboardPage'
 import { PipelineLogView, ACTIVE_JOB_KEY } from './components/PipelineLogView'
+import { ProjectListPage } from './components/ProjectListPage'
+import { Project } from './storage/projectStorage'
 
 const storage = new MeetingStorage()
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000') as string
@@ -37,6 +39,7 @@ export default function App() {
   const [search, setSearch] = useState('')
   const [showListPage, setShowListPage] = useState(false)
   const [showDashboard, setShowDashboard] = useState(false)
+  const [selectedProject, setSelectedProject] = useState<Project | null>(null)
   const [resumeJobId, setResumeJobId] = useState<string | null>(null)
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -292,7 +295,7 @@ export default function App() {
             채팅
           </button>
           <button
-            onClick={() => { setShowDashboard(true); setShowListPage(false); setActiveId(null) }}
+            onClick={() => { setShowDashboard(true); setShowListPage(false); setActiveId(null); setSelectedProject(null) }}
             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors ${
               showDashboard
                 ? 'bg-zinc-700 text-zinc-100'
@@ -428,8 +431,18 @@ export default function App() {
             jobId={resumeJobId}
             onDone={() => setResumeJobId(null)}
           />
+        ) : showDashboard && selectedProject ? (
+          <DashboardPage
+            project={selectedProject}
+            onBack={() => setSelectedProject(null)}
+            onPipelineStarted={(jobId) => {
+              setResumeJobId(jobId)
+              setShowDashboard(false)
+              setSelectedProject(null)
+            }}
+          />
         ) : showDashboard ? (
-          <DashboardPage />
+          <ProjectListPage onSelectProject={setSelectedProject} />
         ) : showListPage ? (
           <ChatListPage
             records={records}
@@ -449,6 +462,10 @@ export default function App() {
             onGoToList={() => {
               setRecords(storage.list())
               setShowListPage(true)
+            }}
+            onPipelineStarted={(jobId) => {
+              setResumeJobId(jobId)
+              setActiveId(null)
             }}
             headerLeft={!sidebarOpen ? mainToggle : undefined}
           />

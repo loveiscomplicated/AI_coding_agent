@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
+import { projectTasksPath, projectReportsDir } from '../storage/projectStorage'
+import { ACTIVE_JOB_KEY } from './PipelineLogView'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000') as string
 const RECENT_KEY = 'dashboard_recent_projects'
@@ -265,8 +267,31 @@ function ProjectBar({ config, onChange, onLoad, loading }: ProjectBarProps) {
 
 // ── 메인 컴포넌트 ─────────────────────────────────────────────────────────────
 
-export function DashboardPage() {
+interface ActiveJob {
+  job_id: string
+  status: string
+  paused?: boolean
+}
+
+interface DashboardPageProps {
+  project?: { name: string; rootDir: string }
+  onBack?: () => void
+  onPipelineStarted?: (jobId: string) => void
+}
+
+function pathsOverlap(a: string, b: string): boolean {
+  if (!a || !b) return false
+  return a === b || a.endsWith('/' + b) || b.endsWith('/' + a)
+}
+
+export function DashboardPage({ project, onBack, onPipelineStarted }: DashboardPageProps = {}) {
   const [config, setConfig] = useState<ProjectConfig>(() => {
+    if (project) {
+      return {
+        reportsDir: projectReportsDir(project),
+        tasksPath: projectTasksPath(project),
+      }
+    }
     const recent = loadRecent()
     return recent[0] ?? { reportsDir: 'data/reports', tasksPath: 'data/tasks.yaml' }
   })
@@ -276,6 +301,9 @@ export function DashboardPage() {
   const [selectedMilestone, setSelectedMilestone] = useState<{ filename: string; content: string } | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [activeJob, setActiveJob] = useState<ActiveJob | null>(null)
+  const [controlling, setControlling] = useState(false)
+  const [resuming, setResuming] = useState(false)
 
   const loadData = async (cfg: ProjectConfig) => {
     setLoading(true)
@@ -305,6 +333,67 @@ export function DashboardPage() {
 
   useEffect(() => { loadData(config) }, [])
 
+  // 프로젝트 매칭 잡 조회 (파이프라인 제어용)
+  const fetchActiveJob = useCallback(async () => {
+    if (!project) return
+    try {
+      const data = await fetch(`${API_BASE}/api/pipeline/jobs`).then(r => r.json())
+      const jobs = data.jobs ?? []
+      const matched = jobs.find((j: any) =>
+        pathsOverlap(project.rootDir, j.request?.repo_path ?? '')
+      )
+      // running 상태인 잡만 제어 대상
+      setActiveJob(matched && matched.status === 'running' ? matched : null)
+    } catch { /* 무시 */ }
+  }, [project])
+
+  useEffect(() => {
+    fetchActiveJob()
+    // 3초마다 갱신
+    const id = setInterval(fetchActiveJob, 3000)
+    return () => clearInterval(id)
+  }, [fetchActiveJob])
+
+  async function sendControl(action: 'pause' | 'resume' | 'stop') {
+    if (!activeJob) return
+    setControlling(true)
+    try {
+      await fetch(`${API_BASE}/api/pipeline/control/${activeJob.job_id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+      // 즉시 상태 갱신
+      await fetchActiveJob()
+    } finally {
+      setControlling(false)
+    }
+  }
+
+  async function resumePipeline() {
+    if (!project) return
+    setResuming(true)
+    try {
+      const res = await fetch(`${API_BASE}/api/pipeline/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tasks_path: projectTasksPath(project),
+          repo_path: project.rootDir,
+          no_pr: false,
+        }),
+      })
+      if (!res.ok) throw new Error('파이프라인 시작 실패')
+      const data = await res.json()
+      localStorage.setItem(ACTIVE_JOB_KEY, data.job_id)
+      onPipelineStarted?.(data.job_id)
+    } catch (e) {
+      alert(e instanceof Error ? e.message : '오류 발생')
+    } finally {
+      setResuming(false)
+    }
+  }
+
   const openMilestone = async (filename: string) => {
     try {
       const q = buildQuery(config)
@@ -318,13 +407,15 @@ export function DashboardPage() {
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      {/* 프로젝트 선택 바 */}
-      <ProjectBar
-        config={config}
-        onChange={setConfig}
-        onLoad={() => loadData(config)}
-        loading={loading}
-      />
+      {/* 프로젝트 선택 바 (프로젝트 prop 없을 때만) */}
+      {!project && (
+        <ProjectBar
+          config={config}
+          onChange={setConfig}
+          onLoad={() => loadData(config)}
+          loading={loading}
+        />
+      )}
 
       {/* 본문 */}
       <div className="flex flex-1 overflow-hidden">
@@ -332,10 +423,78 @@ export function DashboardPage() {
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {/* 헤더 */}
           <div>
-            <h1 className="text-xl font-bold text-gray-900 dark:text-zinc-100">대시보드</h1>
-            <p className="text-xs text-gray-400 dark:text-zinc-500 mt-0.5 font-mono truncate">
-              {config.reportsDir}
-            </p>
+            {onBack && (
+              <button
+                onClick={onBack}
+                className="flex items-center gap-1 text-xs text-gray-400 dark:text-zinc-500 hover:text-blue-500 dark:hover:text-blue-400 mb-2 transition-colors"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M9.707 16.707a1 1 0 01-1.414 0l-6-6a1 1 0 010-1.414l6-6a1 1 0 011.414 1.414L5.414 9H17a1 1 0 110 2H5.414l4.293 4.293a1 1 0 010 1.414z" clipRule="evenodd" />
+                </svg>
+                프로젝트 목록
+              </button>
+            )}
+            <div className="flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <h1 className="text-xl font-bold text-gray-900 dark:text-zinc-100">
+                  {project ? project.name : '대시보드'}
+                </h1>
+                <p className="text-xs text-gray-400 dark:text-zinc-500 mt-0.5 font-mono truncate">
+                  {config.reportsDir}
+                </p>
+              </div>
+
+              {/* 파이프라인 재개 버튼 (실행 중 잡 없을 때) */}
+              {project && !activeJob && (
+                <button
+                  onClick={resumePipeline}
+                  disabled={resuming}
+                  className="rounded-lg px-3 py-1.5 text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                  title="pending/failed 태스크만 이어서 실행"
+                >
+                  {resuming ? '시작 중…' : '▶ 파이프라인 재개'}
+                </button>
+              )}
+              {/* 파이프라인 제어 버튼 (실행 중일 때) */}
+              {activeJob && (
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <div className="flex items-center gap-1.5">
+                    {activeJob.paused ? (
+                      <span className="text-xs text-amber-400 font-medium">⏸ 일시정지됨</span>
+                    ) : (
+                      <span className="flex items-center gap-1 text-xs text-green-500 font-medium">
+                        <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse inline-block" />
+                        실행 중
+                      </span>
+                    )}
+                  </div>
+                  {activeJob.paused ? (
+                    <button
+                      onClick={() => sendControl('resume')}
+                      disabled={controlling}
+                      className="rounded-lg px-3 py-1.5 text-xs font-medium bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 transition-colors"
+                    >
+                      ▶ 계속
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => sendControl('pause')}
+                      disabled={controlling}
+                      className="rounded-lg px-3 py-1.5 text-xs font-medium bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-50 transition-colors"
+                    >
+                      ⏸ 멈춤
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { if (confirm('파이프라인을 중단하시겠습니까?')) sendControl('stop') }}
+                    disabled={controlling}
+                    className="rounded-lg px-3 py-1.5 text-xs font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+                  >
+                    ■ 중단
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {loading ? (

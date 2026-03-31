@@ -6,10 +6,27 @@ GET /api/utils/browse?type=file     → macOS 파인더에서 파일 선택
 """
 
 import subprocess
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 
 router = APIRouter()
+
+
+def _resolve_initial(initial: str) -> str:
+    """
+    초기 경로를 절대경로로 변환한다.
+    절대경로가 아니거나 존재하지 않으면 홈 디렉토리를 반환한다.
+    """
+    p = Path(initial).expanduser()
+    if not p.is_absolute():
+        return str(Path.home())
+    # 존재하는 상위 디렉토리까지 올라감
+    while p != p.parent:
+        if p.exists():
+            return str(p)
+        p = p.parent
+    return str(Path.home())
 
 
 @router.get("/utils/browse")
@@ -21,11 +38,7 @@ def browse_path(
     macOS osascript를 통해 네이티브 파인더 다이얼로그를 열고
     선택된 경로를 반환한다.
     """
-    initial_expanded = initial.replace("~", "$HOME")
-    # shell=True 로 $HOME 확장
-    expanded = subprocess.run(
-        f'echo {initial_expanded}', shell=True, capture_output=True, text=True
-    ).stdout.strip() or "/"
+    expanded = _resolve_initial(initial)
 
     if type == "folder":
         script = (

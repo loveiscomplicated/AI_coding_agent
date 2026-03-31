@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
+from collections.abc import Callable
 
 import httpx
 
@@ -107,6 +109,65 @@ class DiscordNotifier:
 
         logger.info("Discord 답변 대기 타임아웃 (%ds)", timeout)
         return None
+
+    # ── 명령 리스너 ────────────────────────────────────────────────────────────
+
+    def get_latest_message_id(self) -> str | None:
+        """채널의 최신 메시지 ID를 반환한다 (listen_for_commands의 시작점으로 사용)."""
+        url = f"{_DISCORD_API}/channels/{self._channel_id}/messages"
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.get(url, headers=self._headers, params={"limit": 1})
+                if resp.is_success:
+                    messages = resp.json()
+                    if messages:
+                        return messages[0]["id"]
+        except httpx.HTTPError as e:
+            logger.warning("최신 메시지 ID 조회 실패: %s", e)
+        return None
+
+    def listen_for_commands(
+        self,
+        callback: Callable[[str], None],
+        after_message_id: str | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> None:
+        """
+        Discord 채널을 폴링하며 사용자 메시지 수신 시 callback(content)을 호출한다.
+        stop_event가 set되면 루프를 종료한다.
+        블로킹 함수이므로 별도 스레드에서 호출해야 한다.
+
+        Args:
+            callback: 사용자 메시지 내용을 받는 콜백
+            after_message_id: 이 ID 이후 메시지부터 폴링 (None이면 현재 최신부터)
+            stop_event: 이 이벤트가 set되면 폴링 종료
+        """
+        url = f"{_DISCORD_API}/channels/{self._channel_id}/messages"
+        last_id = after_message_id
+
+        while not (stop_event and stop_event.is_set()):
+            try:
+                with httpx.Client(timeout=10.0) as client:
+                    params: dict = {"limit": 10}
+                    if last_id:
+                        params["after"] = last_id
+                    resp = client.get(url, headers=self._headers, params=params)
+                    if resp.is_success:
+                        messages = resp.json()
+                        user_msgs = [
+                            m for m in messages
+                            if not m.get("author", {}).get("bot", False)
+                        ]
+                        user_msgs.sort(key=lambda m: int(m["id"]))
+                        for msg in user_msgs:
+                            callback(msg["content"].strip())
+                        # last_id를 가장 최신 메시지로 전진 (봇 포함)
+                        if messages:
+                            last_id = max(m["id"] for m in messages)
+            except httpx.HTTPError as e:
+                logger.warning("Discord 명령 폴링 오류: %s", e)
+
+            time.sleep(_POLL_INTERVAL)
 
     # ── 팩토리 ─────────────────────────────────────────────────────────────────
 

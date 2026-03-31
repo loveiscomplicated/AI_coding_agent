@@ -10,12 +10,13 @@ interface Props {
   onFinished?: (record: MeetingRecord) => void
   onGoToList?: () => void
   onTitleGenerated?: () => void
+  onPipelineStarted?: (jobId: string) => void
   headerLeft?: React.ReactNode
   meetingType?: 'project' | 'system'
   executionBrief?: string
 }
 
-export function MeetingApp({ initialRecord, onFinished, onGoToList, onTitleGenerated, headerLeft, meetingType = 'project', executionBrief }: Props) {
+export function MeetingApp({ initialRecord, onFinished, onGoToList, onTitleGenerated, onPipelineStarted, headerLeft, meetingType = 'project', executionBrief }: Props) {
   const resolvedType = initialRecord?.meetingType ?? meetingType
   const meeting = useMeeting(initialRecord, onTitleGenerated, resolvedType, executionBrief)
   const [showDocPanel, setShowDocPanel] = useState(false)
@@ -81,6 +82,7 @@ export function MeetingApp({ initialRecord, onFinished, onGoToList, onTitleGener
       <TaskDraftPanel
         contextDoc={meeting.contextDoc ?? ''}
         onBack={() => setShowTaskDraft(false)}
+        onPipelineStarted={onPipelineStarted}
       />
     )
   }

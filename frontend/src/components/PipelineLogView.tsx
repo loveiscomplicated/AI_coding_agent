@@ -26,6 +26,7 @@ export interface LogEntry {
   fail?: number
   total?: number
   status?: string
+  next_task_id?: string
 }
 
 // ── 로그 텍스트 포맷 ──────────────────────────────────────────────────────────
@@ -52,6 +53,12 @@ function logEntryText(e: LogEntry): { text: string; color: string } {
         text: `🏁 완료 — 성공 ${e.success ?? 0}  실패 ${e.fail ?? 0}`,
         color: (e.fail ?? 0) > 0 ? 'text-amber-400' : 'text-green-400',
       }
+    case 'paused':
+      return { text: `⏸ 일시정지 — '계속' 입력 시 ${e.next_task_id ?? '다음 태스크'}부터 재개`, color: 'text-amber-400' }
+    case 'resumed':
+      return { text: `▶ 재개 — ${e.task_id ?? ''}`, color: 'text-cyan-400' }
+    case 'pipeline_aborted':
+      return { text: `🛑 ${e.message ?? '사용자 중단 요청으로 파이프라인 종료'}`, color: 'text-red-400' }
     case 'error':
       return { text: `⚠ ${e.message}`, color: 'text-red-400' }
     case 'end':
@@ -73,6 +80,8 @@ export function PipelineLogView({ jobId, onDone }: Props) {
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [ended, setEnded] = useState(false)
   const [disconnected, setDisconnected] = useState(false)
+  const [paused, setPaused] = useState(false)
+  const [controlling, setControlling] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -90,6 +99,9 @@ export function PipelineLogView({ jobId, onDone }: Props) {
           localStorage.removeItem(ACTIVE_JOB_KEY)
           es.close()
         }
+        if (event.type === 'paused') setPaused(true)
+        if (event.type === 'resumed') setPaused(false)
+        if (event.type === 'pipeline_aborted') { setPaused(false); setEnded(true) }
       } catch { /* 파싱 오류 무시 */ }
     }
 
@@ -114,20 +126,35 @@ export function PipelineLogView({ jobId, onDone }: Props) {
     onDone()
   }
 
+  async function sendControl(action: 'pause' | 'resume' | 'stop') {
+    setControlling(true)
+    try {
+      await fetch(`${API_BASE}/api/pipeline/control/${jobId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+    } finally {
+      setControlling(false)
+    }
+  }
+
   return (
     <div className="flex flex-col h-full">
       {/* 헤더 */}
       <div className="flex items-center justify-between px-4 py-3 bg-white dark:bg-zinc-900 border-b border-gray-200 dark:border-zinc-700 flex-shrink-0">
         <div className="flex items-center gap-2">
-          {!ended ? (
+          {!ended && !paused ? (
             <div className="w-3 h-3 border-2 border-green-500 border-t-transparent rounded-full animate-spin" />
+          ) : paused ? (
+            <div className="w-3 h-3 rounded-full bg-amber-400" />
           ) : disconnected ? (
             <div className="w-3 h-3 rounded-full bg-amber-500" />
           ) : (
             <div className="w-3 h-3 rounded-full bg-green-500" />
           )}
           <span className="text-sm font-semibold text-gray-800 dark:text-zinc-100">
-            {!ended ? '파이프라인 실행 중…' : disconnected ? '연결 끊김' : '파이프라인 완료'}
+            {paused ? '⏸ 일시정지됨' : !ended ? '파이프라인 실행 중…' : disconnected ? '연결 끊김' : '파이프라인 완료'}
           </span>
           <span className="text-xs text-gray-400 dark:text-zinc-500 font-mono">{jobId.slice(0, 8)}</span>
         </div>
@@ -136,6 +163,38 @@ export function PipelineLogView({ jobId, onDone }: Props) {
             <span className="text-xs text-amber-500">
               백엔드가 재시작되면 대시보드에서 결과를 확인하세요
             </span>
+          )}
+          {/* 실행 중 제어 버튼 */}
+          {!ended && (
+            <div className="flex items-center gap-1">
+              {paused ? (
+                <button
+                  onClick={() => sendControl('resume')}
+                  disabled={controlling}
+                  className="rounded px-2.5 py-1 text-xs font-medium bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 transition-colors"
+                  title="파이프라인 재개"
+                >
+                  ▶ 계속
+                </button>
+              ) : (
+                <button
+                  onClick={() => sendControl('pause')}
+                  disabled={controlling}
+                  className="rounded px-2.5 py-1 text-xs font-medium bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-50 transition-colors"
+                  title="다음 태스크 전 일시정지"
+                >
+                  ⏸ 멈춤
+                </button>
+              )}
+              <button
+                onClick={() => { if (confirm('파이프라인을 중단하시겠습니까?')) sendControl('stop') }}
+                disabled={controlling}
+                className="rounded px-2.5 py-1 text-xs font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+                title="파이프라인 중단"
+              >
+                ■ 중단
+              </button>
+            </div>
           )}
           {ended && (
             <button
