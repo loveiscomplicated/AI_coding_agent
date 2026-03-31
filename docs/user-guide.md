@@ -272,14 +272,17 @@ python -m orchestrator.run -t data/tasks.yaml --no-pr
 
 ### 8.2 경로 설정
 
-태스크 초안 화면 헤더에 두 개의 입력창이 있다:
+태스크 초안 화면 헤더에 세 개의 입력창이 있다:
 
 | 입력 | 설명 | 예시 |
 |------|------|------|
-| **레포** | 에이전트가 코드를 짜는 대상 레포의 절대 경로 | `/path/to/my-project` |
-| **tasks** | tasks.yaml 저장 경로 | `/path/to/my-project/tasks.yaml` |
+| **프로젝트 루트** | 에이전트가 코드를 짜는 대상 레포의 절대 경로 | `/path/to/my-project` |
+| **브랜치** | PR base branch | `main` |
+| **에이전트** | 그룹 내 병렬 실행 수 | `1` |
 
-리포트는 `{레포}/data/reports/`에 자동 저장된다.
+- tasks.yaml은 `{프로젝트 루트}/data/tasks.yaml`에 자동 저장된다.
+- 리포트는 `{프로젝트 루트}/data/reports/`에 자동 저장된다.
+- 폴더 아이콘 버튼으로 macOS Finder에서 경로를 직접 선택할 수 있다.
 
 ### 8.3 실시간 진행 로그
 
@@ -415,20 +418,37 @@ description: "계산기 모듈 만들어"
 
 ### 10.1 접속
 
-사이드바에서 **대시보드** 탭(격자 아이콘) 클릭.
+사이드바에서 **대시보드** 탭(격자 아이콘) 클릭 → 프로젝트 목록 화면이 표시된다.
 
-### 10.2 프로젝트 선택
+### 10.2 프로젝트 관리
 
-대시보드 상단의 경로 입력창으로 어느 프로젝트의 데이터든 조회할 수 있다.
+프로젝트 목록 화면에서 등록된 프로젝트 카드를 클릭하면 해당 프로젝트의 상세 대시보드로 진입한다.
 
-| 입력 | 설명 | 예시 |
-|------|------|------|
-| **레포** | 프로젝트의 Task Report 디렉토리 | `/path/to/project/data/reports` |
-| **tasks** | 프로젝트의 tasks.yaml 경로 | `/path/to/project/tasks.yaml` |
+**새 프로젝트 추가**
 
-**불러오기** 버튼 또는 Enter로 조회. 최근 5개 프로젝트는 **최근 ▾** 드롭다운으로 빠르게 전환할 수 있다.
+`+ 새 프로젝트` 버튼 → 모달에서 프로젝트 루트 디렉토리 경로와 브랜치를 입력한다.
+- 폴더 아이콘으로 Finder에서 경로 선택 가능
+- 프로젝트 이름은 루트 디렉토리 폴더명으로 자동 설정됨
 
-### 10.3 화면 구성
+**백엔드 자동 탐색**
+
+`새로고침` 버튼을 누르면 백엔드에서 실행된 파이프라인 잡 목록을 가져와 아직 등록되지 않은 프로젝트를 자동으로 추가한다.
+
+**프로젝트 카드 상태**
+
+각 카드에는 최근 파이프라인 실행 상태(`running` / `done` / `error`)가 표시된다.
+
+### 10.3 프로젝트 상세 대시보드
+
+프로젝트 카드를 클릭하면 상세 화면으로 진입하며, 상단 **← 프로젝트 목록** 버튼으로 돌아올 수 있다.
+
+**파이프라인 제어 (헤더)**
+
+| 상태 | 표시 |
+|------|------|
+| 실행 중 | ⏸ 멈춤 / ■ 중단 버튼 활성화, 초록 펄스 배지 |
+| 일시정지 | ▶ 계속 / ■ 중단 버튼 활성화 |
+| 미실행 | **▶ 파이프라인 재개** 버튼 — pending/failed 태스크 이어서 실행 |
 
 **메트릭 카드 (상단)**
 
@@ -443,9 +463,18 @@ description: "계산기 모듈 만들어"
 | 마일스톤 보고서 | 생성된 마일스톤 보고서 수 |
 | 태스크 상태 | status별 카운트 |
 
-**태스크 목록 (중단)**
+**태스크 목록 (중단) — 아코디언**
 
-각 태스크의 현재 상태, 리뷰 판정, 테스트 수, 소요 시간, 재시도 수를 표시한다. PR URL이 있으면 클릭 가능한 링크가 표시된다.
+각 태스크 행을 클릭하면 세부 내용이 펼쳐진다.
+
+| 항목 | 설명 |
+|------|------|
+| 요약 행 | ID, 타이틀, 상태 배지, 리뷰 판정, 소요 시간, PR 링크 |
+| 설명 | `description` 전문 |
+| 수락 기준 | `acceptance_criteria` 항목별 목록 |
+| 의존성 | `depends_on` ID 목록 |
+| 실패 원인 | `failure_reason` (실패 태스크만 표시, 빨간색) |
+| 리포트 상세 | 테스트 수, 재시도 수, 완료 시각 |
 
 **마일스톤 보고서 (하단)**
 
@@ -519,16 +548,18 @@ curl -X POST http://localhost:8000/api/discord/test
 
 ```json
 {
-  "tasks_path": "/path/to/project/tasks.yaml",
+  "tasks_path": "/path/to/project/data/tasks.yaml",
   "repo_path": "/path/to/project",
-  "base_branch": "dev",
+  "base_branch": "main",
   "task_id": null,
   "no_pr": false,
   "reports_dir": null
 }
 ```
 
-`reports_dir`가 `null`이면 `{repo_path}/data/reports`에 자동 저장된다.
+- `tasks_path` 기본값은 `{repo_path}/data/tasks.yaml`
+- `reports_dir`가 `null`이면 `{repo_path}/data/reports`에 자동 저장된다.
+- `base_branch` 기본값은 `main`
 
 ### SSE 이벤트 형식
 
@@ -541,6 +572,10 @@ curl -X POST http://localhost:8000/api/discord/test
 | `step` | 단계별 진행 | `task_id`, `step`, `message` |
 | `task_done` | 태스크 성공 완료 | `task_id`, `title`, `elapsed`, `pr_url` |
 | `task_fail` | 태스크 실패 | `task_id`, `title`, `reason`, `elapsed` |
+| `task_skip` | 의존성 실패로 건너뜀 | `task_id`, `title`, `reason` |
+| `paused` | 일시정지 | `next_task_id` |
+| `resumed` | 재개 | `task_id` |
+| `pipeline_aborted` | 사용자 중단 | `message` |
 | `pipeline_done` | 전체 완료 | `success`, `fail` |
 | `end` | 스트림 종료 sentinel | `status` |
 

@@ -21,6 +21,7 @@ export interface DraftTask {
   acceptance_criteria: string[]
   target_files: string[]
   depends_on: string[]
+  warnings?: string[]
 }
 
 type Phase = 'generating' | 'editing' | 'saving' | 'running' | 'done' | 'error'
@@ -31,6 +32,7 @@ interface State {
   errorMsg: string
   jobId: string
   rootDir: string    // 프로젝트 루트 = repo_path; tasks.yaml은 항상 rootDir/data/tasks.yaml
+  baseBranch: string // git base branch
   agentCount: number
 }
 
@@ -42,6 +44,7 @@ type Action =
   | { type: 'ADD_TASK' }
   | { type: 'MOVE_TASK'; idx: number; dir: -1 | 1 }
   | { type: 'SET_ROOT'; path: string }
+  | { type: 'SET_BASE_BRANCH'; branch: string }
   | { type: 'SET_AGENT_COUNT'; count: number }
   | { type: 'SAVING' }
   | { type: 'RUNNING'; jobId: string }
@@ -81,6 +84,8 @@ function reducer(state: State, action: Action): State {
     }
     case 'SET_ROOT':
       return { ...state, rootDir: action.path }
+    case 'SET_BASE_BRANCH':
+      return { ...state, baseBranch: action.branch }
     case 'SET_AGENT_COUNT':
       return { ...state, agentCount: Math.max(1, Math.min(8, action.count)) }
     case 'SAVING':
@@ -98,19 +103,21 @@ function reducer(state: State, action: Action): State {
 
 interface Props {
   contextDoc: string
+  draftKey: string
   onBack: () => void
   onPipelineStarted?: (jobId: string) => void
 }
 
 // ── 컴포넌트 ──────────────────────────────────────────────────────────────────
 
-export function TaskDraftPanel({ contextDoc, onBack, onPipelineStarted }: Props) {
+export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted }: Props) {
   const [state, dispatch] = useReducer(reducer, {
     phase: 'generating',
     tasks: [],
     errorMsg: '',
     jobId: '',
     rootDir: '.',
+    baseBranch: 'main',
     agentCount: 1,
   })
 
@@ -119,10 +126,41 @@ export function TaskDraftPanel({ contextDoc, onBack, onPipelineStarted }: Props)
     ? 'data/tasks.yaml'
     : state.rootDir.replace(/\/+$/, '') + '/data/tasks.yaml'
 
-  // 마운트 시 즉시 초안 생성 요청
+  // 마운트 시: 진행 중인 잡이 있으면 재연결, 없으면 새로 시작
   useEffect(() => {
-    let cancelled = false
-    async function generate() {
+    let pollTimer: ReturnType<typeof setTimeout> | null = null
+    let stopped = false
+
+    async function poll(jobId: string) {
+      if (stopped) return
+      try {
+        const res = await fetch(`${API_BASE}/api/tasks/draft/${jobId}`)
+        if (!res.ok) throw new Error('잡 조회 실패')
+        const data = await res.json()
+        if (stopped) return
+        if (data.status === 'done') {
+          sessionStorage.removeItem(draftKey)
+          dispatch({ type: 'DRAFT_DONE', tasks: data.tasks ?? [] })
+        } else if (data.status === 'error') {
+          sessionStorage.removeItem(draftKey)
+          dispatch({ type: 'ERROR', msg: data.error ?? '초안 생성 실패' })
+        } else {
+          // 아직 running — 2초 후 재폴링
+          pollTimer = setTimeout(() => poll(jobId), 2000)
+        }
+      } catch (e: unknown) {
+        if (!stopped) dispatch({ type: 'ERROR', msg: e instanceof Error ? e.message : String(e) })
+      }
+    }
+
+    async function startOrResume() {
+      // 이미 진행 중인 잡이 있으면 재연결
+      const existingJobId = sessionStorage.getItem(draftKey)
+      if (existingJobId) {
+        poll(existingJobId)
+        return
+      }
+      // 새 잡 시작
       try {
         const res = await fetch(`${API_BASE}/api/tasks/draft`, {
           method: 'POST',
@@ -131,16 +169,23 @@ export function TaskDraftPanel({ contextDoc, onBack, onPipelineStarted }: Props)
         })
         if (!res.ok) {
           const err = await res.json().catch(() => ({ detail: res.statusText }))
-          throw new Error(err.detail ?? '초안 생성 실패')
+          throw new Error(err.detail ?? '초안 생성 시작 실패')
         }
         const data = await res.json()
-        if (!cancelled) dispatch({ type: 'DRAFT_DONE', tasks: data.tasks ?? [] })
+        if (stopped) return
+        sessionStorage.setItem(draftKey, data.job_id)
+        poll(data.job_id)
       } catch (e: unknown) {
-        if (!cancelled) dispatch({ type: 'ERROR', msg: e instanceof Error ? e.message : String(e) })
+        if (!stopped) dispatch({ type: 'ERROR', msg: e instanceof Error ? e.message : String(e) })
       }
     }
-    generate()
-    return () => { cancelled = true }
+
+    startOrResume()
+    return () => {
+      stopped = true
+      if (pollTimer) clearTimeout(pollTimer)
+      // job_id는 sessionStorage에 유지 — 돌아왔을 때 재연결
+    }
   }, [contextDoc])
 
 
@@ -178,6 +223,7 @@ export function TaskDraftPanel({ contextDoc, onBack, onPipelineStarted }: Props)
         body: JSON.stringify({
           tasks_path: tasksFilePath,
           repo_path: state.rootDir === '.' ? '.' : state.rootDir,
+          base_branch: state.baseBranch || 'main',
           no_pr: false,
           max_workers: state.agentCount,
         }),
@@ -258,6 +304,11 @@ export function TaskDraftPanel({ contextDoc, onBack, onPipelineStarted }: Props)
           <span className="text-sm font-semibold text-gray-800 dark:text-zinc-100">
             태스크 초안 ({state.tasks.length}개)
           </span>
+          {state.tasks.some(t => (t.warnings?.length ?? 0) > 0) && (
+            <span className="text-xs font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400 px-2 py-0.5 rounded-full">
+              ⚠ 크기 초과 태스크 있음
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {/* 프로젝트 루트 (= repo_path, tasks는 rootDir/data/tasks.yaml 고정) */}
@@ -289,6 +340,17 @@ export function TaskDraftPanel({ contextDoc, onBack, onPipelineStarted }: Props)
                 </svg>
               )}
             </button>
+          </div>
+          {/* 기본 브랜치 */}
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-400 dark:text-zinc-500 shrink-0">브랜치</span>
+            <input
+              className="text-xs rounded border border-gray-300 dark:border-zinc-600 px-2 py-1 bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 w-20"
+              value={state.baseBranch}
+              onChange={e => dispatch({ type: 'SET_BASE_BRANCH', branch: e.target.value })}
+              placeholder="main"
+              title="git base branch (main, master, dev 등)"
+            />
           </div>
           {/* 에이전트 수 */}
           <div className="flex items-center gap-1">
@@ -434,6 +496,32 @@ function TaskCard({ task, idx, total, onUpdate, onDelete, onMove }: CardProps) {
           >+ 조건 추가</button>
         </div>
       </div>
+
+      {/* target_files */}
+      <div>
+        <p className={`text-xs font-medium mb-1 ${task.target_files.length > 3 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-500 dark:text-zinc-400'}`}>
+          대상 파일 ({task.target_files.length}개){task.target_files.length > 3 ? ' ⚠ 3개 초과' : ''}
+        </p>
+        <div className="flex flex-wrap gap-1">
+          {task.target_files.map((f, i) => (
+            <span
+              key={i}
+              className="text-[10px] font-mono bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 px-1.5 py-0.5 rounded"
+            >
+              {f.split('/').pop()}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* 경고 */}
+      {(task.warnings?.length ?? 0) > 0 && (
+        <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 p-2 space-y-0.5">
+          {task.warnings!.map((w, i) => (
+            <p key={i} className="text-xs text-amber-700 dark:text-amber-400">⚠ {w}</p>
+          ))}
+        </div>
+      )}
 
       {/* depends_on */}
       {task.depends_on.length > 0 && (

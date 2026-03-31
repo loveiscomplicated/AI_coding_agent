@@ -19,8 +19,11 @@ interface Props {
 export function MeetingApp({ initialRecord, onFinished, onGoToList, onTitleGenerated, onPipelineStarted, headerLeft, meetingType = 'project', executionBrief }: Props) {
   const resolvedType = initialRecord?.meetingType ?? meetingType
   const meeting = useMeeting(initialRecord, onTitleGenerated, resolvedType, executionBrief)
+  const draftKey = `draft_job_${initialRecord?.id ?? 'new'}`
   const [showDocPanel, setShowDocPanel] = useState(false)
-  const [showTaskDraft, setShowTaskDraft] = useState(false)
+  const [showTaskDraft, setShowTaskDraft] = useState(
+    () => !!sessionStorage.getItem(draftKey)
+  )
   const [isDragging, setIsDragging] = useState(false)
   const inputRef = useRef<MessageInputRef>(null)
   const dragCounter = useRef(0)
@@ -81,6 +84,7 @@ export function MeetingApp({ initialRecord, onFinished, onGoToList, onTitleGener
     return (
       <TaskDraftPanel
         contextDoc={meeting.contextDoc ?? ''}
+        draftKey={draftKey}
         onBack={() => setShowTaskDraft(false)}
         onPipelineStarted={onPipelineStarted}
       />

@@ -5,8 +5,21 @@ backend/main.py — FastAPI 앱 진입점
   uvicorn backend.main:app --reload --port 8000
 """
 
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+
+# ── 폴링성 엔드포인트 access 로그 억제 ─────────────────────────────────────────
+class _SuppressPollingLog(logging.Filter):
+    _SUPPRESS = {'/api/pipeline/jobs'}
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not any(path in msg for path in self._SUPPRESS)
+
+logging.getLogger('uvicorn.access').addFilter(_SuppressPollingLog())
 
 from backend.routers import chat, dashboard, discord_router, health, pipeline, reports, tasks, utils
 

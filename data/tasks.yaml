@@ -1,28 +1,19 @@
 tasks:
 - id: task-001
-  title: MapService 인터페이스 및 도메인 모델 정의
-  description: 지도/경로 관련 비즈니스 로직이 의존하는 공통 인터페이스(MapService)와 도메인 데이터 모델(Coordinate,
-    Route, Place, RouteStep 등)을 정의한다. 모든 어댑터와 상위 레이어가 이 인터페이스를 통해 통신하도록 계약을 확립한다.
+  title: 도메인 모델 정의 — 좌표, 장소, 경로
+  description: 앱 전체에서 공통으로 사용하는 핵심 도메인 모델을 정의한다. Coordinate(위도/경도), Place(장소명, 좌표,
+    POI ID), Route(출발지, 목적지, 경로 좌표 리스트, 총 거리)를 data class로 구현한다.
   acceptance_criteria:
-  - 'MapService 인터페이스에 searchPlace(query: String): List<Place>, getWalkingRoute(origin:
-    Coordinate, destination: Coordinate): Route, distanceToRoute(position: Coordinate,
-    route: Route): Double 메서드가 선언되어 있다'
-  - 'Coordinate(lat: Double, lng: Double), Place(id: String, name: String, coordinate:
-    Coordinate), Route(steps: List<RouteStep>, polyline: List<Coordinate>), RouteStep(instruction:
-    String, distance: Double, coordinate: Coordinate) 데이터 클래스가 정의되어 있다'
-  - MapService를 구현하는 FakeMapService(테스트용 스텁)를 작성하고, pytest(또는 JUnit) 기반 테스트에서 searchPlace('불국사')가
-    비어 있지 않은 Place 리스트를 반환함을 검증한다
-  - Route 객체가 steps 리스트와 polyline 리스트를 모두 포함하며, 빈 Route(steps=[], polyline=[])도 유효한
-    객체로 생성 가능하다
-  - 모든 도메인 모델이 null 불허(non-nullable) 필드로 구성되어 있어 런타임 NPE 위험이 없음을 컴파일 타임에 보장한다
+  - Coordinate는 latitude(Double), longitude(Double) 필드를 가지며 유효 범위(-90~90, -180~180)
+    벗어날 경우 IllegalArgumentException을 던진다
+  - Place는 name(String), coordinate(Coordinate), poiId(String) 필드를 가진다
+  - Route는 origin(Place), destination(Place), waypoints(List<Coordinate>), totalDistanceMeters(Double)
+    필드를 가지며 waypoints가 비어있으면 안 된다
+  - 모든 모델은 equals/hashCode/copy가 올바르게 동작한다(data class 기본 구현 검증)
   target_files:
-  - app/src/main/java/com/arnavigation/domain/model/Coordinate.kt
-  - app/src/main/java/com/arnavigation/domain/model/Place.kt
-  - app/src/main/java/com/arnavigation/domain/model/Route.kt
-  - app/src/main/java/com/arnavigation/domain/model/RouteStep.kt
-  - app/src/main/java/com/arnavigation/domain/service/MapService.kt
-  - app/src/test/java/com/arnavigation/domain/service/FakeMapService.kt
-  - app/src/test/java/com/arnavigation/domain/service/MapServiceContractTest.kt
+  - app/src/main/java/com/example/arnavigation/domain/model/Coordinate.kt
+  - app/src/main/java/com/example/arnavigation/domain/model/Place.kt
+  - app/src/main/java/com/example/arnavigation/domain/model/Route.kt
   test_framework: pytest
   depends_on: []
   status: pending
@@ -31,24 +22,18 @@ tasks:
   pr_url: ''
   failure_reason: ''
 - id: task-002
-  title: 카카오맵 API 어댑터 구현
-  description: MapService 인터페이스를 구현하는 KakaoMapAdapter를 작성한다. 카카오 REST API를 호출하여 장소
-    검색, 도보 경로 탐색, 경로까지의 거리 계산 기능을 제공한다. API 키는 BuildConfig를 통해 주입받는다.
+  title: 도메인 모델 단위 테스트
+  description: task-001에서 정의한 Coordinate, Place, Route 모델의 유효성 검증 로직과 동등성 비교를 단위 테스트로
+    검증한다.
   acceptance_criteria:
-  - KakaoMapAdapter가 MapService 인터페이스를 구현하며, 컴파일 타임에 모든 메서드가 오버라이드 되어 있다
-  - searchPlace()가 카카오 키워드 검색 API(https://dapi.kakao.com/v2/local/search/keyword)를
-    호출하고, 응답 JSON의 documents 배열을 List<Place>로 변환하여 반환한다
-  - getWalkingRoute()가 카카오 모빌리티 도보 경로 API를 호출하고, 응답의 경로 구간 정보를 Route(steps, polyline)
-    객체로 변환하여 반환한다
-  - distanceToRoute()가 현재 Coordinate와 Route의 polyline 상의 모든 점 사이 최소 거리를 미터 단위 Double로
-    반환하며, 단위 테스트에서 알려진 좌표 쌍에 대해 오차 5m 이내임을 검증한다
-  - API 호출 실패(네트워크 오류, 401, 429 등) 시 IOException 또는 커스텀 MapServiceException을 throw하며,
-    테스트에서 MockWebServer를 이용해 에러 응답 시나리오를 검증한다
+  - Coordinate 유효 범위 초과 시 IllegalArgumentException 발생을 테스트가 확인한다
+  - 동일한 값의 Coordinate 두 인스턴스가 equals로 같다고 판정된다
+  - Route 생성 시 waypoints가 빈 리스트이면 예외가 발생하는 것을 테스트가 확인한다
+  - Route.copy()로 destination만 변경한 새 인스턴스가 원본과 다른 객체임을 확인한다
   target_files:
-  - app/src/main/java/com/arnavigation/data/adapter/KakaoMapAdapter.kt
-  - app/src/main/java/com/arnavigation/data/adapter/KakaoApiModels.kt
-  - app/src/main/java/com/arnavigation/domain/exception/MapServiceException.kt
-  - app/src/test/java/com/arnavigation/data/adapter/KakaoMapAdapterTest.kt
+  - app/src/test/java/com/example/arnavigation/domain/model/CoordinateTest.kt
+  - app/src/test/java/com/example/arnavigation/domain/model/PlaceTest.kt
+  - app/src/test/java/com/example/arnavigation/domain/model/RouteTest.kt
   test_framework: pytest
   depends_on:
   - task-001
@@ -58,23 +43,21 @@ tasks:
   pr_url: ''
   failure_reason: ''
 - id: task-003
-  title: 경로 이탈 감지 모듈
-  description: 현재 GPS 위치가 설정된 경로에서 일정 거리 이상 벗어났는지 판단하는 RouteDeviationDetector를 구현한다.
-    이탈 임계값은 외부 설정(config)으로 주입받아 코드 변경 없이 조절 가능하도록 설계한다.
+  title: MapService 인터페이스 및 결과 래퍼 정의
+  description: '어댑터 패턴의 핵심인 MapService 인터페이스를 정의한다. searchPlace(query: String): Result<List<Place>>,
+    getWalkingRoute(origin: Coordinate, destination: Coordinate): Result<Route>, distanceToRoute(current:
+    Coordinate, route: Route): Double 세 가지 메서드를 포함한다. Result는 sealed class(Success,
+    Failure)로 정의한다.'
   acceptance_criteria:
-  - 'RouteDeviationDetector가 생성 시 deviationThresholdMeters: Double 파라미터를 주입받으며, 기본값은
-    40.0이다'
-  - 'isDeviated(currentPosition: Coordinate, route: Route): Boolean 메서드가 현재 위치와 경로
-    간 최소 거리가 임계값 이상이면 true, 미만이면 false를 반환한다'
-  - 단위 테스트에서 경로 위에 있는 좌표(거리=0m)에 대해 isDeviated가 false를 반환하고, 경로에서 100m 떨어진 좌표에 대해
-    임계값 40m 설정 시 true를 반환함을 검증한다
-  - 임계값을 30.0, 40.0, 50.0으로 각각 설정한 세 가지 파라미터화 테스트가 각 임계값 경계값에서 정확히 동작함을 검증한다
-  - 'DeviaionConfig 데이터 클래스(deviationThresholdMeters: Double)가 별도 파일로 존재하며, 런타임에 외부에서
-    값을 변경하여 RouteDeviationDetector에 재주입할 수 있는 구조임을 확인하는 테스트가 통과한다'
+  - MapService는 interface로 선언되며 searchPlace, getWalkingRoute, distanceToRoute 세 메서드
+    시그니처를 포함한다
+  - 'MapResult sealed class는 MapResult.Success<T>(data: T)와 MapResult.Failure(error:
+    Throwable) 두 서브클래스를 가진다'
+  - distanceToRoute는 suspend 함수가 아닌 순수 함수(pure function)로 선언된다
+  - searchPlace와 getWalkingRoute는 suspend 함수로 선언된다
   target_files:
-  - app/src/main/java/com/arnavigation/domain/navigation/DeviationConfig.kt
-  - app/src/main/java/com/arnavigation/domain/navigation/RouteDeviationDetector.kt
-  - app/src/test/java/com/arnavigation/domain/navigation/RouteDeviationDetectorTest.kt
+  - app/src/main/java/com/example/arnavigation/domain/service/MapService.kt
+  - app/src/main/java/com/example/arnavigation/domain/service/MapResult.kt
   test_framework: pytest
   depends_on:
   - task-001
@@ -84,24 +67,65 @@ tasks:
   pr_url: ''
   failure_reason: ''
 - id: task-004
-  title: 경로 안내 상태 머신 및 NavigationManager
-  description: 일반 안내 모드, 사용자 주도 AR 모드, 시스템 이탈 감지 AR 모드 간의 상태 전환을 관리하는 NavigationManager를
-    구현한다. GPS 위치 업데이트를 받아 이탈 감지를 수행하고, 상태 변화를 옵저버에게 전달한다.
+  title: 경로 이탈 감지 로직 — RouteDeviationDetector
+  description: 현재 GPS 좌표와 Route의 waypoints 간 최소 거리를 계산하여 이탈 여부를 판정하는 RouteDeviationDetector를
+    구현한다. 이탈 임계값(deviationThresholdMeters)은 외부에서 주입 가능한 설정값으로 처리한다. 두 좌표 간 거리는 Haversine
+    공식을 사용한다.
   acceptance_criteria:
-  - NavigationState가 NORMAL_GUIDANCE, USER_AR_MODE, DEVIATION_AR_MODE, ARRIVED 네 가지
-    sealed class/enum으로 정의되어 있다
-  - NavigationManager.activateUserAR()를 호출하면 상태가 USER_AR_MODE로 전환되고, deactivateAR()를
-    호출하면 NORMAL_GUIDANCE로 복귀함을 단위 테스트에서 검증한다
-  - NavigationManager.updatePosition(coordinate)를 호출했을 때 RouteDeviationDetector가 이탈을
-    감지하면 상태가 DEVIATION_AR_MODE로 자동 전환됨을 단위 테스트에서 검증한다
-  - 현재 위치가 목적지로부터 10m 이내에 들어오면 상태가 ARRIVED로 전환됨을 단위 테스트에서 검증한다
-  - 'NavigationStateListener 인터페이스(onStateChanged(state: NavigationState))를 등록한 옵저버가
-    상태 전환 시마다 정확히 한 번 호출됨을 Mockito 또는 수동 스텁을 이용한 테스트에서 검증한다'
+  - 'RouteDeviationDetector는 생성자에서 deviationThresholdMeters: Double을 인자로 받는다'
+  - 'isDeviated(current: Coordinate, route: Route): Boolean 메서드가 경로의 모든 waypoint 세그먼트
+    중 최소 거리가 임계값을 초과하면 true를 반환한다'
+  - Haversine 공식 기반 거리 계산 결과가 알려진 두 좌표(서울시청-광화문 약 600m) 기준으로 ±10m 오차 내에서 정확하다
+  - deviationThresholdMeters를 50.0으로 설정했을 때 경로에서 60m 벗어난 좌표는 isDeviated=true, 40m
+    벗어난 좌표는 false를 반환한다
   target_files:
-  - app/src/main/java/com/arnavigation/domain/navigation/NavigationState.kt
-  - app/src/main/java/com/arnavigation/domain/navigation/NavigationStateListener.kt
-  - app/src/main/java/com/arnavigation/domain/navigation/NavigationManager.kt
-  - app/src/test/java/com/arnavigation/domain/navigation/NavigationManagerTest.kt
+  - app/src/main/java/com/example/arnavigation/domain/navigation/RouteDeviationDetector.kt
+  - app/src/test/java/com/example/arnavigation/domain/navigation/RouteDeviationDetectorTest.kt
+  test_framework: pytest
+  depends_on:
+  - task-001
+  status: pending
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
+- id: task-005
+  title: NavigationConfig — 앱 설정값 외부화
+  description: 경로 이탈 임계값 등 튜닝 가능한 설정값을 한 곳에서 관리하는 NavigationConfig data class를 정의한다.
+    기본값을 제공하되 외부에서 오버라이드 가능하도록 설계한다.
+  acceptance_criteria:
+  - 'NavigationConfig는 deviationThresholdMeters: Double = 40.0을 기본값으로 가진다'
+  - NavigationConfig 인스턴스를 copy()로 deviationThresholdMeters만 변경하여 생성할 수 있다
+  - RouteDeviationDetector가 NavigationConfig를 인자로 받아 내부 임계값으로 사용하도록 연동된다
+  - 단위 테스트에서 기본 NavigationConfig와 커스텀 값(100.0m) NavigationConfig로 각각 Detector를 생성하면
+    다른 이탈 판정 결과가 나온다
+  target_files:
+  - app/src/main/java/com/example/arnavigation/domain/navigation/NavigationConfig.kt
+  - app/src/test/java/com/example/arnavigation/domain/navigation/NavigationConfigTest.kt
+  test_framework: pytest
+  depends_on:
+  - task-004
+  status: pending
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
+- id: task-006
+  title: FakeMapService — 테스트용 MapService 구현체
+  description: 단위 테스트 및 UI 개발용 FakeMapService를 구현한다. 미리 정의된 더미 데이터를 반환하며 네트워크 없이 동작한다.
+    searchPlace는 쿼리 키워드가 포함된 더미 Place 리스트를 반환하고, getWalkingRoute는 직선 경로(출발지-목적지 2점)
+    Route를 반환한다.
+  acceptance_criteria:
+  - FakeMapService는 MapService 인터페이스를 구현한다
+  - searchPlace('경복궁') 호출 시 MapResult.Success를 반환하고 결과 리스트에 '경복궁'이 포함된 Place가 존재한다
+  - getWalkingRoute 호출 시 waypoints가 출발지 좌표와 목적지 좌표 2개 이상인 Route를 포함한 MapResult.Success를
+    반환한다
+  - distanceToRoute는 current 좌표와 route의 첫 번째 waypoint 간 Haversine 거리를 반환한다
+  - FakeMapService를 사용한 통합 테스트에서 searchPlace → getWalkingRoute → distanceToRoute 순서로
+    호출 시 예외 없이 동작한다
+  target_files:
+  - app/src/test/java/com/example/arnavigation/data/fake/FakeMapService.kt
+  - app/src/test/java/com/example/arnavigation/data/fake/FakeMapServiceTest.kt
   test_framework: pytest
   depends_on:
   - task-003
@@ -110,192 +134,224 @@ tasks:
   last_error: ''
   pr_url: ''
   failure_reason: ''
-- id: task-005
-  title: 목적지 설정 — 장소 검색 UseCase
-  description: 음성 입력 또는 텍스트로 변환된 목적지 문자열을 받아 장소를 검색하고 사용자가 선택한 목적지를 확정하는 SearchDestinationUseCase를
-    구현한다. 즐겨찾기 저장/조회 기능도 포함한다.
-  acceptance_criteria:
-  - 'SearchDestinationUseCase.search(query: String): List<Place>가 MapService.searchPlace()를
-    호출하여 결과를 반환하며, 빈 문자열 입력 시 IllegalArgumentException을 throw한다'
-  - 'FavoriteRepository 인터페이스(save(place: Place), getAll(): List<Place>)와 인메모리 구현체
-    InMemoryFavoriteRepository가 존재하며, save 후 getAll()에서 해당 Place가 포함되어 있음을 테스트에서 검증한다'
-  - SearchDestinationUseCase.search() 결과가 비어 있을 때(검색 결과 없음) 빈 리스트를 반환하고 예외를 throw하지
-    않음을 테스트에서 검증한다
-  - InMemoryFavoriteRepository에 동일한 Place를 두 번 저장해도 중복 없이 하나만 저장됨을 테스트에서 검증한다
-  - SearchDestinationUseCase가 FakeMapService를 주입받아 네트워크 없이 단위 테스트가 통과한다
-  target_files:
-  - app/src/main/java/com/arnavigation/domain/usecase/SearchDestinationUseCase.kt
-  - app/src/main/java/com/arnavigation/domain/repository/FavoriteRepository.kt
-  - app/src/main/java/com/arnavigation/data/repository/InMemoryFavoriteRepository.kt
-  - app/src/test/java/com/arnavigation/domain/usecase/SearchDestinationUseCaseTest.kt
-  - app/src/test/java/com/arnavigation/data/repository/InMemoryFavoriteRepositoryTest.kt
-  test_framework: pytest
-  depends_on:
-  - task-001
-  status: pending
-  retry_count: 0
-  last_error: ''
-  pr_url: ''
-  failure_reason: ''
-- id: task-006
-  title: 목적지 설정 — 딥링크(링크 수신) 파싱 모듈
-  description: 자녀가 카카오톡 등으로 보낸 목적지 링크를 수신하여 앱이 자동으로 목적지를 설정할 수 있도록 딥링크 URL을 파싱하는 DeepLinkParser를
-    구현한다.
-  acceptance_criteria:
-  - 'DeepLinkParser.parse(url: String): DeepLinkDestination? 가 arnavigation://navigate?placeName=불국사&lat=35.7904&lng=129.3314
-    형식의 URL을 파싱하여 DeepLinkDestination(placeName, coordinate)를 반환한다'
-  - lat 또는 lng 파라미터가 누락된 URL에 대해 parse()가 null을 반환함을 테스트에서 검증한다
-  - lat/lng가 유효한 숫자 범위(위도 -90~90, 경도 -180~180)를 벗어난 경우 null을 반환함을 테스트에서 검증한다
-  - 'DeepLinkDestination(placeName: String, coordinate: Coordinate) 데이터 클래스가 정의되어
-    있고, parse() 결과를 SearchDestinationUseCase 없이 바로 NavigationManager에 목적지로 전달할 수 있는
-    구조임을 확인하는 통합 테스트가 통과한다'
-  - '잘못된 scheme(예: https://)을 가진 URL에 대해 parse()가 null을 반환함을 테스트에서 검증한다'
-  target_files:
-  - app/src/main/java/com/arnavigation/domain/deeplink/DeepLinkDestination.kt
-  - app/src/main/java/com/arnavigation/domain/deeplink/DeepLinkParser.kt
-  - app/src/test/java/com/arnavigation/domain/deeplink/DeepLinkParserTest.kt
-  test_framework: pytest
-  depends_on:
-  - task-001
-  status: pending
-  retry_count: 0
-  last_error: ''
-  pr_url: ''
-  failure_reason: ''
 - id: task-007
-  title: AR 방향 계산 모듈
-  description: 현재 위치(Coordinate), 기기 방위각(bearing), 다음 경로 지점(RouteStep의 Coordinate)을
-    입력받아 AR 화면에 화살표를 렌더링하기 위한 상대 각도를 계산하는 ArDirectionCalculator를 구현한다.
+  title: 카카오맵 어댑터 — KakaoMapService 구현
+  description: MapService 인터페이스를 구현하는 KakaoMapService를 작성한다. 카카오 REST API(로컬 키워드 검색,
+    길찾기)를 Retrofit으로 호출한다. API 응답 DTO를 도메인 모델(Place, Route)로 변환하는 매퍼를 포함한다.
   acceptance_criteria:
-  - 'ArDirectionCalculator.calculate(currentPosition: Coordinate, deviceBearing: Double,
-    targetCoordinate: Coordinate): Double 이 현재 위치에서 목표 지점까지의 방위각과 기기 방위각의 차이(상대 각도,
-    -180~180도)를 반환한다'
-  - 단위 테스트에서 정북(0도) 방향을 바라보는 기기가 정북 방향 목표를 향할 때 상대 각도 0.0을 반환함을 검증한다
-  - 단위 테스트에서 정북(0도) 방향을 바라보는 기기가 정동(90도) 방향 목표를 향할 때 상대 각도 90.0을 반환함을 검증한다
-  - 상대 각도가 항상 -180.0 이상 180.0 이하 범위에 속함을 경계값(0, 180, -180, 360, -360)에 대한 파라미터화 테스트에서
-    검증한다
-  - 두 Coordinate가 동일한 위치일 때(거리=0) calculate()가 예외 없이 0.0을 반환함을 테스트에서 검증한다
+  - KakaoMapService는 MapService 인터페이스를 구현한다
+  - searchPlace 호출 시 카카오 로컬 키워드 검색 API(/v2/local/search/keyword.json) 엔드포인트로 요청한다
+  - getWalkingRoute 호출 시 카카오 길찾기 API 엔드포인트로 요청하고 응답의 경로 좌표를 Route.waypoints에 매핑한다
+  - API 호출 실패(HTTP 4xx/5xx) 시 MapResult.Failure(error)를 반환한다
+  - KakaoPlaceDto → Place 변환 시 place_name이 Place.name에, x/y 좌표가 Coordinate에 올바르게 매핑된다
   target_files:
-  - app/src/main/java/com/arnavigation/domain/ar/ArDirectionCalculator.kt
-  - app/src/test/java/com/arnavigation/domain/ar/ArDirectionCalculatorTest.kt
+  - app/src/main/java/com/example/arnavigation/data/kakao/KakaoMapService.kt
+  - app/src/main/java/com/example/arnavigation/data/kakao/KakaoApiDto.kt
+  - app/src/main/java/com/example/arnavigation/data/kakao/KakaoResponseMapper.kt
   test_framework: pytest
   depends_on:
-  - task-001
+  - task-003
   status: pending
   retry_count: 0
   last_error: ''
   pr_url: ''
   failure_reason: ''
 - id: task-008
-  title: ARCore 세션 관리 및 AR 화살표 렌더링 래퍼
-  description: ARCore 세션의 생명주기(초기화, 일시정지, 재개, 종료)를 관리하고, ArDirectionCalculator에서 받은
-    상대 각도를 기반으로 카메라 화면에 화살표 오버레이를 렌더링하는 ArSessionManager와 ArArrowRenderer를 구현한다.
+  title: 카카오맵 어댑터 단위 테스트
+  description: KakaoResponseMapper의 DTO → 도메인 모델 변환 로직을 단위 테스트로 검증한다. 실제 네트워크 호출 없이
+    목(mock) 응답 JSON을 기반으로 테스트한다.
   acceptance_criteria:
-  - ArSessionManager가 ARCore 지원 여부를 ArCoreApk.checkAvailability()로 확인하고, 미지원 기기에서는
-    ArNotSupportedException을 throw하며 이를 호출부에서 처리할 수 있음을 확인하는 단위 테스트(ARCore 의존성 모킹)가
-    통과한다
-  - ArSessionManager.start(), pause(), stop() 메서드가 각각 ARCore Session의 resume(), pause(),
-    close()를 호출하도록 구현되어 있으며, 상태 전환 순서(start→pause→start→stop)에서 예외가 발생하지 않음을 테스트에서
-    검증한다
-  - 'ArArrowRenderer.updateDirection(relativeAngle: Double)를 호출하면 내부적으로 relativeAngle
-    값이 저장되고, getCurrentAngle()로 조회 시 동일한 값이 반환됨을 테스트에서 검증한다'
-  - relativeAngle이 -180~180 범위를 벗어난 값으로 updateDirection() 호출 시 IllegalArgumentException을
-    throw함을 테스트에서 검증한다
-  - ArSessionManager가 NavigationState.USER_AR_MODE 또는 DEVIATION_AR_MODE일 때만 활성화되고,
-    NORMAL_GUIDANCE 상태에서는 세션이 일시정지 상태임을 상태 연동 테스트에서 검증한다
+  - KakaoPlaceDto 샘플 데이터가 Place로 올바르게 변환되는지 확인한다(place_name, x, y 필드 매핑)
+  - 카카오 경로 응답 DTO의 sections[0].roads의 vertexes 배열이 Route.waypoints List<Coordinate>로
+    올바르게 변환된다
+  - 응답에 장소 결과가 0개인 경우 빈 List<Place>가 반환된다
+  - x/y 좌표가 문자열로 오는 경우 Double로 올바르게 파싱된다
   target_files:
-  - app/src/main/java/com/arnavigation/ar/ArSessionManager.kt
-  - app/src/main/java/com/arnavigation/ar/ArArrowRenderer.kt
-  - app/src/main/java/com/arnavigation/ar/ArNotSupportedException.kt
-  - app/src/test/java/com/arnavigation/ar/ArSessionManagerTest.kt
-  - app/src/test/java/com/arnavigation/ar/ArArrowRendererTest.kt
+  - app/src/test/java/com/example/arnavigation/data/kakao/KakaoResponseMapperTest.kt
   test_framework: pytest
   depends_on:
   - task-007
-  - task-004
   status: pending
   retry_count: 0
   last_error: ''
   pr_url: ''
   failure_reason: ''
 - id: task-009
-  title: GPS 위치 추적 및 위치 업데이트 서비스
-  description: Android LocationManager 또는 FusedLocationProviderClient를 사용하여 주기적으로
-    GPS 위치를 수신하고, NavigationManager에 위치 업데이트를 전달하는 LocationTrackingService를 구현한다.
+  title: NavigationViewModel — 내비게이션 상태 관리
+  description: 내비게이션 핵심 흐름을 관리하는 NavigationViewModel을 구현한다. 목적지 설정, 경로 조회, 현재 위치 업데이트,
+    이탈 감지 상태를 StateFlow로 노출한다. MapService와 RouteDeviationDetector를 의존성으로 주입받는다.
   acceptance_criteria:
-  - 'LocationTrackingService가 LocationListener 인터페이스(onLocationUpdate(coordinate:
-    Coordinate))를 등록하고 해제하는 addListener/removeListener 메서드를 제공하며, 위치 수신 시 등록된 모든 리스너에게
-    정확히 한 번 알림이 전달됨을 테스트에서 검증한다'
-  - FusedLocationProviderClient를 모킹한 단위 테스트에서 위치 업데이트 수신 시 Coordinate 객체로 올바르게 변환(lat,
-    lng 매핑)됨을 검증한다
-  - LocationTrackingService.start()와 stop()이 각각 위치 요청 등록과 해제를 수행하며, stop() 이후에는 리스너에게
-    업데이트가 전달되지 않음을 테스트에서 검증한다
-  - 위치 정확도(accuracy)가 50m 초과인 업데이트는 필터링하여 리스너에게 전달하지 않음을 테스트에서 검증한다
-  - LocationTrackingService가 NavigationManager.updatePosition()을 위치 수신마다 호출하도록 연결한
-    통합 테스트에서, 이탈 좌표 수신 시 NavigationState가 DEVIATION_AR_MODE로 전환됨을 검증한다
+  - 'NavigationViewModel은 uiState: StateFlow<NavigationUiState>를 노출하며 초기 상태는 Idle이다'
+  - 'setDestination(place: Place) 호출 시 MapService.getWalkingRoute를 호출하고 성공 시 상태가 Navigating으로
+    전환된다'
+  - 'updateCurrentLocation(coordinate: Coordinate) 호출 시 RouteDeviationDetector.isDeviated를
+    평가하여 이탈이면 상태에 isDeviated=true가 반영된다'
+  - getWalkingRoute 실패 시 NavigationUiState.Error 상태로 전환된다
+  - 테스트에서 FakeMapService를 주입하여 네트워크 없이 ViewModel 동작 전체를 검증할 수 있다
   target_files:
-  - app/src/main/java/com/arnavigation/location/LocationListener.kt
-  - app/src/main/java/com/arnavigation/location/LocationTrackingService.kt
-  - app/src/test/java/com/arnavigation/location/LocationTrackingServiceTest.kt
+  - app/src/main/java/com/example/arnavigation/ui/navigation/NavigationViewModel.kt
+  - app/src/main/java/com/example/arnavigation/ui/navigation/NavigationUiState.kt
   test_framework: pytest
   depends_on:
-  - task-004
+  - task-003
+  - task-005
   status: pending
   retry_count: 0
   last_error: ''
   pr_url: ''
   failure_reason: ''
 - id: task-010
-  title: 음성 안내(TTS) 서비스
-  description: Android TextToSpeech를 사용하여 경로 안내 텍스트를 음성으로 출력하는 VoiceGuideService를
-    구현한다. 일반 안내 모드와 이탈 알림 시 음성 메시지를 생성하는 메시지 포맷터도 포함한다.
+  title: NavigationViewModel 단위 테스트
+  description: FakeMapService를 사용하여 NavigationViewModel의 상태 전이 시나리오를 단위 테스트로 검증한다.
   acceptance_criteria:
-  - 'VoiceGuideService.speak(message: String)가 TextToSpeech 엔진을 통해 메시지를 발화하며, 이미 발화
-    중인 경우 현재 발화를 중단하고 새 메시지를 발화함을 TextToSpeech 모킹 테스트에서 검증한다'
-  - 'NavigationMessageFormatter.formatStepInstruction(step: RouteStep): String이 ''30미터
-    앞에서 우회전하세요'' 형식의 문자열을 반환하며, distance=30.0, instruction=''우회전'' 입력에 대해 정확한 포맷 문자열을
-    반환함을 테스트에서 검증한다'
-  - 'NavigationMessageFormatter.formatDeviationAlert(): String이 ''경로에서 벗어났어요. 다시 안내할게요.''
-    문자열을 반환함을 테스트에서 검증한다'
-  - VoiceGuideService.stop()이 현재 발화를 중단하고, 이후 speak() 호출이 정상 동작함을 테스트에서 검증한다
-  - VoiceGuideService가 NavigationState.DEVIATION_AR_MODE로 전환 시 자동으로 이탈 알림 메시지를 발화함을
-    NavigationManager 연동 테스트에서 검증한다
+  - 초기 상태가 NavigationUiState.Idle임을 확인한다
+  - setDestination 성공 시 상태가 NavigationUiState.Navigating으로 전환됨을 TestCoroutineScope에서
+    확인한다
+  - updateCurrentLocation으로 이탈 좌표 입력 시 uiState의 isDeviated가 true로 변경된다
+  - FakeMapService가 Failure를 반환하도록 설정 후 setDestination 호출 시 NavigationUiState.Error
+    상태가 된다
   target_files:
-  - app/src/main/java/com/arnavigation/voice/VoiceGuideService.kt
-  - app/src/main/java/com/arnavigation/voice/NavigationMessageFormatter.kt
-  - app/src/test/java/com/arnavigation/voice/VoiceGuideServiceTest.kt
-  - app/src/test/java/com/arnavigation/voice/NavigationMessageFormatterTest.kt
+  - app/src/test/java/com/example/arnavigation/ui/navigation/NavigationViewModelTest.kt
   test_framework: pytest
   depends_on:
-  - task-004
+  - task-006
+  - task-009
   status: pending
   retry_count: 0
   last_error: ''
   pr_url: ''
   failure_reason: ''
 - id: task-011
-  title: 경로 탐색 UseCase 및 NavigationManager 통합
-  description: 출발지와 목적지를 받아 경로를 탐색하고 NavigationManager에 경로를 설정하는 StartNavigationUseCase를
-    구현한다. 경로 탐색 실패 시 사용자 친화적 오류 처리도 포함한다.
+  title: AR 방향 계산 유틸리티 — ArDirectionCalculator
+  description: '현재 기기 방위각(방향)과 목표 지점 방향을 비교하여 AR 화면에 화살표를 그리기 위한 상대 각도를 계산하는 순수 함수
+    유틸리티를 구현한다. 입력: 현재 좌표, 다음 waypoint 좌표, 기기 방위각(degrees). 출력: 화면 기준 상대 회전각(degrees,
+    -180~180).'
   acceptance_criteria:
-  - 'StartNavigationUseCase.execute(origin: Coordinate, destination: Place): Result<Route>가
-    MapService.getWalkingRoute()를 호출하여 성공 시 Result.success(route), 실패 시 Result.failure(exception)를
-    반환함을 테스트에서 검증한다'
-  - StartNavigationUseCase 실행 성공 시 NavigationManager에 Route가 설정되고 상태가 NORMAL_GUIDANCE로
-    전환됨을 FakeMapService와 실제 NavigationManager를 사용한 통합 테스트에서 검증한다
-  - MapService가 MapServiceException을 throw할 때 StartNavigationUseCase가 Result.failure를
-    반환하고 NavigationManager 상태가 변경되지 않음을 테스트에서 검증한다
-  - origin과 destination이 동일한 좌표일 때 StartNavigationUseCase가 IllegalArgumentException을
-    포함한 Result.failure를 반환함을 테스트에서 검증한다
-  - FakeMapService를 주입하여 StartNavigationUseCase → NavigationManager → RouteDeviationDetector의
-    전체 흐름이 네트워크 없이 단위 테스트에서 동작함을 검증한다
+  - 'calculateBearing(from: Coordinate, to: Coordinate): Double 함수가 정북(0°) 방향으로 이동
+    시 0.0을 반환한다'
+  - calculateBearing이 서울시청에서 동쪽 1km 지점을 향할 때 약 90도(±2도 오차)를 반환한다
+  - 'getRelativeAngle(bearing: Double, deviceAzimuth: Double): Double 함수가 목표 방위 90°,
+    기기 방위 45°일 때 +45.0을 반환한다'
+  - getRelativeAngle의 반환값은 항상 -180.0 이상 180.0 이하 범위로 정규화된다
   target_files:
-  - app/src/main/java/com/arnavigation/domain/usecase/StartNavigationUseCase.kt
-  - app/src/test/java/com/arnavigation/domain/usecase/StartNavigationUseCaseTest.kt
+  - app/src/main/java/com/example/arnavigation/ar/ArDirectionCalculator.kt
+  - app/src/test/java/com/example/arnavigation/ar/ArDirectionCalculatorTest.kt
   test_framework: pytest
   depends_on:
-  - task-004
-  - task-005
+  - task-001
+  status: pending
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
+- id: task-012
+  title: AR 오버레이 View — ArrowOverlayView
+  description: 'ARCore 세션 위에 Canvas로 큰 화살표를 그리는 커스텀 View(ArrowOverlayView)를 구현한다.
+    입력: 상대 회전각(relativeAngle: Float). Canvas에 화살표를 그리고 relativeAngle에 따라 회전 적용. ARCore
+    SceneView가 아닌 일반 View 위에 오버레이로 동작한다.'
+  acceptance_criteria:
+  - 'ArrowOverlayView는 View를 상속하며 setDirection(relativeAngle: Float) 메서드를 가진다'
+  - setDirection 호출 시 invalidate()를 호출하여 화면이 갱신된다
+  - onDraw에서 Paint를 사용해 화살표 Path를 그리고, relativeAngle만큼 회전 행렬(Matrix.setRotate)을 적용한다
+  - relativeAngle=0f일 때 화살표가 View 정중앙에서 위쪽(정방향)을 가리키도록 그려진다
+  target_files:
+  - app/src/main/java/com/example/arnavigation/ar/ArrowOverlayView.kt
+  - app/src/main/res/layout/view_ar_overlay.xml
+  test_framework: pytest
+  depends_on:
+  - task-011
+  status: pending
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
+- id: task-013
+  title: AR 모드 Fragment — ArNavigationFragment
+  description: ARCore CameraStream 위에 ArrowOverlayView를 올린 AR 모드 화면 Fragment를 구현한다.
+    ARCore 세션 초기화, 카메라 권한 확인, 기기 방위각 센서 구독, ArDirectionCalculator로 화살표 각도 계산 후 ArrowOverlayView에
+    전달하는 흐름을 담는다.
+  acceptance_criteria:
+  - Fragment 진입 시 ARCore 지원 여부를 ArCoreApk.checkAvailability로 확인하고 미지원 기기는 Toast 메시지를
+    표시한 뒤 Fragment를 종료한다
+  - 카메라 권한이 없을 경우 권한 요청 다이얼로그를 표시한다
+  - SensorManager에서 TYPE_ROTATION_VECTOR 센서를 구독하여 방위각을 실시간으로 ArrowOverlayView에 반영한다
+  - NavigationViewModel.uiState에서 현재 경로의 다음 waypoint를 읽어 ArDirectionCalculator.calculateBearing으로
+    목표 방위각을 계산하고 ArrowOverlayView.setDirection을 호출한다
+  target_files:
+  - app/src/main/java/com/example/arnavigation/ui/ar/ArNavigationFragment.kt
+  - app/src/main/res/layout/fragment_ar_navigation.xml
+  test_framework: pytest
+  depends_on:
+  - task-009
+  - task-012
+  status: pending
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
+- id: task-014
+  title: 일반 안내 모드 Fragment — NavigationFragment
+  description: '경로 안내 중 기본 화면인 NavigationFragment를 구현한다. 큰 글씨로 다음 행동 지시(예: ''200m
+    앞에서 우회전'')와 남은 거리를 표시하고, ''AR로 보기'' 버튼과 이탈 감지 알림 UI를 포함한다. NavigationViewModel의
+    uiState를 구독한다.'
+  acceptance_criteria:
+  - NavigationViewModel.uiState가 Navigating일 때 다음 waypoint까지의 거리를 큰 글씨(텍스트 크기 24sp
+    이상)로 표시한다
+  - isDeviated=true 상태가 되면 진동(Vibrator) API를 호출하고 '경로에서 벗어났어요' 텍스트를 화면에 표시한다
+  - '''AR로 보기'' 버튼 클릭 시 ArNavigationFragment로 이동(navigate)한다'
+  - uiState가 Error일 때 에러 메시지를 표시하고 '다시 시도' 버튼을 노출한다
+  target_files:
+  - app/src/main/java/com/example/arnavigation/ui/navigation/NavigationFragment.kt
+  - app/src/main/res/layout/fragment_navigation.xml
+  test_framework: pytest
+  depends_on:
+  - task-009
+  status: pending
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
+- id: task-015
+  title: 목적지 설정 화면 — DestinationFragment
+  description: 앱 시작 시 표시되는 목적지 설정 화면을 구현한다. 음성 입력 버튼, 즐겨찾기 큰 버튼 목록, 링크 수신 처리(Intent
+    딥링크) 세 가지 입력 경로를 가진다. 음성 입력은 Android 기본 SpeechRecognizer를 사용한다.
+  acceptance_criteria:
+  - SpeechRecognizer를 사용하는 음성 입력 버튼이 존재하며 인식된 텍스트로 MapService.searchPlace를 호출한다
+  - 즐겨찾기 목록은 RecyclerView로 구현되며 항목 클릭 시 해당 Place로 NavigationViewModel.setDestination을
+    호출한다
+  - ACTION_VIEW Intent에서 목적지 좌표 파라미터(lat, lng, name)를 파싱하여 링크 수신 경로가 동작한다
+  - searchPlace 결과가 여러 개일 경우 목록을 표시하고 사용자가 선택할 수 있다
+  target_files:
+  - app/src/main/java/com/example/arnavigation/ui/destination/DestinationFragment.kt
+  - app/src/main/res/layout/fragment_destination.xml
+  test_framework: pytest
+  depends_on:
+  - task-009
+  status: pending
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
+- id: task-016
+  title: 앱 진입점 및 네비게이션 그래프 설정
+  description: MainActivity, Navigation Graph(nav_graph.xml), Hilt 또는 수동 DI 모듈 설정을
+    구현한다. DestinationFragment → NavigationFragment → ArNavigationFragment 화면 흐름을 Navigation
+    Component로 연결한다. MapService 구현체(KakaoMapService)와 NavigationConfig의 의존성을 주입한다.
+  acceptance_criteria:
+  - 앱 실행 시 시작 목적지가 DestinationFragment이다
+  - nav_graph.xml에 destination→navigation, navigation→ar_navigation 액션이 정의되어 있다
+  - KakaoMapService가 MapService 인터페이스 타입으로 NavigationViewModel에 주입된다
+  - NavigationConfig 인스턴스가 싱글톤으로 제공되며 RouteDeviationDetector에 주입된다
+  target_files:
+  - app/src/main/java/com/example/arnavigation/MainActivity.kt
+  - app/src/main/res/navigation/nav_graph.xml
+  - app/src/main/java/com/example/arnavigation/di/AppModule.kt
+  test_framework: pytest
+  depends_on:
+  - task-007
+  - task-013
+  - task-014
+  - task-015
   status: pending
   retry_count: 0
   last_error: ''

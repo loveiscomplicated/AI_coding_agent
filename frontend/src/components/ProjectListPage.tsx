@@ -21,7 +21,7 @@ interface JobSummary {
   status: string
   paused?: boolean
   result?: { success: number; fail: number } | null
-  request?: { tasks_path: string; repo_path: string; reports_dir?: string }
+  request?: { tasks_path: string; repo_path: string; reports_dir?: string; base_branch?: string }
 }
 
 // ── 경로 유사 여부 ─────────────────────────────────────────────────────────────
@@ -76,6 +76,7 @@ interface NewProjectModalProps {
 function NewProjectModal({ onClose, onCreate }: NewProjectModalProps) {
   const [name, setName] = useState('')
   const [rootDir, setRootDir] = useState('')
+  const [baseBranch, setBaseBranch] = useState('main')
   const [browsing, setBrowsing] = useState(false)
 
   async function browse() {
@@ -102,6 +103,7 @@ function NewProjectModal({ onClose, onCreate }: NewProjectModalProps) {
       id: crypto.randomUUID(),
       name: name.trim(),
       rootDir: rootDir.replace(/\/+$/, ''),
+      baseBranch: baseBranch.trim() || 'main',
       createdAt: new Date().toISOString(),
     })
   }
@@ -144,16 +146,28 @@ function NewProjectModal({ onClose, onCreate }: NewProjectModalProps) {
           )}
         </div>
 
-        {/* 이름 */}
-        <div>
-          <label className="text-xs text-gray-500 dark:text-zinc-400 mb-1 block">프로젝트 이름</label>
-          <input
-            className="w-full text-sm rounded-lg border border-gray-300 dark:border-zinc-600 px-3 py-2 bg-white dark:bg-zinc-800 text-gray-800 dark:text-zinc-100 outline-none focus:border-blue-500"
-            value={name}
-            onChange={e => setName(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') handleCreate() }}
-            placeholder="my_project"
-          />
+        {/* 이름 + 브랜치 */}
+        <div className="flex gap-3">
+          <div className="flex-1">
+            <label className="text-xs text-gray-500 dark:text-zinc-400 mb-1 block">프로젝트 이름</label>
+            <input
+              className="w-full text-sm rounded-lg border border-gray-300 dark:border-zinc-600 px-3 py-2 bg-white dark:bg-zinc-800 text-gray-800 dark:text-zinc-100 outline-none focus:border-blue-500"
+              value={name}
+              onChange={e => setName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleCreate() }}
+              placeholder="my_project"
+            />
+          </div>
+          <div className="w-28">
+            <label className="text-xs text-gray-500 dark:text-zinc-400 mb-1 block">기본 브랜치</label>
+            <input
+              className="w-full text-sm rounded-lg border border-gray-300 dark:border-zinc-600 px-3 py-2 bg-white dark:bg-zinc-800 text-gray-800 dark:text-zinc-100 outline-none focus:border-blue-500"
+              value={baseBranch}
+              onChange={e => setBaseBranch(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleCreate() }}
+              placeholder="main"
+            />
+          </div>
         </div>
 
         <div className="flex justify-end gap-2 pt-2">
@@ -243,6 +257,7 @@ export function ProjectListPage({ onSelectProject }: Props) {
             id: crypto.randomUUID(),
             name,
             rootDir: repoPath.replace(/\/+$/, ''),
+            baseBranch: job.request?.base_branch ?? 'main',
             createdAt: new Date().toISOString(),
           })
         }

@@ -6,7 +6,7 @@ import { ChatListPage } from './components/ChatListPage'
 import { DashboardPage } from './components/DashboardPage'
 import { PipelineLogView, ACTIVE_JOB_KEY } from './components/PipelineLogView'
 import { ProjectListPage } from './components/ProjectListPage'
-import { Project } from './storage/projectStorage'
+import { Project, loadProjects, saveProjects } from './storage/projectStorage'
 
 const storage = new MeetingStorage()
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000') as string
@@ -89,6 +89,8 @@ export default function App() {
   const startNew = (type: 'project' | 'system' = 'project', brief = '') => {
     setNewMeetingMenu(false)
     setShowListPage(false)
+    setShowDashboard(false)
+    setSelectedProject(null)
     setActiveId(null)
     setActiveMeetingType(type)
     setActiveExecutionBrief(brief)
@@ -220,7 +222,10 @@ export default function App() {
               )}
             </button>
             {newMeetingMenu && (
-              <div className="absolute right-0 top-8 z-30 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl py-1 w-40">
+              <div
+                onMouseDown={e => e.stopPropagation()}
+                className="absolute right-0 top-8 z-30 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl py-1 w-40"
+              >
                 <button
                   onClick={() => startNew('project')}
                   className="w-full text-left px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-700 transition-colors flex items-center gap-2"
@@ -439,6 +444,15 @@ export default function App() {
               setResumeJobId(jobId)
               setShowDashboard(false)
               setSelectedProject(null)
+            }}
+            onDiscordChannelCreated={(channelId) => {
+              // 새로 생성된 Discord 채널 ID를 Project에 저장
+              const projects = loadProjects()
+              const updated = projects.map(p =>
+                p.id === selectedProject.id ? { ...p, discordChannelId: channelId } : p
+              )
+              saveProjects(updated)
+              setSelectedProject(prev => prev ? { ...prev, discordChannelId: channelId } : prev)
             }}
           />
         ) : showDashboard ? (

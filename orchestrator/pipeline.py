@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from agents.roles import TEST_WRITER, IMPLEMENTER, REVIEWER
 from agents.scoped_loop import ScopedReactLoop, ScopedResult
 from docker.runner import DockerTestRunner, RunResult
+from llm.base import StopReason
 from orchestrator.task import Task, TaskStatus
 from orchestrator.workspace import WorkspaceManager
 
@@ -97,11 +98,13 @@ class TDDPipeline:
         implementer_llm=None,
         test_runner: DockerTestRunner | None = None,
         max_retries: int = MAX_RETRIES,
+        max_iterations: int = 40,
     ):
         self.agent_llm = agent_llm
         self.implementer_llm = implementer_llm or agent_llm
         self.test_runner = test_runner or DockerTestRunner()
         self.max_retries = max_retries
+        self.max_iterations = max_iterations
 
     # ── 공개 인터페이스 ───────────────────────────────────────────────────────
 
@@ -116,7 +119,8 @@ class TDDPipeline:
         task.status = TaskStatus.WRITING_TESTS
         test_scoped = self._run_test_writer(task, workspace)
         if not test_scoped.succeeded:
-            return PipelineResult.failed(task, f"TestWriter 실패: {test_scoped.answer}")
+            prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
+            return PipelineResult.failed(task, f"{prefix}TestWriter 실패: {test_scoped.answer}")
 
         test_files = workspace.list_test_files()
         if not test_files:
@@ -129,7 +133,8 @@ class TDDPipeline:
             task.status = TaskStatus.IMPLEMENTING
             impl_scoped = self._run_implementer(task, workspace)
             if not impl_scoped.succeeded:
-                return PipelineResult.failed(task, f"Implementer 실패: {impl_scoped.answer}")
+                prefix = "[MAX_ITER] " if _is_max_iter(impl_scoped) else ""
+                return PipelineResult.failed(task, f"{prefix}Implementer 실패: {impl_scoped.answer}")
 
             task.status = TaskStatus.RUNNING_TESTS
             docker_result = self.test_runner.run(workspace.path)
@@ -176,6 +181,7 @@ class TDDPipeline:
             llm=self.agent_llm,
             role=TEST_WRITER,
             workspace_dir=workspace.path,
+            max_iterations=self.max_iterations,
         )
         prompt = _build_test_writer_prompt(task, workspace)
         logger.debug("[%s] TestWriter 시작", task.id)
@@ -297,6 +303,17 @@ def _build_reviewer_prompt(
 `src/` 와 `tests/` 를 읽고 코드를 검토한 뒤,
 지시받은 형식대로 VERDICT 를 반환하세요.
 """
+
+
+# ── 헬퍼 ─────────────────────────────────────────────────────────────────────
+
+
+def _is_max_iter(scoped: ScopedResult) -> bool:
+    """ScopedResult 가 MAX_ITER 로 종료되었는지 확인한다."""
+    return (
+        scoped.loop_result is not None
+        and scoped.loop_result.stop_reason == StopReason.MAX_ITER
+    )
 
 
 # ── 리뷰 파싱 ─────────────────────────────────────────────────────────────────

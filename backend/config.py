@@ -20,8 +20,8 @@ if not ANTHROPIC_API_KEY:
 
 # Discord 핫라인 (Step 5). 미설정 시 Discord 기능 비활성화.
 DISCORD_BOT_TOKEN: str = os.environ.get("DISCORD_BOT_TOKEN", "")
-DISCORD_CHANNEL_ID: int | None = (
-    int(os.environ["DISCORD_CHANNEL_ID"])
-    if os.environ.get("DISCORD_CHANNEL_ID")
+DISCORD_GUILD_ID: int | None = (
+    int(os.environ["DISCORD_GUILD_ID"])
+    if os.environ.get("DISCORD_GUILD_ID")
     else None
 )

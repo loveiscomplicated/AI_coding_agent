@@ -100,15 +100,26 @@ class GitWorkflow:
         """
         base_branch 를 시작점으로 임시 worktree 를 생성한다.
         브랜치가 이미 존재하면 -B 로 강제 리셋한다.
+        base_branch 가 로컬에 없으면 origin/{base_branch} → HEAD 순으로 폴백한다.
         """
-        result = self._git(
-            ["worktree", "add", "-B", branch, str(wt_path), self.base_branch]
-        )
-        if result.returncode != 0:
-            raise GitWorkflowError(
-                f"git worktree add 실패:\n{result.stderr.strip() or result.stdout.strip()}"
+        start_points = [
+            self.base_branch,
+            f"origin/{self.base_branch}",
+            "HEAD",
+        ]
+        last_error = ""
+        for start in start_points:
+            result = self._git(
+                ["worktree", "add", "-B", branch, str(wt_path), start]
             )
-        logger.debug("[worktree] 생성: %s → %s", branch, wt_path)
+            if result.returncode == 0:
+                logger.debug("[worktree] 생성: %s → %s (start: %s)", branch, wt_path, start)
+                return
+            last_error = result.stderr.strip() or result.stdout.strip()
+            logger.debug("[worktree] start-point '%s' 실패: %s", start, last_error)
+        raise GitWorkflowError(
+            f"git worktree add 실패 (시작점: {start_points}):\n{last_error}"
+        )
 
     def _remove_worktree(self, wt_path: Path) -> None:
         """worktree 디렉토리를 삭제하고 git 메타데이터를 정리한다."""
@@ -174,12 +185,19 @@ class GitWorkflow:
     # ── PR 생성 ───────────────────────────────────────────────────────────────
 
     def _create_pr(self, task: Task, result: PipelineResult) -> str:
+        # 의존 태스크 브랜치가 아직 base_branch 에 머지 안 됐으면 그 브랜치를 base 로 사용
+        pr_base = self._resolve_pr_base(task)
+        if pr_base != self.base_branch:
+            logger.info(
+                "[%s] PR base → %s (의존 태스크 미머지)", task.id, pr_base
+            )
+
         body = _build_pr_body(task, result)
         cmd = [
             "gh", "pr", "create",
             "--title", f"[agent] {task.title}",
             "--body", body,
-            "--base", self.base_branch,
+            "--base", pr_base,
             "--head", task.branch_name,
         ]
         completed = subprocess.run(
@@ -194,6 +212,29 @@ class GitWorkflow:
             )
         # gh pr create 는 성공 시 PR URL 을 stdout 에 출력
         return completed.stdout.strip()
+
+    def _resolve_pr_base(self, task: Task) -> str:
+        """
+        depends_on 태스크의 브랜치가 아직 base_branch 에 머지 안 됐으면
+        해당 브랜치를 PR base 로 반환한다. 모두 머지됐으면 self.base_branch.
+        """
+        for dep_id in reversed(task.depends_on):
+            dep_branch = f"agent/{dep_id}"
+            if self._remote_branch_exists(dep_branch) and not self._is_merged(dep_branch):
+                return dep_branch
+        return self.base_branch
+
+    def _remote_branch_exists(self, branch: str) -> bool:
+        """origin/{branch} 가 존재하는지 확인한다."""
+        result = self._git(["ls-remote", "--exit-code", "--heads", "origin", branch])
+        return result.returncode == 0
+
+    def _is_merged(self, branch: str) -> bool:
+        """branch 가 base_branch 의 조상(ancestor)인지 — 즉 이미 머지됐는지 — 확인한다."""
+        result = self._git(
+            ["merge-base", "--is-ancestor", f"origin/{branch}", self.base_branch]
+        )
+        return result.returncode == 0
 
     # ── 내부 git 헬퍼 ────────────────────────────────────────────────────────
 

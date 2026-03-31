@@ -34,6 +34,7 @@ from llm import LLMConfig, create_client
 from orchestrator.git_workflow import GitWorkflow, GitWorkflowError, check_prerequisites
 from orchestrator.merge_agent import MergeAgent
 from orchestrator.milestone import generate_milestone_report
+from orchestrator.intervention import analyze as orch_analyze, generate_report as orch_report, save_report as orch_save_report
 from orchestrator.pipeline import TDDPipeline
 from orchestrator.report import build_report, load_reports, save_report
 from orchestrator.task import Task, TaskStatus, load_tasks, save_tasks
@@ -56,10 +57,20 @@ def _info(msg: str) -> str: return f"{_CYAN}→{_RESET} {msg}"
 
 # ── 위상 정렬 ─────────────────────────────────────────────────────────────────
 
-def resolve_execution_groups(tasks: list[Task]) -> list[list[Task]]:
+def resolve_execution_groups(
+    tasks: list[Task],
+    all_valid_ids: set[str] | None = None,
+) -> list[list[Task]]:
     """
     depends_on 관계를 분석하여 실행 그룹을 반환한다.
     같은 그룹 내 태스크는 순차 실행 (Phase 3에서 병렬화).
+
+    Args:
+        tasks: 실행할 태스크 목록 (pending 태스크만)
+        all_valid_ids: 유효한 태스크 ID 전체 집합.
+                       None이면 tasks 내 ID만 허용.
+                       재개 시 이미 완료된 태스크 ID를 전달하면
+                       depends_on 검증을 통과시킬 수 있다.
 
     Returns:
         [[task-001, task-003], [task-002, task-004]] 형태의 그룹 리스트.
@@ -69,21 +80,23 @@ def resolve_execution_groups(tasks: list[Task]) -> list[list[Task]]:
         ValueError: 존재하지 않는 ID 참조 또는 순환 의존성.
     """
     task_map = {t.id: t for t in tasks}
+    valid_ids = all_valid_ids if all_valid_ids is not None else set(task_map.keys())
 
-    # 존재하지 않는 ID 참조 검사
+    # 존재하지 않는 ID 참조 검사 (완료된 태스크 포함 전체 기준)
     for task in tasks:
         for dep_id in task.depends_on:
-            if dep_id not in task_map:
+            if dep_id not in valid_ids:
                 raise ValueError(
                     f"태스크 '{task.id}'의 depends_on에 존재하지 않는 ID: '{dep_id}'"
                 )
 
-    # Kahn's algorithm
-    in_degree = {t.id: len(t.depends_on) for t in tasks}
+    # Kahn's algorithm — 이미 완료된 의존성은 in_degree에서 제외
+    in_degree = {t.id: sum(1 for d in t.depends_on if d in task_map) for t in tasks}
     dependents: dict[str, list[str]] = {t.id: [] for t in tasks}
     for task in tasks:
         for dep_id in task.depends_on:
-            dependents[dep_id].append(task.id)
+            if dep_id in task_map:   # pending 태스크 간 의존성만 추적
+                dependents[dep_id].append(task.id)
 
     groups: list[list[Task]] = []
     ready = [t for t in tasks if in_degree[t.id] == 0]
@@ -185,7 +198,7 @@ class PauseController:
 def run_pipeline(
     tasks_path: Path,
     repo_path: Path,
-    base_branch: str = "dev",
+    base_branch: str = "main",
     task_id: str | None = None,
     no_pr: bool = False,
     verbose: bool = False,
@@ -193,6 +206,9 @@ def run_pipeline(
     reports_dir: Path | None = None,
     pause_controller: "PauseController | None" = None,
     max_workers: int = 1,
+    discord_channel_id: int | None = None,
+    max_orchestrator_retries: int = 2,
+    auto_merge: bool = False,
 ) -> dict:
     """
     파이프라인 실행 핵심 로직. CLI와 FastAPI 백엔드 양쪽에서 호출된다.
@@ -217,12 +233,20 @@ def run_pipeline(
         if not all_tasks:
             raise ValueError(f"태스크 ID '{task_id}'를 찾을 수 없습니다.")
 
-    pending = [t for t in all_tasks if t.status not in (TaskStatus.DONE, TaskStatus.FAILED)]
+    # DONE만 제외 — FAILED는 재시도 대상
+    pending = [t for t in all_tasks if t.status != TaskStatus.DONE]
+    # FAILED 태스크는 새 실행을 위해 상태 초기화
+    for t in pending:
+        if t.status == TaskStatus.FAILED:
+            t.status = TaskStatus.PENDING
+
     if not pending:
         return {"success": 0, "fail": 0, "tasks": [t.to_dict() for t in all_tasks]}
 
     # 의존성 기반 실행 그룹 계산
-    groups = resolve_execution_groups(pending)
+    # all_valid_ids: 완료된 태스크 ID도 포함해야 depends_on 검증을 통과할 수 있다
+    all_task_ids = {t.id for t in all_tasks}
+    groups = resolve_execution_groups(pending, all_valid_ids=all_task_ids)
 
     # LLM 클라이언트 + 파이프라인 초기화
     haiku = create_client("claude", LLMConfig(model="claude-haiku-4-5", max_tokens=8192))
@@ -233,11 +257,27 @@ def run_pipeline(
 
     pipeline = TDDPipeline(agent_llm=haiku, implementer_llm=sonnet, test_runner=runner)
     git = GitWorkflow(repo_path, base_branch=base_branch)
-    notifier = DiscordNotifier.from_env()
+    merge_agent = MergeAgent(llm=haiku, repo_path=repo_path)
+    # discord_channel_id가 없으면 notifier 생성 안 함 (채널 생성 실패 포함)
+    notifier = DiscordNotifier.from_env(channel_id=discord_channel_id) if discord_channel_id else None
 
     def emit(event: dict) -> None:
         if on_progress:
             on_progress(event)  # type: ignore[operator]
+
+    # ── auto_merge catch-up: 이전 실행에서 완료됐지만 미머지된 브랜치 처리 ────────
+    if auto_merge and not no_pr:
+        _catchup_merge(
+            all_tasks=all_tasks,
+            pending_ids={t.id for t in pending},
+            base_branch=base_branch,
+            repo_path=repo_path,
+            merge_agent=merge_agent,
+            all_task_ids=all_task_ids,
+            runner=runner,
+            notifier=notifier,
+            emit=emit,
+        )
 
     # ── 일시정지 컨트롤러 + Discord 명령 리스너 스레드 ──────────────────────────
     pause_ctrl = pause_controller if pause_controller is not None else PauseController()
@@ -274,70 +314,213 @@ def run_pipeline(
 
     success_count = 0
     fail_count = 0
+    failed_ids: set[str] = set()     # 실패/스킵된 태스크 ID 추적 (의존성 스킵용)
     _save_lock = threading.Lock()   # tasks.yaml 파일 쓰기 직렬화
 
     def run_one(task: Task) -> None:
-        """태스크 하나를 실행한다. 병렬/순차 양쪽에서 호출된다."""
+        """태스크 하나를 실행한다. 실패 시 오케스트레이터가 개입하여 재시도한다."""
         nonlocal success_count, fail_count
 
         start_time = time.monotonic()
         emit({"type": "task_start", "task_id": task.id, "title": task.title})
         _notify(notifier, f"🚀 [{task.id}] \"{task.title}\" 시작")
 
-        with WorkspaceManager(task, repo_path, keep_on_failure=True) as ws:
-            emit({"type": "step", "task_id": task.id, "step": "testing",
-                  "message": "TestWriter → Implementer → Docker → Reviewer…"})
-            result = pipeline.run(task, ws)
-            elapsed = time.monotonic() - start_time
+        hints_tried: list[str] = []
 
-            pr_url = ""
-            if result.succeeded and not no_pr:
-                if result.test_result:
-                    emit({"type": "step", "task_id": task.id, "step": "test_pass",
-                          "message": f"테스트 통과: {result.test_result.summary}"})
-                if result.review:
-                    emit({"type": "step", "task_id": task.id, "step": "review",
-                          "message": f"리뷰: {result.review.verdict} — {result.review.summary}"})
-                emit({"type": "step", "task_id": task.id, "step": "git",
-                      "message": "브랜치 → 커밋 → 푸시 → PR 생성 중…"})
-                try:
-                    pr_url = git.run(task, ws, result)
-                    task.pr_url = pr_url
+        for orch_attempt in range(max_orchestrator_retries + 1):
+            with WorkspaceManager(task, repo_path, keep_on_failure=True) as ws:
+                if orch_attempt > 0:
+                    emit({"type": "step", "task_id": task.id, "step": "testing",
+                          "message": f"오케스트레이터 재시도 {orch_attempt}/{max_orchestrator_retries}…"})
+                else:
+                    emit({"type": "step", "task_id": task.id, "step": "testing",
+                          "message": "TestWriter → Implementer → Docker → Reviewer…"})
+
+                result = pipeline.run(task, ws)
+                elapsed = time.monotonic() - start_time
+
+                # ── 성공 ────────────────────────────────────────────────────────
+                if result.succeeded:
+                    pr_url = ""
+                    if not no_pr:
+                        if result.test_result:
+                            emit({"type": "step", "task_id": task.id, "step": "test_pass",
+                                  "message": f"테스트 통과: {result.test_result.summary}"})
+                        if result.review:
+                            emit({"type": "step", "task_id": task.id, "step": "review",
+                                  "message": f"리뷰: {result.review.verdict} — {result.review.summary}"})
+                        emit({"type": "step", "task_id": task.id, "step": "git",
+                              "message": "브랜치 → 커밋 → 푸시 → PR 생성 중…"})
+                        try:
+                            pr_url = git.run(task, ws, result)
+                            task.pr_url = pr_url
+                        except GitWorkflowError as e:
+                            task.status = TaskStatus.FAILED
+                            task.failure_reason = str(e)
+                            with _save_lock:
+                                fail_count += 1
+                            emit({"type": "task_fail", "task_id": task.id, "title": task.title,
+                                  "reason": str(e), "elapsed": round(elapsed, 1)})
+                            _notify_failure(notifier, task, str(e), elapsed)
+                            report = build_report(task, result, elapsed_seconds=elapsed, pr_url="")
+                            save_report(report, reports_dir=reports_dir)
+                            with _save_lock:
+                                save_tasks(all_tasks, tasks_path)
+                            return
+
                     task.status = TaskStatus.DONE
                     with _save_lock:
                         success_count += 1
-                    emit({"type": "task_done", "task_id": task.id, "title": task.title,
-                          "pr_url": pr_url, "elapsed": round(elapsed, 1)})
-                    _notify(notifier,
-                            f"✅ [{task.id}] \"{task.title}\" 완료! PR: {pr_url}  (⏱ {elapsed:.0f}s)")
-                except GitWorkflowError as e:
-                    result = type(result).failed(task, str(e))  # type: ignore[attr-defined]
+                    if pr_url:
+                        emit({"type": "task_done", "task_id": task.id, "title": task.title,
+                              "pr_url": pr_url, "elapsed": round(elapsed, 1)})
+                        _notify(notifier,
+                                f"✅ [{task.id}] \"{task.title}\" 완료! PR: {pr_url}  (⏱ {elapsed:.0f}s)")
+                    else:
+                        emit({"type": "task_done", "task_id": task.id, "title": task.title,
+                              "elapsed": round(elapsed, 1)})
+                        _notify(notifier, f"✅ [{task.id}] \"{task.title}\" 완료! (⏱ {elapsed:.0f}s)")
+
+                    report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url)
+                    save_report(report, reports_dir=reports_dir)
                     with _save_lock:
-                        fail_count += 1
-                    emit({"type": "task_fail", "task_id": task.id, "title": task.title,
-                          "reason": str(e), "elapsed": round(elapsed, 1)})
-                    _notify_failure(notifier, task, str(e), elapsed)
-            elif result.succeeded:
-                task.status = TaskStatus.DONE
-                with _save_lock:
-                    success_count += 1
-                emit({"type": "task_done", "task_id": task.id, "title": task.title,
-                      "elapsed": round(elapsed, 1)})
-                _notify(notifier, f"✅ [{task.id}] \"{task.title}\" 완료! (⏱ {elapsed:.0f}s)")
-            else:
+                        save_tasks(all_tasks, tasks_path)
+                    return
+
+                # ── 실패 ────────────────────────────────────────────────────────
+                failure_reason = result.failure_reason or "알 수 없음"
+                is_max_iter = failure_reason.startswith("[MAX_ITER]")
+
+                if is_max_iter:
+                    logger.warning(
+                        "[%s] ⚠️ 최대 반복 횟수 초과 (오케스트레이터 시도 %d/%d): %s",
+                        task.id, orch_attempt + 1, max_orchestrator_retries + 1, task.title,
+                    )
+
+                is_last_attempt = (orch_attempt >= max_orchestrator_retries)
+
+                if not is_last_attempt:
+                    # ── 오케스트레이터 개입: 분석 후 재시도 결정 ─────────────
+                    reason_snippet = failure_reason.replace("[MAX_ITER] ", "")[:200]
+                    logger.warning(
+                        "[%s] 실패 (시도 %d/%d) — 오케스트레이터 분석 시작\n  원인: %s",
+                        task.id, orch_attempt + 1, max_orchestrator_retries + 1, reason_snippet,
+                    )
+                    _notify(notifier,
+                            f"🔍 [{task.id}] 실패 (시도 {orch_attempt + 1}/{max_orchestrator_retries + 1})"
+                            f" — 오케스트레이터 분석 중…\n"
+                            f"원인: {reason_snippet}")
+                    emit({"type": "orchestrator_analyzing", "task_id": task.id,
+                          "title": task.title, "attempt": orch_attempt + 1,
+                          "max_attempts": max_orchestrator_retries + 1,
+                          "failure_reason": failure_reason, "is_max_iter": is_max_iter})
+
+                    analysis = orch_analyze(task, failure_reason, orch_attempt + 1)
+
+                    if analysis.should_retry:
+                        hints_tried.append(analysis.hint)
+                        task.last_error = (
+                            f"[오케스트레이터 힌트 #{orch_attempt + 1}]\n{analysis.hint}\n\n"
+                            f"이전 오류:\n{task.last_error or ''}"
+                        )
+                        task.failure_reason = ""  # 초기화 (다음 시도 전)
+                        logger.warning(
+                            "[%s] 오케스트레이터 → RETRY (시도 %d → %d)\n  힌트: %s",
+                            task.id, orch_attempt + 1, orch_attempt + 2, analysis.hint[:150],
+                        )
+                        _notify(notifier,
+                                f"🔄 [{task.id}] 오케스트레이터 재시도 결정 "
+                                f"({orch_attempt + 1} → {orch_attempt + 2}회차)\n"
+                                f"💡 힌트: {analysis.hint[:400]}")
+                        emit({"type": "orchestrator_retry", "task_id": task.id,
+                              "title": task.title, "attempt": orch_attempt + 1,
+                              "next_attempt": orch_attempt + 2,
+                              "max_attempts": max_orchestrator_retries + 1,
+                              "hint": analysis.hint, "failure_reason": failure_reason})
+                        continue  # 다음 orch_attempt — 새 WorkspaceManager로 재실행
+
+                    else:
+                        # GIVE_UP — 더 이상 시도하지 않음
+                        logger.warning(
+                            "[%s] 오케스트레이터 → GIVE_UP (시도 %d/%d)\n  이유: %s",
+                            task.id, orch_attempt + 1, max_orchestrator_retries + 1, analysis.hint[:150],
+                        )
+                        _notify(notifier,
+                                f"🛑 [{task.id}] 오케스트레이터 포기 결정 "
+                                f"(시도 {orch_attempt + 1}/{max_orchestrator_retries + 1})\n"
+                                f"이유: {analysis.hint[:300]}")
+                        emit({"type": "orchestrator_giveup", "task_id": task.id,
+                              "title": task.title, "attempt": orch_attempt + 1,
+                              "reason": analysis.hint, "failure_reason": failure_reason})
+                        is_last_attempt = True  # 아래 최종 실패 처리로 넘어감
+
+                # ── 최종 실패 처리 ───────────────────────────────────────────
+                task.status = TaskStatus.FAILED
+                task.failure_reason = failure_reason
                 with _save_lock:
                     fail_count += 1
+
+                # 오케스트레이터가 1회 이상 개입한 경우 → 상세 보고서 생성
+                if hints_tried:
+                    logger.warning(
+                        "[%s] 오케스트레이터 최종 실패 (%d회 시도) — 보고서 생성 중…",
+                        task.id, orch_attempt + 1,
+                    )
+                    emit({"type": "orchestrator_report_generating", "task_id": task.id,
+                          "title": task.title, "total_attempts": orch_attempt + 1})
+                    _notify(notifier,
+                            f"📊 [{task.id}] \"{task.title}\" "
+                            f"오케스트레이터 {orch_attempt + 1}회 시도 후 최종 실패\n"
+                            f"보고서 생성 중…")
+
+                    report_text = orch_report(
+                        task, failure_reason, orch_attempt + 1, hints_tried
+                    )
+                    report_path = orch_save_report(report_text, task.id, reports_dir)
+                    logger.warning(
+                        "[%s] 오케스트레이터 보고서 저장 완료: %s", task.id, report_path,
+                    )
+                    _notify(notifier,
+                            f"📋 [{task.id}] **오케스트레이터 실패 보고서**\n"
+                            f"파일: {report_path.name}\n\n"
+                            f"{report_text[:800]}"
+                            f"{'…(이하 생략)' if len(report_text) > 800 else ''}")
+                    emit({"type": "orchestrator_report", "task_id": task.id,
+                          "title": task.title, "total_attempts": orch_attempt + 1,
+                          "report": report_text, "report_path": str(report_path)})
+                else:
+                    # 오케스트레이터 개입 없이 첫 시도에서 실패 (max_orchestrator_retries=0 등)
+                    if is_max_iter:
+                        _notify(notifier,
+                                f"⚠️ [{task.id}] \"{task.title}\" **최대 반복 횟수 초과**\n"
+                                f"에이전트가 루프를 탈출하지 못했습니다.\n"
+                                f"태스크를 더 작게 분할하거나 아래에 힌트를 입력하세요.")
+
                 emit({"type": "task_fail", "task_id": task.id, "title": task.title,
-                      "reason": result.failure_reason or "알 수 없음", "elapsed": round(elapsed, 1)})
-                hint = _notify_failure(notifier, task, result.failure_reason or "알 수 없음", elapsed)
+                      "reason": task.failure_reason, "is_max_iter": is_max_iter,
+                      "elapsed": round(elapsed, 1)})
+                hint = _notify_failure(notifier, task, task.failure_reason, elapsed)
                 if hint:
-                    task.last_error = f"[Discord 힌트] {hint}\n{task.last_error}"
+                    task.last_error = f"[Discord 힌트] {hint}\n{task.last_error or ''}"
 
-            report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url)
-            save_report(report, reports_dir=reports_dir)
+                report = build_report(task, result, elapsed_seconds=elapsed, pr_url="")
+                save_report(report, reports_dir=reports_dir)
+                with _save_lock:
+                    save_tasks(all_tasks, tasks_path)
+                return
 
+    def skip_one(task: Task, blocked_by: list[str]) -> None:
+        """의존 태스크 실패로 건너뛸 태스크를 처리한다."""
+        nonlocal fail_count
+        reason = f"의존 태스크 실패로 건너뜀: {', '.join(blocked_by)}"
+        task.status = TaskStatus.FAILED
+        task.failure_reason = reason
+        failed_ids.add(task.id)
         with _save_lock:
+            fail_count += 1
             save_tasks(all_tasks, tasks_path)
+        emit({"type": "task_skip", "task_id": task.id, "title": task.title, "reason": reason})
+        logger.info("스킵: [%s] %s", task.id, reason)
 
     emit({"type": "pipeline_start", "total": len(pending),
           "tasks": [t.id for t in pending]})
@@ -362,22 +545,53 @@ def run_pipeline(
             if pause_ctrl.is_stopped:
                 break
 
-            # ── 그룹 내 태스크 실행 ───────────────────────────────────────────
-            workers = min(max_workers, len(group))
+            # ── 그룹 내 태스크 실행 (의존성 실패 시 스킵) ────────────────────
+            runnable = []
+            for task in group:
+                blocked_by = [d for d in task.depends_on if d in failed_ids]
+                if blocked_by:
+                    skip_one(task, blocked_by)
+                else:
+                    runnable.append(task)
+
+            workers = min(max_workers, len(runnable))
             if workers > 1:
                 emit({"type": "step", "step": "parallel",
-                      "message": f"그룹 {len(group)}개 태스크를 에이전트 {workers}개로 병렬 실행"})
+                      "message": f"그룹 {len(runnable)}개 태스크를 에이전트 {workers}개로 병렬 실행"})
                 with ThreadPoolExecutor(max_workers=workers) as executor:
-                    futures = {executor.submit(run_one, task): task for task in group}
+                    futures = {executor.submit(run_one, task): task for task in runnable}
                     for future in as_completed(futures):
                         exc = future.exception()
                         if exc:
                             t = futures[future]
-                            logging.getLogger(__name__).error(
-                                "[%s] 예외 발생: %s", t.id, exc)
+                            logger.error("[%s] 예외 발생: %s", t.id, exc)
+                            t.status = TaskStatus.FAILED
+                            t.failure_reason = str(exc)
             else:
-                for task in group:
+                for task in runnable:
                     run_one(task)
+
+            # 이 그룹에서 실패한 태스크 ID를 failed_ids에 추가
+            for task in group:
+                if task.status == TaskStatus.FAILED:
+                    failed_ids.add(task.id)
+
+            # ── 그룹 완료 후 자동 머지 ────────────────────────────────────────
+            if auto_merge and not no_pr:
+                done_branches = [
+                    t.branch_name for t in group
+                    if t.status == TaskStatus.DONE
+                ]
+                if done_branches:
+                    _auto_merge_group(
+                        branches=done_branches,
+                        base_branch=base_branch,
+                        repo_path=repo_path,
+                        merge_agent=merge_agent,
+                        test_runner=runner,
+                        notifier=notifier,
+                        emit=emit,
+                    )
 
             if pause_ctrl.is_stopped:
                 break
@@ -506,17 +720,103 @@ def _run_single_task(
 # ── 자동 머지 헬퍼 ────────────────────────────────────────────────────────────
 
 
+def _is_branch_merged(branch: str, base_branch: str, repo_path: Path) -> bool:
+    """origin/{branch}가 base_branch의 조상인지 확인한다 (즉, 이미 머지됐는지)."""
+    import subprocess
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", f"origin/{branch}", base_branch],
+        capture_output=True,
+        cwd=str(repo_path),
+    )
+    return result.returncode == 0
+
+
+def _remote_branch_exists(branch: str, repo_path: Path) -> bool:
+    """origin/{branch}가 원격에 존재하는지 확인한다."""
+    import subprocess
+    result = subprocess.run(
+        ["git", "ls-remote", "--exit-code", "--heads", "origin", branch],
+        capture_output=True,
+        cwd=str(repo_path),
+    )
+    return result.returncode == 0
+
+
+def _catchup_merge(
+    all_tasks: list,
+    pending_ids: set,
+    base_branch: str,
+    repo_path: Path,
+    merge_agent: MergeAgent,
+    all_task_ids: set,
+    runner,
+    notifier,
+    emit,
+) -> None:
+    """
+    이전 실행에서 DONE됐지만 base_branch에 아직 머지 안 된 브랜치를
+    의존성 순서(위상 정렬)대로 머지한다.
+
+    재개 시 auto_merge가 처음 켜진 경우를 위한 catch-up 단계.
+    """
+    done_tasks = [t for t in all_tasks if t.id not in pending_ids and t.status == TaskStatus.DONE]
+    if not done_tasks:
+        return
+
+    # 원격 브랜치가 존재하고 아직 미머지인 태스크만 필터링
+    unmerged = [
+        t for t in done_tasks
+        if _remote_branch_exists(t.branch_name, repo_path)
+        and not _is_branch_merged(t.branch_name, base_branch, repo_path)
+    ]
+    if not unmerged:
+        return
+
+    # 의존성 순서(위상 정렬)로 정렬 — 선행 태스크를 먼저 머지
+    try:
+        ordered_groups = resolve_execution_groups(unmerged, all_valid_ids=all_task_ids)
+    except ValueError:
+        # 순환 의존성 등 예외 — 순서 무시하고 그냥 진행
+        ordered_groups = [unmerged]
+
+    branches_in_order = [t.branch_name for group in ordered_groups for t in group]
+
+    logger.warning(
+        "catch-up 머지: %d개 미머지 브랜치를 순서대로 머지합니다: %s",
+        len(branches_in_order), branches_in_order,
+    )
+    _notify(notifier,
+            f"🔁 catch-up 머지 — 이전 실행에서 완료됐지만 미머지된 브랜치 {len(branches_in_order)}개를 먼저 처리합니다.\n"
+            f"순서: {' → '.join(branches_in_order)}")
+    emit({"type": "catchup_merge_start", "branches": branches_in_order,
+          "count": len(branches_in_order)})
+
+    _auto_merge_group(
+        branches=branches_in_order,
+        base_branch=base_branch,
+        repo_path=repo_path,
+        merge_agent=merge_agent,
+        test_runner=runner,
+        notifier=notifier,
+        emit=emit,
+    )
+
+
 def _auto_merge_group(
     branches: list[str],
     base_branch: str,
     repo_path: Path,
     merge_agent: MergeAgent,
+    test_runner: "DockerTestRunner | None" = None,
+    notifier=None,
+    emit=None,
 ) -> None:
     """
     그룹 내 agent 브랜치들을 base_branch 에 순서대로 머지하고 push 한다.
 
     충돌 발생 시 MergeAgent(LLM)가 자동 해결한다.
-    머지 실패는 경고로 출력하고 계속 진행한다 (태스크 자체는 DONE).
+    test_runner 가 주어지면 전체 머지 완료 후 테스트를 실행하고,
+    실패 시 머지 커밋들을 모두 되돌린다.
     """
     import subprocess
 
@@ -525,35 +825,101 @@ def _auto_merge_group(
             ["git"] + args, capture_output=True, text=True, cwd=str(repo_path)
         )
 
+    def _emit(event: dict) -> None:
+        if emit:
+            emit(event)
+
+    def _log(msg: str) -> None:
+        print(msg)
+        logger.info(msg)
+
     # 현재 브랜치 저장 → base_branch 로 이동
     original = git(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+    pre_merge_sha = git(["rev-parse", "HEAD"]).stdout.strip()
+
     checkout = git(["checkout", base_branch])
     if checkout.returncode != 0:
-        print(_warn(f"자동 머지 건너뜀 — {base_branch} checkout 실패: {checkout.stderr.strip()}"))
+        msg = f"자동 머지 건너뜀 — {base_branch} checkout 실패: {checkout.stderr.strip()}"
+        print(_warn(msg))
+        _notify(notifier, f"⚠️ 자동 머지 건너뜀: {msg}")
         return
 
-    print(f"\n{_info(f'{base_branch} 자동 머지 시작 ({len(branches)}개 브랜치)')}")
+    _log(f"\n→ {base_branch} 자동 머지 시작 ({len(branches)}개 브랜치)")
+    _notify(notifier, f"🔀 {base_branch} 자동 머지 시작 — {len(branches)}개 브랜치")
+    _emit({"type": "merge_start", "base_branch": base_branch,
+           "branches": branches, "count": len(branches)})
 
+    merged_count = 0
     for branch in branches:
+        _emit({"type": "merge_branch", "branch": branch, "base_branch": base_branch})
         merge_result = merge_agent.merge_branch(branch, base_branch=base_branch)
         if merge_result.success:
+            merged_count += 1
             resolved = merge_result.conflicts_resolved
             if resolved:
-                print(_ok(f"머지: {branch}  (충돌 {resolved}개 자동 해결)"))
+                msg = f"머지: {branch}  (충돌 {resolved}개 자동 해결)"
+                print(_ok(msg))
+                _notify(notifier, f"✅ {msg}")
+                _emit({"type": "merge_done", "branch": branch,
+                       "conflicts_resolved": resolved})
             else:
-                print(_ok(f"머지: {branch}"))
+                msg = f"머지: {branch}"
+                print(_ok(msg))
+                _emit({"type": "merge_done", "branch": branch,
+                       "conflicts_resolved": 0})
         else:
-            print(_warn(f"머지 실패: {branch} — {merge_result.error}"))
+            msg = f"머지 실패: {branch} — {merge_result.error}"
+            print(_warn(msg))
+            logger.warning(msg)
+            _notify(notifier, f"⚠️ {msg}")
+            _emit({"type": "merge_fail", "branch": branch,
+                   "error": merge_result.error})
 
-    # StructureUpdater — 머지 완료 후 PROJECT_STRUCTURE.md 갱신
+    # ── 머지 후 테스트 검증 ──────────────────────────────────────────────────
+    if test_runner and merged_count > 0:
+        tests_dir = repo_path / "tests"
+        if tests_dir.exists():
+            _log("→ 머지 후 테스트 실행 중…")
+            _notify(notifier, f"🧪 {base_branch} 머지 후 테스트 실행 중…")
+            _emit({"type": "merge_testing", "base_branch": base_branch})
+
+            test_result = test_runner.run(repo_path)
+
+            if test_result.passed:
+                _log(f"✓ 머지 후 테스트 통과: {test_result.summary}")
+                _notify(notifier, f"✅ 머지 후 테스트 통과: {test_result.summary}")
+                _emit({"type": "merge_test_pass", "summary": test_result.summary})
+            else:
+                # 테스트 실패 → 머지 커밋 전부 되돌리기
+                logger.error("머지 후 테스트 실패 — 머지 취소: %s", test_result.summary)
+                _notify(notifier,
+                        f"❌ 머지 후 테스트 실패 — 머지 취소\n"
+                        f"원인: {test_result.summary[:300]}")
+                _emit({"type": "merge_test_fail", "summary": test_result.summary})
+
+                git(["reset", "--hard", pre_merge_sha])
+                git(["push", "origin", base_branch, "--force"])
+                print(_fail(f"머지 후 테스트 실패 — {base_branch} 원상복구 완료"))
+                git(["checkout", original])
+                return
+        else:
+            logger.debug("tests/ 디렉토리 없음 — 머지 후 테스트 건너뜀")
+
+    # ── PROJECT_STRUCTURE.md 갱신 ────────────────────────────────────────────
     _update_project_structure(repo_path, git)
 
-    # base_branch push
+    # ── base_branch push ─────────────────────────────────────────────────────
     push = git(["push", "origin", base_branch])
     if push.returncode == 0:
-        print(_ok(f"{base_branch} push 완료"))
+        _log(f"✓ {base_branch} push 완료")
+        _notify(notifier, f"🚀 {base_branch} push 완료 ({merged_count}개 브랜치 머지)")
+        _emit({"type": "merge_pushed", "base_branch": base_branch,
+               "merged_count": merged_count})
     else:
-        print(_warn(f"{base_branch} push 실패: {push.stderr.strip()}"))
+        msg = f"{base_branch} push 실패: {push.stderr.strip()}"
+        print(_warn(msg))
+        _notify(notifier, f"⚠️ {msg}")
+        _emit({"type": "merge_push_fail", "error": push.stderr.strip()})
 
     # 원래 브랜치로 복귀
     git(["checkout", original])

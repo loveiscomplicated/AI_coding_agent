@@ -24,6 +24,7 @@ ScopedReactLoop 없이 단순 LLM 호출(1회/파일)로 동작한다.
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
 import subprocess
@@ -172,39 +173,89 @@ class MergeAgent:
                 paths.append(self.repo_path / line)
         return paths
 
+    _MAX_RESOLVE_RETRIES = 3
+
     def _resolve_file(self, file_path: Path) -> None:
         """
         충돌 마커가 있는 파일을 LLM 으로 해결하고 덮어쓴다.
 
-        LLM 호출은 1회. 도구 루프 없음.
-        시스템 프롬프트는 클라이언트 config 에 없으므로 user 메시지에 인라인으로 포함한다.
+        구문 오류 발생 시 오류 정보를 포함한 새 단일 프롬프트로 재시도한다.
+        멀티턴 대화를 쓰지 않는다 — Haiku가 대화 히스토리에 혼란을 겪기 때문이다.
         """
-        content = file_path.read_text(encoding="utf-8")
+        original_content = file_path.read_text(encoding="utf-8")
+        last_error: str = ""
 
-        messages = [
-            Message(
-                role="user",
-                content=(
+        for attempt in range(self._MAX_RESOLVE_RETRIES):
+            # 재시도마다 독립적인 단일 프롬프트 — 오류 정보를 직접 포함
+            if attempt == 0:
+                user_content = (
                     f"{_SYSTEM_PROMPT}\n\n---\n\n"
                     f"파일명: {file_path.name}\n\n"
-                    f"다음 충돌을 해결하세요:\n\n{content}"
-                ),
-            )
-        ]
+                    f"다음 충돌을 해결하세요:\n\n{original_content}"
+                )
+            else:
+                user_content = (
+                    f"{_SYSTEM_PROMPT}\n\n---\n\n"
+                    f"파일명: {file_path.name}\n\n"
+                    f"다음 충돌을 해결하세요:\n\n{original_content}\n\n"
+                    f"---\n\n"
+                    f"[주의 — 이전 시도에서 Python 구문 오류가 발생했습니다]\n"
+                    f"오류: {last_error}\n\n"
+                    f"반드시 지킬 규칙:\n"
+                    f"1. 앞자리가 0인 숫자(010xxxxxxx, 0123 등)는 정수가 아닌 문자열로 작성하세요: \"010xxxxxxx\"\n"
+                    f"2. 충돌 마커(<<<, ===, >>>)를 완전히 제거하세요\n"
+                    f"3. 설명 없이 파일 내용만 출력하세요\n"
+                    f"4. 코드블록(```)으로 감싸지 마세요"
+                )
 
-        response = self.llm.chat(messages)
-        resolved = response.content.strip()
+            response = self.llm.chat([Message(role="user", content=user_content)])
 
-        # LLM 이 코드블록으로 감쌀 경우 제거
-        if resolved.startswith("```"):
-            lines = resolved.splitlines()
-            # 첫 줄(```python 등)과 마지막 줄(```) 제거
-            inner = lines[1:]
-            if inner and inner[-1].strip() == "```":
-                inner = inner[:-1]
-            resolved = "\n".join(inner)
+            resolved = ""
+            for block in response.content:
+                if hasattr(block, "text"):
+                    resolved = block.text
+                    break
+            resolved = resolved.strip()
 
-        file_path.write_text(resolved, encoding="utf-8")
+            # 코드블록 래퍼 제거
+            if resolved.startswith("```"):
+                lines = resolved.splitlines()
+                inner = lines[1:]
+                if inner and inner[-1].strip() == "```":
+                    inner = inner[:-1]
+                resolved = "\n".join(inner)
+
+            # Python 파일 구문 검증
+            if file_path.suffix == ".py":
+                try:
+                    ast.parse(resolved)
+                except SyntaxError as e:
+                    last_error = str(e)
+                    logger.warning(
+                        "[MergeAgent] %s 구문 오류 (시도 %d/%d): %s",
+                        file_path.name, attempt + 1, self._MAX_RESOLVE_RETRIES, e,
+                    )
+                    if attempt == self._MAX_RESOLVE_RETRIES - 1:
+                        raise ValueError(
+                            f"LLM이 반환한 충돌 해결 코드에 Python 구문 오류가 있습니다.\n"
+                            f"파일: {file_path.name}\n오류: {e}"
+                        )
+                    continue  # 새 프롬프트로 재시도
+
+            # 검증 통과 — 파일 저장
+            file_path.write_text(resolved, encoding="utf-8")
+            if attempt > 0:
+                logger.info(
+                    "[MergeAgent] %s 구문 오류 재시도 %d회 만에 해결",
+                    file_path.name, attempt + 1,
+                )
+            return
+
+        # 여기까지 오면 모든 시도 실패
+        raise ValueError(
+            f"LLM이 {self._MAX_RESOLVE_RETRIES}회 시도 후에도 올바른 코드를 생성하지 못했습니다.\n"
+            f"파일: {file_path.name}\n마지막 오류: {last_error}"
+        )
 
     def _git(self, args: list[str]) -> subprocess.CompletedProcess:
         return subprocess.run(

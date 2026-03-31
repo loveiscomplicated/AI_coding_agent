@@ -1,6 +1,6 @@
 # Multi-Agent Development System
 
-> 프로젝트 문서 v1.3 | 2026-03-31 — Phase 3 7단계 완료
+> 프로젝트 문서 v1.4 | 2026-03-31 — Phase 3 추가 구현 완료
 
 ---
 
@@ -438,13 +438,48 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
   ├── 대시보드 백엔드 API ✅
   │     backend/routers/dashboard.py
   │     GET /api/dashboard/summary   — 메트릭 집계 (성공률, 재시도, 소요 시간 등)
-  │     GET /api/dashboard/tasks     — tasks.yaml + Task Report 조인
+  │     GET /api/dashboard/tasks     — tasks.yaml + Task Report 조인 (description, acceptance_criteria, failure_reason 포함)
   │     GET /api/dashboard/milestones — 마일스톤 보고서 목록
   │     GET /api/dashboard/milestones/{filename} — 보고서 본문 (path traversal 방지)
   └── 대시보드 프론트엔드 UI ✅
         frontend/src/components/DashboardPage.tsx
-        메트릭 카드 8개, 태스크 목록 테이블, 마일스톤 사이드 패널 뷰어
+        메트릭 카드 8개, 태스크 목록 아코디언, 마일스톤 사이드 패널 뷰어
         다크모드 완전 지원
+
+Phase 3 추가 구현 ✅ 완료 (2026-03-31)
+  ├── 멀티 프로젝트 관리 UI ✅
+  │     frontend/src/components/ProjectListPage.tsx — 프로젝트 카드 그리드
+  │     frontend/src/storage/projectStorage.ts — Project 타입, localStorage 헬퍼
+  │     Project = { id, name, rootDir, baseBranch, createdAt }
+  │     rootDir 하나로 tasks.yaml / reports 경로 자동 파생
+  │     "새로고침" 버튼으로 백엔드 잡 목록에서 프로젝트 자동 탐색
+  │     App.tsx: 대시보드 탭 → ProjectListPage → 카드 클릭 → DashboardPage (상세)
+  ├── 대시보드 파이프라인 제어 ✅
+  │     DashboardPage에 ⏸ 멈춤 / ▶ 계속 / ■ 중단 버튼 (실행 중 잡에만 표시)
+  │     ▶ 파이프라인 재개 버튼 — pending/failed 태스크 이어서 실행
+  │     5초 폴링으로 실행 중 잡 감지 (pathsOverlap으로 프로젝트 매칭)
+  ├── 태스크 아코디언 (클릭 시 세부 내용 토글) ✅
+  │     설명, 수락 기준, 의존성, 실패 원인, 리포트 상세 표시
+  │     테이블 → div 기반 아코디언으로 교체
+  ├── base_branch 설정 ✅
+  │     Project 타입에 baseBranch 필드 추가
+  │     TaskDraftPanel / DashboardPage 재개 / ProjectListPage 신규 등록 모두 반영
+  │     CLI --base-branch 기본값: main
+  ├── 의존성 실패 시 스킵 ✅
+  │     태스크 실패 시 failed_ids에 추가
+  │     depends_on ∩ failed_ids가 있는 후속 태스크는 task_skip 이벤트 발행 후 FAILED 처리
+  │     독립 태스크는 계속 실행 (시스템 중단 없음)
+  ├── 파이프라인 재개 버그 수정 ✅
+  │     resolve_execution_groups에 all_valid_ids 매개변수 추가 — DONE 태스크 ID를 유효 ID로 인정
+  │     재개 시 FAILED 태스크 → PENDING 자동 리셋
+  │     중단 버튼: setActiveJob(null) 즉시 호출로 버튼 즉각 숨김
+  ├── 운영 품질 개선 ✅
+  │     uvicorn 폴링 로그 억제 (_SuppressPollingLog 필터 — GET /api/pipeline/jobs 제외)
+  │     Discord TimeoutException → WARNING → DEBUG 다운그레이드
+  └── UI 버그 수정 ✅
+        + 버튼 드롭다운: mousedown 전역 리스너보다 click이 먼저 소멸되는 문제 수정
+        (드롭다운 컨테이너에 onMouseDown stopPropagation 추가)
+        startNew(): showDashboard / selectedProject 함께 초기화
 
 8단계 - 음성 인터페이스 (선택, 별도)
   ├── STT 입력 (Web Speech API)

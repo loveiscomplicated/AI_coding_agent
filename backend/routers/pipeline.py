@@ -21,6 +21,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from backend.config import DISCORD_BOT_TOKEN, DISCORD_GUILD_ID
+from hotline.notifier import DiscordNotifier
 from orchestrator.run import PauseController, run_pipeline
 
 router = APIRouter()
@@ -49,12 +51,15 @@ def _emit(job_id: str, event: dict) -> None:
 class RunRequest(BaseModel):
     tasks_path: str = "data/tasks.yaml"
     repo_path: str = "."
-    base_branch: str = "dev"
+    base_branch: str = "main"
     task_id: str | None = None
     no_pr: bool = False
     verbose: bool = False
-    reports_dir: str | None = None   # None → run_pipeline 기본값 (repo_path/data/reports)
-    max_workers: int = 1             # 병렬 에이전트 수 (1=순차)
+    reports_dir: str | None = None      # None → run_pipeline 기본값 (repo_path/data/reports)
+    max_workers: int = 1                # 병렬 에이전트 수 (1=순차)
+    discord_channel_id: str | None = None  # 프로젝트 Discord 채널 ID (없으면 자동 생성)
+    max_orchestrator_retries: int = 2   # 오케스트레이터 자동 재시도 최대 횟수
+    auto_merge: bool = False            # 그룹 완료 후 base_branch 에 자동 머지
 
 
 # ── 엔드포인트 ────────────────────────────────────────────────────────────────
@@ -70,6 +75,19 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
 
     pause_ctrl = PauseController()
 
+    # Discord 채널 확보 (동기, 워커 시작 전)
+    resolved_channel_id: str | None = body.discord_channel_id
+    if not resolved_channel_id and DISCORD_BOT_TOKEN and DISCORD_GUILD_ID:
+        try:
+            notifier = DiscordNotifier.from_env()
+            if notifier:
+                project_name = Path(body.repo_path).name or "project"
+                resolved_channel_id = notifier.create_channel(project_name)
+        except Exception as exc:
+            # 채널 생성 실패는 치명적이지 않음 — 알림 없이 진행
+            import logging as _log
+            _log.getLogger(__name__).warning("Discord 채널 생성 실패 (무시): %s", exc)
+
     with _lock:
         _jobs[job_id] = {
             "job_id": job_id,
@@ -80,6 +98,7 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
             "error": None,
             "events": [],
             "request": body.model_dump(),
+            "discord_channel_id": resolved_channel_id,
             "pause_ctrl": pause_ctrl,   # 제어용 (직렬화 제외)
         }
         _event_queues[job_id] = q
@@ -100,6 +119,9 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
                 on_progress=on_progress,
                 pause_controller=pause_ctrl,
                 max_workers=body.max_workers,
+                discord_channel_id=int(resolved_channel_id) if resolved_channel_id else None,
+                max_orchestrator_retries=body.max_orchestrator_retries,
+                auto_merge=body.auto_merge,
             )
             with _lock:
                 _jobs[job_id]["status"] = "done"
@@ -116,7 +138,11 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
             q.put(None)
 
     threading.Thread(target=_worker, daemon=True).start()
-    return {"job_id": job_id, "status": "running"}
+    return {
+        "job_id": job_id,
+        "status": "running",
+        "discord_channel_id": resolved_channel_id,
+    }
 
 
 @router.get("/pipeline/stream/{job_id}")
@@ -174,7 +200,7 @@ def get_job_status(job_id: str) -> dict:
         job = _jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"잡 '{job_id}'를 찾을 수 없습니다.")
-    return job
+    return {k: v for k, v in job.items() if k != "pause_ctrl"}
 
 
 class ControlRequest(BaseModel):

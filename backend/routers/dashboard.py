@@ -103,6 +103,9 @@ def get_dashboard_tasks(
         result.append({
             "id": task.id,
             "title": task.title,
+            "description": task.description,
+            "acceptance_criteria": task.acceptance_criteria,
+            "failure_reason": task.failure_reason,
             "status": task.status.value,
             "depends_on": task.depends_on,
             "pr_url": task.pr_url or "",

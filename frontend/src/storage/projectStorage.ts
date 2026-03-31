@@ -3,8 +3,10 @@ const PROJECTS_KEY = 'projects_v3'
 export interface Project {
   id: string
   name: string
-  rootDir: string    // 프로젝트 루트 = repo_path = git root
+  rootDir: string           // 프로젝트 루트 = repo_path = git root
+  baseBranch: string        // git base branch (e.g. main, master, dev)
   createdAt: string
+  discordChannelId?: string // 프로젝트 전용 Discord 채널 ID (자동 생성)
 }
 
 /** rootDir/data/tasks.yaml */

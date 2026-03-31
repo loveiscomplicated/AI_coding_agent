@@ -1,0 +1,193 @@
+"""
+orchestrator/intervention.py — 태스크 실패 시 중앙 오케스트레이터 개입 로직
+
+흐름:
+  1. 에이전트 파이프라인이 태스크 실패 반환
+  2. analyze() 호출 → Sonnet이 실패 원인 분석 → RETRY(힌트) or GIVE_UP 결정
+  3. RETRY면 힌트를 task.last_error에 주입 후 파이프라인 재시도
+  4. max_retries 초과 또는 GIVE_UP → generate_report() 호출
+  5. 상세 보고서를 파일로 저장 + Discord/대시보드에 전달
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+import anthropic
+
+from orchestrator.task import Task
+
+_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+
+logger = logging.getLogger(__name__)
+
+_ANALYZE_SYSTEM = """\
+당신은 AI 코딩 에이전트 파이프라인의 중앙 오케스트레이터입니다.
+하위 에이전트가 태스크를 처리하다 실패했습니다.
+실패 원인을 분석하고, 재시도 가능성 여부와 구체적인 힌트를 결정하세요.
+
+[응답 형식 — 반드시 아래 두 가지 중 하나만 출력]
+
+재시도 가능할 때:
+RETRY: <에이전트에게 전달할 구체적 수정 힌트 (1~3문장)>
+
+재시도가 의미 없을 때 (구조적 문제, 스펙 불명확, 반복 동일 오류 등):
+GIVE_UP: <포기 이유 한 줄>
+
+힌트 작성 원칙:
+- 이전 시도에서 뭐가 잘못됐는지 명확히 지적할 것
+- "더 잘 해봐"처럼 모호한 지시는 금지
+- 파일 경로, 함수명, 구체적 수정 방향을 포함할 것
+"""
+
+_REPORT_SYSTEM = """\
+당신은 소프트웨어 개발 프로젝트 관리자입니다.
+AI 코딩 에이전트가 태스크를 여러 번 시도했지만 실패했습니다.
+담당자에게 제출할 실패 분석 보고서를 작성하세요.
+
+[출력 형식 — 마크다운]
+
+## 태스크 정보
+(id, 제목, 설명)
+
+## 실패 원인 분석
+(근본 원인을 명확히)
+
+## 시도된 해결 접근법
+(각 시도에서 무엇을 했는지)
+
+## 권장 해결 방안
+(사람이 직접 취해야 할 조치, 구체적으로)
+
+## 태스크 재설계 제안
+(태스크를 더 작게 나누거나 스펙을 수정하는 방안)
+"""
+
+
+@dataclass
+class AnalysisResult:
+    should_retry: bool
+    hint: str          # RETRY일 때 힌트, GIVE_UP일 때 이유
+    raw: str
+
+
+def analyze(task: Task, failure_reason: str, attempt: int) -> AnalysisResult:
+    """
+    Sonnet에게 실패 원인을 분석시키고 RETRY/GIVE_UP 결정을 받는다.
+
+    Args:
+        task     : 실패한 태스크 (task.last_error 포함)
+        failure_reason : PipelineResult.failure_reason
+        attempt  : 오케스트레이터 재시도 횟수 (1-based)
+    """
+    last_error_snippet = (task.last_error or "")[:2000]
+    user_msg = f"""## 태스크
+id: {task.id}
+제목: {task.title}
+설명: {task.description}
+
+## 수락 기준
+{task.acceptance_criteria_text()}
+
+## 실패 원인 (시도 {attempt}회차)
+{failure_reason[:1000]}
+
+## 마지막 오류 로그
+{last_error_snippet if last_error_snippet else "(없음)"}
+"""
+    try:
+        response = _client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            system=_ANALYZE_SYSTEM,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        raw = response.content[0].text if response.content else ""
+    except Exception as e:
+        logger.error("오케스트레이터 분석 LLM 호출 실패: %s", e)
+        return AnalysisResult(should_retry=False, hint=str(e), raw="")
+
+    raw_stripped = raw.strip()
+
+    # RETRY: ... 파싱
+    retry_match = re.match(r"^RETRY\s*:\s*(.+)", raw_stripped, re.IGNORECASE | re.DOTALL)
+    if retry_match:
+        hint = retry_match.group(1).strip()
+        logger.info("[%s] 오케스트레이터 → RETRY 결정 (힌트: %s…)", task.id, hint[:80])
+        return AnalysisResult(should_retry=True, hint=hint, raw=raw)
+
+    # GIVE_UP: ... 파싱
+    giveup_match = re.match(r"^GIVE_UP\s*:\s*(.+)", raw_stripped, re.IGNORECASE | re.DOTALL)
+    if giveup_match:
+        reason = giveup_match.group(1).strip()
+        logger.warning("[%s] 오케스트레이터 → GIVE_UP: %s", task.id, reason[:120])
+        return AnalysisResult(should_retry=False, hint=reason, raw=raw)
+
+    # 형식 불명확 → 보수적으로 포기
+    logger.warning("[%s] 오케스트레이터 응답 형식 불명확, 포기 처리:\n%s", task.id, raw[:300])
+    return AnalysisResult(should_retry=False, hint="오케스트레이터 응답 파싱 실패", raw=raw)
+
+
+def generate_report(
+    task: Task,
+    failure_reason: str,
+    attempts: int,
+    hints_tried: list[str],
+) -> str:
+    """
+    최종 실패 보고서를 Sonnet으로 생성한다.
+
+    Returns:
+        마크다운 형식의 보고서 문자열
+    """
+    hints_text = "\n".join(
+        f"  시도 {i+1}: {h[:300]}" for i, h in enumerate(hints_tried)
+    ) or "  (없음)"
+
+    user_msg = f"""## 태스크 정보
+id: {task.id}
+제목: {task.title}
+설명: {task.description}
+
+## 수락 기준
+{task.acceptance_criteria_text()}
+
+## 최종 실패 원인
+{failure_reason[:1000]}
+
+## 오케스트레이터 시도 횟수
+{attempts}회
+
+## 시도된 힌트 목록
+{hints_text}
+
+## 마지막 오류 로그
+{(task.last_error or '')[:2000]}
+
+위 정보를 바탕으로 실패 분석 보고서를 작성하세요.
+"""
+    try:
+        response = _client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            system=_REPORT_SYSTEM,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        return response.content[0].text if response.content else "보고서 생성 실패"
+    except Exception as e:
+        logger.error("오케스트레이터 보고서 생성 LLM 호출 실패: %s", e)
+        return f"# 보고서 생성 실패\n\n오류: {e}\n\n## 최종 실패 원인\n{failure_reason}"
+
+
+def save_report(report_text: str, task_id: str, reports_dir: Path) -> Path:
+    """보고서를 파일로 저장하고 경로를 반환한다."""
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    path = reports_dir / f"{task_id}_orchestrator_report.md"
+    path.write_text(report_text, encoding="utf-8")
+    return path
+
+

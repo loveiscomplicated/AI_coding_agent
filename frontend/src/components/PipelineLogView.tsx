@@ -27,6 +27,25 @@ export interface LogEntry {
   total?: number
   status?: string
   next_task_id?: string
+  // merge fields
+  base_branch?: string
+  branch?: string
+  branches?: string[]
+  count?: number
+  merged_count?: number
+  conflicts_resolved?: number
+  error?: string
+  summary?: string
+  // orchestrator fields
+  attempt?: number
+  next_attempt?: number
+  max_attempts?: number
+  hint?: string
+  failure_reason?: string
+  is_max_iter?: boolean
+  total_attempts?: number
+  report?: string
+  report_path?: string
 }
 
 // ── 로그 텍스트 포맷 ──────────────────────────────────────────────────────────
@@ -47,7 +66,12 @@ function logEntryText(e: LogEntry): { text: string; color: string } {
         color: 'text-green-400',
       }
     case 'task_fail':
-      return { text: `❌ [${e.task_id}] ${e.title} 실패 — ${e.reason}`, color: 'text-red-400' }
+      return {
+        text: `❌ [${e.task_id}] ${e.title} 실패${e.is_max_iter ? ' [반복 초과]' : ''} — ${e.reason}`,
+        color: 'text-red-400',
+      }
+    case 'task_skip':
+      return { text: `⊘ [${e.task_id}] ${e.title} 건너뜀 — ${e.reason}`, color: 'text-zinc-500' }
     case 'pipeline_done':
       return {
         text: `🏁 완료 — 성공 ${e.success ?? 0}  실패 ${e.fail ?? 0}`,
@@ -63,6 +87,59 @@ function logEntryText(e: LogEntry): { text: string; color: string } {
       return { text: `⚠ ${e.message}`, color: 'text-red-400' }
     case 'end':
       return { text: '─── 스트림 종료 ───', color: 'text-zinc-600' }
+    // ── 자동 머지 이벤트 ────────────────────────────────────────────────────
+    case 'catchup_merge_start':
+      return {
+        text: `🔁 catch-up 머지 — 미머지 브랜치 ${e.count}개 순서대로 처리\n     ${(e.branches as string[] | undefined ?? []).join(' → ')}`,
+        color: 'text-purple-400',
+      }
+    case 'merge_start':
+      return { text: `🔀 자동 머지 시작 — ${e.base_branch} ← ${e.count}개 브랜치`, color: 'text-blue-400' }
+    case 'merge_branch':
+      return { text: `  · 머지 중: ${e.branch} → ${e.base_branch}`, color: 'text-zinc-500' }
+    case 'merge_done':
+      return {
+        text: `  ✓ 머지 완료: ${e.branch}${(e.conflicts_resolved ?? 0) > 0 ? `  (충돌 ${e.conflicts_resolved}개 자동 해결)` : ''}`,
+        color: 'text-green-400',
+      }
+    case 'merge_fail':
+      return { text: `  ✗ 머지 실패: ${e.branch} — ${e.error}`, color: 'text-red-400' }
+    case 'merge_testing':
+      return { text: `  · 머지 후 테스트 실행 중…`, color: 'text-zinc-500' }
+    case 'merge_test_pass':
+      return { text: `  ✓ 머지 후 테스트 통과: ${e.summary}`, color: 'text-green-400' }
+    case 'merge_test_fail':
+      return { text: `  ✗ 머지 후 테스트 실패 — 머지 취소: ${e.summary}`, color: 'text-red-400' }
+    case 'merge_pushed':
+      return { text: `🚀 ${e.base_branch} push 완료 (${e.merged_count}개 머지)`, color: 'text-blue-400' }
+    case 'merge_push_fail':
+      return { text: `⚠ push 실패: ${e.error}`, color: 'text-amber-400' }
+    // ── 오케스트레이터 개입 이벤트 ─────────────────────────────────────────
+    case 'orchestrator_analyzing':
+      return {
+        text: `🔍 [${e.task_id}] 오케스트레이터 분석 중… (시도 ${e.attempt}/${e.max_attempts})${e.is_max_iter ? ' — 반복 초과' : ''}\n     원인: ${(e.failure_reason ?? '').replace(/^\[MAX_ITER\]\s*/, '').slice(0, 120)}`,
+        color: 'text-amber-400',
+      }
+    case 'orchestrator_retry':
+      return {
+        text: `🔄 [${e.task_id}] 오케스트레이터 재시도 결정 (${e.attempt} → ${e.next_attempt}회차)\n     💡 힌트: ${(e.hint ?? '').slice(0, 200)}`,
+        color: 'text-amber-300',
+      }
+    case 'orchestrator_giveup':
+      return {
+        text: `🛑 [${e.task_id}] 오케스트레이터 포기 — ${(e.reason ?? '').slice(0, 150)}`,
+        color: 'text-red-400',
+      }
+    case 'orchestrator_report_generating':
+      return {
+        text: `📊 [${e.task_id}] 오케스트레이터 최종 실패 보고서 생성 중… (총 ${e.total_attempts}회 시도)`,
+        color: 'text-orange-400',
+      }
+    case 'orchestrator_report':
+      return {
+        text: `📋 [${e.task_id}] 보고서 저장 완료 → ${e.report_path ?? ''}\n${(e.report ?? '').split('\n').slice(0, 6).map((l: string) => '     ' + l).join('\n')}`,
+        color: 'text-orange-300',
+      }
     default:
       return { text: JSON.stringify(e), color: 'text-zinc-600' }
   }

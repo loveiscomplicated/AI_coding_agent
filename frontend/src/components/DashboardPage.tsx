@@ -27,6 +27,9 @@ interface Summary {
 interface DashboardTask {
   id: string
   title: string
+  description: string
+  acceptance_criteria: string[]
+  failure_reason: string
   status: string
   depends_on: string[]
   pr_url: string
@@ -274,9 +277,10 @@ interface ActiveJob {
 }
 
 interface DashboardPageProps {
-  project?: { name: string; rootDir: string }
+  project?: { name: string; rootDir: string; baseBranch?: string; discordChannelId?: string }
   onBack?: () => void
   onPipelineStarted?: (jobId: string) => void
+  onDiscordChannelCreated?: (channelId: string) => void
 }
 
 function pathsOverlap(a: string, b: string): boolean {
@@ -284,7 +288,7 @@ function pathsOverlap(a: string, b: string): boolean {
   return a === b || a.endsWith('/' + b) || b.endsWith('/' + a)
 }
 
-export function DashboardPage({ project, onBack, onPipelineStarted }: DashboardPageProps = {}) {
+export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordChannelCreated }: DashboardPageProps = {}) {
   const [config, setConfig] = useState<ProjectConfig>(() => {
     if (project) {
       return {
@@ -304,6 +308,10 @@ export function DashboardPage({ project, onBack, onPipelineStarted }: DashboardP
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null)
   const [controlling, setControlling] = useState(false)
   const [resuming, setResuming] = useState(false)
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null)
+  const [autoMerge, setAutoMerge] = useState<boolean>(() => {
+    return localStorage.getItem('pipeline_auto_merge') === 'true'
+  })
 
   const loadData = async (cfg: ProjectConfig) => {
     setLoading(true)
@@ -349,8 +357,8 @@ export function DashboardPage({ project, onBack, onPipelineStarted }: DashboardP
 
   useEffect(() => {
     fetchActiveJob()
-    // 3초마다 갱신
-    const id = setInterval(fetchActiveJob, 3000)
+    // 5초마다 갱신 (너무 잦은 폴링 방지)
+    const id = setInterval(fetchActiveJob, 5000)
     return () => clearInterval(id)
   }, [fetchActiveJob])
 
@@ -363,8 +371,13 @@ export function DashboardPage({ project, onBack, onPipelineStarted }: DashboardP
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }),
       })
-      // 즉시 상태 갱신
-      await fetchActiveJob()
+      if (action === 'stop') {
+        // 파이프라인이 실제 종료될 때까지 시간이 걸리므로 즉시 버튼 숨김.
+        // 폴링이 done 상태를 감지하면 자연스럽게 사라짐.
+        setActiveJob(null)
+      } else {
+        await fetchActiveJob()
+      }
     } finally {
       setControlling(false)
     }
@@ -380,11 +393,18 @@ export function DashboardPage({ project, onBack, onPipelineStarted }: DashboardP
         body: JSON.stringify({
           tasks_path: projectTasksPath(project),
           repo_path: project.rootDir,
+          base_branch: project.baseBranch ?? 'main',
           no_pr: false,
+          discord_channel_id: project.discordChannelId ?? null,
+          auto_merge: autoMerge,
         }),
       })
       if (!res.ok) throw new Error('파이프라인 시작 실패')
       const data = await res.json()
+      // 새로 생성된 Discord 채널 ID를 Project에 저장
+      if (data.discord_channel_id && data.discord_channel_id !== project.discordChannelId) {
+        onDiscordChannelCreated?.(data.discord_channel_id)
+      }
       localStorage.setItem(ACTIVE_JOB_KEY, data.job_id)
       onPipelineStarted?.(data.job_id)
     } catch (e) {
@@ -444,16 +464,37 @@ export function DashboardPage({ project, onBack, onPipelineStarted }: DashboardP
                 </p>
               </div>
 
-              {/* 파이프라인 재개 버튼 (실행 중 잡 없을 때) */}
+              {/* 파이프라인 재개 버튼 + auto_merge 토글 (실행 중 잡 없을 때) */}
               {project && !activeJob && (
-                <button
-                  onClick={resumePipeline}
-                  disabled={resuming}
-                  className="rounded-lg px-3 py-1.5 text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                  title="pending/failed 태스크만 이어서 실행"
-                >
-                  {resuming ? '시작 중…' : '▶ 파이프라인 재개'}
-                </button>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {/* auto_merge 토글 */}
+                  <button
+                    onClick={() => {
+                      const next = !autoMerge
+                      setAutoMerge(next)
+                      localStorage.setItem('pipeline_auto_merge', String(next))
+                    }}
+                    className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium border transition-colors ${
+                      autoMerge
+                        ? 'bg-emerald-50 dark:bg-emerald-900/30 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-400'
+                        : 'bg-gray-50 dark:bg-zinc-800 border-gray-300 dark:border-zinc-600 text-gray-500 dark:text-zinc-400'
+                    }`}
+                    title={autoMerge ? '그룹 완료 후 base_branch에 자동 머지 ON' : '자동 머지 OFF — PR만 생성'}
+                  >
+                    <span className={`w-3 h-3 rounded-full border-2 transition-colors ${
+                      autoMerge ? 'bg-emerald-500 border-emerald-500' : 'bg-transparent border-gray-400 dark:border-zinc-500'
+                    }`} />
+                    자동 머지
+                  </button>
+                  <button
+                    onClick={resumePipeline}
+                    disabled={resuming}
+                    className="rounded-lg px-3 py-1.5 text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                    title="pending/failed 태스크만 이어서 실행"
+                  >
+                    {resuming ? '시작 중…' : '▶ 파이프라인 재개'}
+                  </button>
+                </div>
               )}
               {/* 파이프라인 제어 버튼 (실행 중일 때) */}
               {activeJob && (
@@ -546,55 +587,126 @@ export function DashboardPage({ project, onBack, onPipelineStarted }: DashboardP
               {/* 태스크 목록 */}
               <div>
                 <h2 className="text-sm font-semibold text-gray-700 dark:text-zinc-300 mb-3">태스크 목록</h2>
-                <div className="border border-gray-200 dark:border-zinc-700 rounded-xl overflow-hidden">
-                  <table className="w-full text-sm">
-                    <thead className="bg-gray-50 dark:bg-zinc-800">
-                      <tr>
-                        <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 dark:text-zinc-400">태스크</th>
-                        <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 dark:text-zinc-400">상태</th>
-                        <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 dark:text-zinc-400">리뷰</th>
-                        <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-500 dark:text-zinc-400">테스트</th>
-                        <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-500 dark:text-zinc-400">소요 시간</th>
-                        <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-500 dark:text-zinc-400">재시도</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100 dark:divide-zinc-800">
-                      {tasks.map(task => (
-                        <tr key={task.id} className="hover:bg-gray-50 dark:hover:bg-zinc-800/50 transition-colors">
-                          <td className="px-4 py-3">
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs text-gray-400 dark:text-zinc-500 font-mono">{task.id}</span>
-                              <span className="text-gray-800 dark:text-zinc-200 font-medium truncate max-w-[180px]">{task.title}</span>
-                            </div>
-                            {task.pr_url && (
-                              <a href={task.pr_url} target="_blank" rel="noopener noreferrer"
-                                className="text-xs text-blue-500 hover:underline mt-0.5 block">PR →</a>
+                <div className="border border-gray-200 dark:border-zinc-700 rounded-xl overflow-hidden divide-y divide-gray-100 dark:divide-zinc-800">
+                  {tasks.length === 0 ? (
+                    <div className="px-4 py-8 text-center text-gray-400 dark:text-zinc-500 text-sm">
+                      태스크가 없습니다
+                    </div>
+                  ) : tasks.map(task => {
+                    const expanded = expandedTaskId === task.id
+                    return (
+                      <div key={task.id}>
+                        {/* 요약 행 */}
+                        <button
+                          onClick={() => setExpandedTaskId(expanded ? null : task.id)}
+                          className="w-full text-left flex items-center gap-3 px-4 py-3 hover:bg-gray-50 dark:hover:bg-zinc-800/50 transition-colors"
+                        >
+                          {/* 펼침 화살표 */}
+                          <svg
+                            className={`w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 flex-shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`}
+                            viewBox="0 0 20 20" fill="currentColor"
+                          >
+                            <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
+                          </svg>
+                          {/* ID + 타이틀 */}
+                          <div className="flex-1 min-w-0 flex items-center gap-2">
+                            <span className="text-xs text-gray-400 dark:text-zinc-500 font-mono flex-shrink-0">{task.id}</span>
+                            <span className="text-sm text-gray-800 dark:text-zinc-200 font-medium truncate">{task.title}</span>
+                          </div>
+                          {/* 오른쪽 메타 */}
+                          <div className="flex items-center gap-3 flex-shrink-0">
+                            <StatusBadge status={task.status} />
+                            {task.failure_reason?.startsWith('[MAX_ITER]') && (
+                              <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-orange-100 dark:bg-orange-900/40 text-orange-600 dark:text-orange-400">
+                                반복 초과
+                              </span>
                             )}
-                          </td>
-                          <td className="px-4 py-3"><StatusBadge status={task.status} /></td>
-                          <td className="px-4 py-3">
                             <VerdictBadge verdict={task.report?.reviewer_verdict ?? ''} />
-                          </td>
-                          <td className="px-4 py-3 text-right text-gray-600 dark:text-zinc-400">
-                            {task.report ? task.report.test_count : '—'}
-                          </td>
-                          <td className="px-4 py-3 text-right text-gray-600 dark:text-zinc-400">
-                            {task.report ? `${task.report.time_elapsed_seconds}s` : '—'}
-                          </td>
-                          <td className="px-4 py-3 text-right text-gray-600 dark:text-zinc-400">
-                            {task.report ? task.report.retry_count : '—'}
-                          </td>
-                        </tr>
-                      ))}
-                      {tasks.length === 0 && (
-                        <tr>
-                          <td colSpan={6} className="px-4 py-8 text-center text-gray-400 dark:text-zinc-500 text-sm">
-                            태스크가 없습니다
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
+                            {task.report && (
+                              <span className="text-xs text-gray-400 dark:text-zinc-500">
+                                {task.report.time_elapsed_seconds}s
+                              </span>
+                            )}
+                            {task.pr_url && (
+                              <a
+                                href={task.pr_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={e => e.stopPropagation()}
+                                className="text-xs text-blue-500 hover:underline"
+                              >
+                                PR →
+                              </a>
+                            )}
+                          </div>
+                        </button>
+
+                        {/* 펼쳐진 세부 내용 */}
+                        {expanded && (
+                          <div className="px-10 pb-4 pt-1 bg-gray-50 dark:bg-zinc-900/60 space-y-3 text-xs">
+                            {/* description */}
+                            {task.description && (
+                              <div>
+                                <p className="text-gray-500 dark:text-zinc-400 font-semibold mb-0.5">설명</p>
+                                <p className="text-gray-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap">{task.description}</p>
+                              </div>
+                            )}
+                            {/* acceptance_criteria */}
+                            {task.acceptance_criteria?.length > 0 && (
+                              <div>
+                                <p className="text-gray-500 dark:text-zinc-400 font-semibold mb-1">수락 기준</p>
+                                <ul className="space-y-0.5">
+                                  {task.acceptance_criteria.map((c, i) => (
+                                    <li key={i} className="flex gap-1.5 text-gray-700 dark:text-zinc-300">
+                                      <span className="text-gray-400 dark:text-zinc-500 flex-shrink-0">·</span>
+                                      <span>{c}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                            {/* depends_on */}
+                            {task.depends_on?.length > 0 && (
+                              <div>
+                                <p className="text-gray-500 dark:text-zinc-400 font-semibold mb-1">의존성</p>
+                                <div className="flex flex-wrap gap-1">
+                                  {task.depends_on.map(dep => (
+                                    <span key={dep} className="font-mono bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 px-1.5 py-0.5 rounded">
+                                      {dep}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            {/* failure_reason */}
+                            {task.failure_reason && (
+                              <div>
+                                <p className="text-red-500 dark:text-red-400 font-semibold mb-0.5">실패 원인</p>
+                                {task.failure_reason.startsWith('[MAX_ITER]') && (
+                                  <p className="text-orange-600 dark:text-orange-400 text-xs font-semibold mb-1">
+                                    ⚠️ 에이전트가 최대 반복 횟수를 초과했습니다. 태스크를 더 작게 분할하세요.
+                                  </p>
+                                )}
+                                <p className="text-red-600 dark:text-red-400 leading-relaxed whitespace-pre-wrap">
+                                  {task.failure_reason.replace(/^\[MAX_ITER\]\s*/, '')}
+                                </p>
+                              </div>
+                            )}
+                            {/* report 상세 */}
+                            {task.report && (
+                              <div className="flex flex-wrap gap-4 pt-1 border-t border-gray-200 dark:border-zinc-700">
+                                <span className="text-gray-500 dark:text-zinc-400">테스트 <strong className="text-gray-700 dark:text-zinc-300">{task.report.test_count}</strong></span>
+                                <span className="text-gray-500 dark:text-zinc-400">재시도 <strong className="text-gray-700 dark:text-zinc-300">{task.report.retry_count}</strong></span>
+                                {task.report.completed_at && (
+                                  <span className="text-gray-500 dark:text-zinc-400">완료 <strong className="text-gray-700 dark:text-zinc-300">{task.report.completed_at}</strong></span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
 
