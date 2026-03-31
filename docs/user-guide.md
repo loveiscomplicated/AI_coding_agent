@@ -15,10 +15,12 @@
 7. [파이프라인 실행 (CLI)](#7-파이프라인-실행-cli)
 8. [파이프라인 실행 (UI)](#8-파이프라인-실행-ui)
 9. [tasks.yaml 작성법](#9-tasksyaml-작성법)
-10. [대시보드](#10-대시보드)
-11. [Discord 핫라인](#11-discord-핫라인)
-12. [API 레퍼런스](#12-api-레퍼런스)
-13. [트러블슈팅](#13-트러블슈팅)
+10. [컨텍스트 문서 (data/context/)](#10-컨텍스트-문서-datacontext)
+11. [대시보드](#11-대시보드)
+12. [Discord 핫라인 & 에이전트 질문](#12-discord-핫라인--에이전트-질문)
+13. [비용 최적화](#13-비용-최적화)
+14. [API 레퍼런스](#14-api-레퍼런스)
+15. [트러블슈팅](#15-트러블슈팅)
 
 ---
 
@@ -31,11 +33,15 @@
      ↕
 파이프라인 오케스트레이터
      ├── TestWriter (Haiku) → 테스트 작성
+     │        └── ask_user ──→ Discord 대화 → 사람이 확정 → 에이전트 계속
      ├── Implementer (Sonnet) → 구현
+     │        └── ask_user ──→ Discord 대화 → 사람이 확정 → 에이전트 계속
      ├── Docker 테스트 러너 → pytest 격리 실행
      ├── Reviewer (Haiku) → 코드 리뷰
      └── GitWorkflow → 브랜치 · 커밋 · PR 생성
 ```
+
+에이전트는 구현 중 모호한 사항을 발견하면 `context/` 문서를 먼저 확인하고, 그래도 불명확하면 `ask_user` 도구를 통해 사용자와 직접 대화한다.
 
 **핵심 흐름**: `tasks.yaml` 작성 → 파이프라인 실행 → 에이전트가 TDD로 코드 작성 → PR 생성 → 사람이 검토 후 머지.
 
@@ -244,7 +250,7 @@ python -m orchestrator.run -t data/tasks.yaml --no-pr
 5. 그룹 순서대로 실행:
    a. 각 그룹 내 태스크 병렬 실행 (--parallel)
       - TestWriter → Implementer → Docker pytest → Reviewer
-      - 실패 시 최대 3회 Implementer 재시도
+      - 실패 시 최대 2회 Implementer 재시도, 오케스트레이터 최대 1회 개입
       - 성공 시 git worktree에서 브랜치 생성 → 커밋 → PR
    b. 그룹 완료 후 dev에 자동 머지 (MergeAgent로 충돌 자동 해결)
    c. PROJECT_STRUCTURE.md 자동 갱신
@@ -414,13 +420,68 @@ description: "계산기 모듈 만들어"
 
 ---
 
-## 10. 대시보드
+## 10. 컨텍스트 문서 (data/context/)
 
-### 10.1 접속
+에이전트는 `tasks.yaml`의 `description`과 `acceptance_criteria`만으로는 파악하기 어려운 아키텍처 결정, 제약 사항, 비즈니스 맥락을 컨텍스트 문서에서 on-demand로 참조한다.
+
+### 10.1 개념
+
+```
+회의에서 논의한 내용
+     ↓ (회의 UI → 컨텍스트 문서 생성)
+data/context/spec.md          ← 원본 스펙·설계 문서
+     ↓ (태스크 초안 생성)
+data/tasks.yaml               ← 에이전트 실행 단위
+     ↓ (파이프라인 실행)
+workspace/context/spec.md     ← 에이전트 워크스페이스에 자동 복사
+```
+
+에이전트는 프롬프트에 문서 전체가 주입되는 게 아니라, 필요할 때 `read_file`로 참조한다. 컨텍스트 비용 증가 없이 풍부한 배경 정보를 제공할 수 있다.
+
+### 10.2 문서 저장 위치
+
+대상 프로젝트의 `data/context/` 디렉토리에 마크다운(또는 텍스트) 파일을 저장한다.
+
+```
+/path/to/my-project/
+└── data/
+    ├── context/
+    │   ├── architecture.md   ← 아키텍처 설계 결정
+    │   ├── api-spec.md       ← 외부 API 제약사항
+    │   └── business-rules.md ← 비즈니스 로직 규칙
+    └── tasks.yaml
+```
+
+파일 이름이나 개수에 제한은 없다. 디렉토리 안의 모든 파일이 각 태스크 워크스페이스에 자동 복사된다.
+
+### 10.3 에이전트가 참조하는 시점
+
+에이전트 시스템 프롬프트에 다음 원칙이 명시되어 있다:
+
+> 구현 중 요구사항이 불명확할 때:
+> 1. `context/` 디렉토리의 스펙 문서를 `read_file`로 확인한다.
+> 2. 그래도 불명확하면 `ask_user`로 사용자에게 직접 질문한다.
+
+### 10.4 컨텍스트 문서 작성 팁
+
+에이전트가 유용하게 참조할 수 있는 내용:
+
+- **아키텍처 결정**: 왜 이 패턴을 선택했는지 (예: Repository 패턴, 특정 라이브러리 선택 이유)
+- **외부 API 제약**: 호출 형식, 인증 방식, 에러 처리 관례
+- **비즈니스 규칙**: 예외 vs 반환값 선택 정책, 권한 정책, 데이터 형식 규칙
+- **공통 컨벤션**: 네이밍 규칙, 코드 스타일, 파일 구조 원칙
+
+`tasks.yaml`의 `description`에는 "무엇을" 구현할지, `context/` 문서에는 "왜" 그리고 "어떤 제약 하에" 구현하는지를 담는 것이 효과적이다.
+
+---
+
+## 11. 대시보드
+
+### 11.1 접속
 
 사이드바에서 **대시보드** 탭(격자 아이콘) 클릭 → 프로젝트 목록 화면이 표시된다.
 
-### 10.2 프로젝트 관리
+### 11.2 프로젝트 관리
 
 프로젝트 목록 화면에서 등록된 프로젝트 카드를 클릭하면 해당 프로젝트의 상세 대시보드로 진입한다.
 
@@ -438,7 +499,7 @@ description: "계산기 모듈 만들어"
 
 각 카드에는 최근 파이프라인 실행 상태(`running` / `done` / `error`)가 표시된다.
 
-### 10.3 프로젝트 상세 대시보드
+### 11.3 프로젝트 상세 대시보드
 
 프로젝트 카드를 클릭하면 상세 화면으로 진입하며, 상단 **← 프로젝트 목록** 버튼으로 돌아올 수 있다.
 
@@ -482,18 +543,23 @@ description: "계산기 모듈 만들어"
 
 ---
 
-## 11. Discord 핫라인
+## 12. Discord 핫라인 & 에이전트 질문
 
-파이프라인 실행 중 실시간 알림을 받고, 태스크 실패 시 Discord에서 힌트를 입력할 수 있다.
+Discord를 통해 두 가지 상호작용이 가능하다:
 
-### 11.1 설정
+| 기능 | 발생 시점 | 방향 |
+|------|-----------|------|
+| **파이프라인 알림** | 태스크 시작·완료·실패 등 이벤트 발생 시 | 봇 → 사람 |
+| **에이전트 질문** | 에이전트가 구현 중 모호한 사항 발견 시 | 봇 → 사람 → 봇 (대화) |
+
+### 12.1 설정
 
 1. [Discord Developer Portal](https://discord.com/developers/applications)에서 봇 생성
 2. Bot → Token 복사 → `.env`의 `DISCORD_BOT_TOKEN`에 입력
 3. 알림 받을 채널의 ID 복사 → `DISCORD_CHANNEL_ID`에 입력
 4. 봇을 해당 채널이 있는 서버에 초대 (Message, Send Messages 권한 필요)
 
-### 11.2 알림 종류
+### 12.2 파이프라인 알림 종류
 
 | 알림 | 발생 시점 |
 |------|-----------|
@@ -503,13 +569,58 @@ description: "계산기 모듈 만들어"
 | `❌ [task-xxx] 실패` | 파이프라인 실패 시 (원인 포함) |
 | `🏁 파이프라인 완료` | 전체 완료 시 (성공/실패 수 포함) |
 
-### 11.3 힌트 입력
+### 12.3 태스크 실패 시 힌트 입력
 
-태스크 실패 알림 메시지에 **5분 이내**로 Discord 채널에 답장하면, 그 내용이 다음 Implementer 재시도에 힌트로 전달된다.
+태스크 실패 알림 메시지에 Discord 채널에 답장하면, 그 내용이 다음 Implementer 재시도에 힌트로 전달된다.
 
-"건너뜀" 또는 "skip" 입력 시 힌트 없이 다음으로 넘어간다. 5분 내 응답 없으면 자동으로 건너뜀.
+"건너뜀" 또는 "skip" 입력 시 힌트 없이 다음으로 넘어간다.
 
-### 11.4 설정 확인
+### 12.4 에이전트 질문 & 오케스트레이터 대화
+
+에이전트가 `context/` 문서로도 해결할 수 없는 모호한 사항을 만나면 `ask_user` 도구를 호출해 Discord로 질문을 보낸다.
+
+**대화 흐름**
+
+```
+봇:  ❓ 에이전트 질문
+
+     로그인 실패 시 예외를 던져야 하나요, None을 반환해야 하나요?
+
+     자유롭게 대화하세요. 결정이 되면 `확정`,
+     에이전트에게 맡기려면 `알아서 해`를 입력해주세요.
+
+나:  예외가 맞는 것 같은데 호출부에서 매번 try-catch 해야 하면 불편하지 않나요?
+
+봇:  (오케스트레이터) 두 가지 트레이드오프가 있어요:
+     - 예외: 실패를 무시하기 어렵고 명시적 / 호출부에 try-catch 강제
+     - None: 호출부가 가볍지만 실패를 무시하기 쉬워 버그 원인이 될 수 있음
+     이 서비스가 내부 API라면 예외가 더 안전합니다.
+
+나:  내부 API야. 예외로 가자.
+
+봇:  확정을 입력하면 에이전트에게 전달하겠습니다.
+
+나:  확정
+
+봇:  ✅ 확정 완료
+
+     에이전트에게 전달할 답변:
+     >>> 로그인 실패 시 AuthenticationException을 던진다.
+         내부 API이므로 호출부에서 명시적으로 처리하도록 예외 방식을 채택한다.
+```
+
+**종료 키워드**
+
+| 키워드 | 효과 |
+|--------|------|
+| `확정` / `결정` / `done` | 대화 내용을 요약해 에이전트에 전달하고 계속 진행 |
+| `알아서 해` / `skip` / `패스` | 에이전트가 최선의 판단으로 스스로 결정하고 계속 진행 |
+
+**주의사항**
+- 에이전트는 답변을 받을 때까지 해당 도구 호출에서 대기한다. 파이프라인 스레드는 이 동안 블로킹된다.
+- Discord가 설정되지 않은 경우 터미널 stdin으로 폴백된다.
+
+### 12.5 설정 확인
 
 ```bash
 curl http://localhost:8000/api/discord/status
@@ -520,7 +631,52 @@ curl -X POST http://localhost:8000/api/discord/test
 
 ---
 
-## 12. API 레퍼런스
+## 13. 비용 최적화
+
+파이프라인은 내부적으로 여러 비용 절감 메커니즘을 적용하고 있다.
+
+### 13.1 컨텍스트 슬라이딩 윈도우
+
+에이전트 ReAct 루프는 매 iteration마다 대화 히스토리 전체를 LLM에 전송한다. 슬라이딩 윈도우를 적용해 초기 태스크 메시지와 최근 6턴만 유지하고 이전 히스토리는 자동으로 드롭한다.
+
+```
+슬라이딩 윈도우 없을 때:
+  iteration 1:  3,000 tokens
+  iteration 10: 30,000 tokens  (10배)
+  iteration 20: 60,000 tokens  (20배)
+
+슬라이딩 윈도우 적용 후:
+  iteration 1~6: 점진적 증가
+  iteration 7~:  ~18,000 tokens 고정 (초기 메시지 + 최근 6턴)
+```
+
+### 13.2 도구 결과 트런케이션
+
+`read_file` 등의 도구 결과가 4,000자를 초과하면 자동으로 잘린다. 수만 줄짜리 파일을 전부 컨텍스트에 올리는 것을 방지한다.
+
+### 13.3 시스템 프롬프트 캐싱
+
+Anthropic의 prompt caching을 활용해 에이전트 시스템 프롬프트를 5분간 캐시한다. 동일 에이전트가 반복 호출될 때 시스템 프롬프트 입력 비용을 ~90% 절감한다.
+
+캐시 동작 여부는 Anthropic Console의 Usage 탭 또는 API 사용량 CSV에서 `cache_read` 컬럼 값으로 확인할 수 있다.
+
+### 13.4 파라미터 기본값
+
+| 파라미터 | 기본값 | 설명 |
+|----------|--------|------|
+| `max_iterations` | 15 | 에이전트 ReAct 루프 최대 반복 수 |
+| `max_retries` | 2 | Implementer 테스트 실패 시 재시도 횟수 |
+| `max_orchestrator_retries` | 1 | 오케스트레이터 개입 재시도 횟수 |
+
+CLI에서 `--parallel` 수를 높이면 병렬 실행 태스크 수가 늘어나 비용도 선형으로 증가한다.
+
+### 13.5 지출 한도 설정 권장
+
+Anthropic Console → Settings → Billing → Spend limits 에서 월 지출 한도를 설정할 것을 강력히 권장한다. 에이전트가 예상보다 많은 retry를 반복하거나 대량의 태스크를 실행하면 비용이 급격히 증가할 수 있다.
+
+---
+
+## 14. API 레퍼런스
 
 백엔드가 실행 중일 때 `http://localhost:8000/docs`에서 Swagger UI로 전체 API를 확인할 수 있다.
 
@@ -581,7 +737,7 @@ curl -X POST http://localhost:8000/api/discord/test
 
 ---
 
-## 13. 트러블슈팅
+## 15. 트러블슈팅
 
 ### "백엔드 서버에 연결할 수 없습니다"
 
@@ -647,6 +803,8 @@ AI_coding_agent/              ← 파이프라인 도구 (이 레포)
 ├── backend/
 │   ├── main.py               # FastAPI 앱 진입점
 │   └── routers/              # API 라우터
+├── core/
+│   └── loop.py               # ReactLoop — 슬라이딩 윈도우 + 도구 결과 트런케이션 적용
 ├── docker/
 │   ├── Dockerfile.test       # pytest 격리 실행 이미지
 │   └── runner.py             # DockerTestRunner
@@ -658,20 +816,30 @@ AI_coding_agent/              ← 파이프라인 도구 (이 레포)
 │       └── TaskDraftPanel.tsx    # 태스크 편집 + 파이프라인 실행
 ├── hotline/
 │   └── notifier.py           # Discord 알림 클라이언트
+├── llm/
+│   └── claude_client.py      # Claude API 클라이언트 (프롬프트 캐싱 적용)
 ├── orchestrator/
 │   ├── run.py                # CLI 진입점 + on_progress 이벤트 발행
 │   ├── pipeline.py           # TDD 파이프라인 상태 머신
-│   ├── workspace.py          # 태스크별 격리 작업 디렉토리 (/tmp)
+│   ├── workspace.py          # 태스크별 격리 작업 디렉토리 (/tmp) + context 복사
 │   ├── git_workflow.py       # git worktree 기반 브랜치/커밋/PR
 │   ├── merge_agent.py        # LLM 기반 머지 충돌 자동 해결
 │   ├── milestone.py          # 마일스톤 보고서 생성
 │   ├── report.py             # Task Report 저장/로드
 │   └── task.py               # Task 데이터 모델 + YAML 로드/저장
+├── tools/
+│   ├── registry.py           # 도구 등록 & 스키마 관리
+│   ├── hotline_tools.py      # ask_user 도구 — Discord 멀티턴 대화
+│   └── ...                   # 파일·코드·git 도구
 └── .env                      # API 키 (git 추적 제외)
 
 /path/to/my-project/          ← 대상 프로젝트 (별도 레포)
-├── tasks.yaml                # 파이프라인 태스크 정의
-└── data/
-    └── reports/              # Task Report + 마일스톤 보고서 자동 저장
-        └── milestones/
+├── data/
+│   ├── context/              # ★ 스펙·아키텍처 문서 (에이전트가 참조)
+│   │   ├── architecture.md
+│   │   └── api-spec.md
+│   ├── tasks.yaml            # 파이프라인 태스크 정의
+│   └── reports/              # Task Report + 마일스톤 보고서 자동 저장
+│       └── milestones/
+└── PROJECT_STRUCTURE.md      # 코드베이스 구조 요약 (파이프라인이 자동 갱신)
 ```

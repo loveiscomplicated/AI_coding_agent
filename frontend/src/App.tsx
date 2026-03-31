@@ -40,7 +40,8 @@ export default function App() {
   const [showListPage, setShowListPage] = useState(false)
   const [showDashboard, setShowDashboard] = useState(false)
   const [selectedProject, setSelectedProject] = useState<Project | null>(null)
-  const [resumeJobId, setResumeJobId] = useState<string | null>(null)
+  const [runningJobIds, setRunningJobIds] = useState<string[]>([])
+  const [viewingJobId, setViewingJobId] = useState<string | null>(null)
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -64,21 +65,33 @@ export default function App() {
     setRecords(storage.list())
   }, [])
 
-  // 새로고침 후 실행 중이던 파이프라인 잡 복원
+  // 새로고침 후 실행 중이던 파이프라인 잡 복원 (복수 지원)
   useEffect(() => {
-    const savedJobId = localStorage.getItem(ACTIVE_JOB_KEY)
-    if (!savedJobId) return
-    fetch(`${API_BASE}/api/pipeline/status/${savedJobId}`)
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (data && data.status === 'running') {
-          setResumeJobId(savedJobId)
-        } else {
-          // 이미 완료됐거나 백엔드에 없으면 제거
-          localStorage.removeItem(ACTIVE_JOB_KEY)
-        }
-      })
-      .catch(() => { /* 백엔드 미기동 상태면 무시 */ })
+    const raw = localStorage.getItem(ACTIVE_JOB_KEY)
+    if (!raw) return
+    // 구 형식(단일 문자열)과 신 형식(JSON 배열) 모두 처리
+    let savedIds: string[]
+    try {
+      const parsed = JSON.parse(raw)
+      savedIds = Array.isArray(parsed) ? parsed : [parsed]
+    } catch {
+      savedIds = [raw]
+    }
+    Promise.all(
+      savedIds.map(id =>
+        fetch(`${API_BASE}/api/pipeline/status/${id}`)
+          .then(r => r.ok ? r.json() : null)
+          .catch(() => null)
+      )
+    ).then(results => {
+      const still = savedIds.filter((_, i) => results[i]?.status === 'running')
+      if (still.length > 0) {
+        setRunningJobIds(still)
+        localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(still))
+      } else {
+        localStorage.removeItem(ACTIVE_JOB_KEY)
+      }
+    })
   }, [])
 
   const activeRecord = records.find(r => r.id === activeId)
@@ -267,20 +280,28 @@ export default function App() {
           </div>
         </div>
 
-        {/* 실행 중인 파이프라인 배지 */}
-        {resumeJobId && (
-          <div className="px-2 pb-1 flex-shrink-0">
-            <button
-              onClick={() => {
-                setShowListPage(false)
-                setShowDashboard(false)
-                setActiveId(null)
-              }}
-              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-green-900/40 text-green-400 hover:bg-green-900/60 transition-colors text-xs"
-            >
-              <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse shrink-0" />
-              파이프라인 실행 중 — 클릭해서 보기
-            </button>
+        {/* 실행 중인 파이프라인 배지 (복수 지원) */}
+        {runningJobIds.length > 0 && (
+          <div className="px-2 pb-1 flex-shrink-0 space-y-1">
+            {runningJobIds.map(jobId => (
+              <button
+                key={jobId}
+                onClick={() => {
+                  setViewingJobId(jobId)
+                  setShowListPage(false)
+                  setShowDashboard(false)
+                  setActiveId(null)
+                }}
+                className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-colors text-xs ${
+                  viewingJobId === jobId
+                    ? 'bg-green-800/60 text-green-300'
+                    : 'bg-green-900/40 text-green-400 hover:bg-green-900/60'
+                }`}
+              >
+                <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse shrink-0" />
+                <span className="truncate">파이프라인 {jobId.slice(0, 8)} 실행 중</span>
+              </button>
+            ))}
           </div>
         )}
 
@@ -431,17 +452,34 @@ export default function App() {
 
       {/* ── 메인 ── */}
       <div className="flex-1 flex flex-col min-w-0">
-        {resumeJobId && !showDashboard && !showListPage && !activeId ? (
+        {viewingJobId && !showDashboard && !showListPage && !activeId ? (
           <PipelineLogView
-            jobId={resumeJobId}
-            onDone={() => setResumeJobId(null)}
+            key={viewingJobId}
+            jobId={viewingJobId}
+            onDone={() => {
+              setRunningJobIds(prev => {
+                const next = prev.filter(id => id !== viewingJobId)
+                if (next.length > 0) {
+                  localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(next))
+                } else {
+                  localStorage.removeItem(ACTIVE_JOB_KEY)
+                }
+                return next
+              })
+              setViewingJobId(null)
+            }}
           />
         ) : showDashboard && selectedProject ? (
           <DashboardPage
             project={selectedProject}
             onBack={() => setSelectedProject(null)}
             onPipelineStarted={(jobId) => {
-              setResumeJobId(jobId)
+              setRunningJobIds(prev => {
+                const next = prev.includes(jobId) ? prev : [...prev, jobId]
+                localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(next))
+                return next
+              })
+              setViewingJobId(jobId)
               setShowDashboard(false)
               setSelectedProject(null)
             }}
@@ -478,7 +516,12 @@ export default function App() {
               setShowListPage(true)
             }}
             onPipelineStarted={(jobId) => {
-              setResumeJobId(jobId)
+              setRunningJobIds(prev => {
+                const next = prev.includes(jobId) ? prev : [...prev, jobId]
+                localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(next))
+                return next
+              })
+              setViewingJobId(jobId)
               setActiveId(null)
             }}
             headerLeft={!sidebarOpen ? mainToggle : undefined}

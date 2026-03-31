@@ -206,7 +206,18 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
   async function handleSaveAndRun() {
     dispatch({ type: 'SAVING' })
     try {
-      // 1. tasks.yaml 저장 (rootDir/data/tasks.yaml)
+      // 1. 컨텍스트 문서를 data/context/spec.md에 저장
+      await fetch(`${API_BASE}/api/utils/save-context-doc`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo_path: state.rootDir === '.' ? '.' : state.rootDir,
+          filename: 'spec.md',
+          content: contextDoc,
+        }),
+      })
+
+      // 2. tasks.yaml 저장 (rootDir/data/tasks.yaml)
       const saveRes = await fetch(`${API_BASE}/api/tasks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

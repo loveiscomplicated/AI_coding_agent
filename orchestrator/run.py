@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from docker.runner import DockerTestRunner
 from hotline.notifier import DiscordNotifier
+from tools.hotline_tools import set_notifier as _set_hotline_notifier, set_repo_path as _set_hotline_repo_path
 from llm import LLMConfig, create_client
 from orchestrator.git_workflow import GitWorkflow, GitWorkflowError, check_prerequisites
 from orchestrator.merge_agent import MergeAgent
@@ -207,7 +208,7 @@ def run_pipeline(
     pause_controller: "PauseController | None" = None,
     max_workers: int = 1,
     discord_channel_id: int | None = None,
-    max_orchestrator_retries: int = 2,
+    max_orchestrator_retries: int = 1,
     auto_merge: bool = False,
 ) -> dict:
     """
@@ -225,16 +226,26 @@ def run_pipeline(
     if reports_dir is None:
         reports_dir = repo_path / "data" / "reports"
 
-    # 태스크 로드
+    # 태스크 로드 (전체 — 의존성 검증에 전체 ID가 필요)
     all_tasks = load_tasks(tasks_path)
+    all_task_ids = {t.id for t in all_tasks}  # 전체 ID 집합 (의존성 검증용)
 
     if task_id:
         all_tasks = [t for t in all_tasks if t.id == task_id]
         if not all_tasks:
             raise ValueError(f"태스크 ID '{task_id}'를 찾을 수 없습니다.")
 
-    # DONE만 제외 — FAILED는 재시도 대상
-    pending = [t for t in all_tasks if t.status != TaskStatus.DONE]
+    # frontend 태스크는 멀티 에이전트 파이프라인 제외 (사람이 직접 구현)
+    frontend_tasks = [t for t in all_tasks if t.task_type == "frontend"]
+    if frontend_tasks:
+        logger.info(
+            "frontend 태스크 %d개 제외 (파이프라인 미실행): %s",
+            len(frontend_tasks), [t.id for t in frontend_tasks],
+        )
+        emit({"type": "frontend_skipped", "task_ids": [t.id for t in frontend_tasks]})
+
+    # DONE만 제외 — FAILED는 재시도 대상, frontend는 파이프라인 미실행
+    pending = [t for t in all_tasks if t.status != TaskStatus.DONE and t.task_type != "frontend"]
     # FAILED 태스크는 새 실행을 위해 상태 초기화
     for t in pending:
         if t.status == TaskStatus.FAILED:
@@ -245,7 +256,6 @@ def run_pipeline(
 
     # 의존성 기반 실행 그룹 계산
     # all_valid_ids: 완료된 태스크 ID도 포함해야 depends_on 검증을 통과할 수 있다
-    all_task_ids = {t.id for t in all_tasks}
     groups = resolve_execution_groups(pending, all_valid_ids=all_task_ids)
 
     # LLM 클라이언트 + 파이프라인 초기화
@@ -260,6 +270,9 @@ def run_pipeline(
     merge_agent = MergeAgent(llm=haiku, repo_path=repo_path)
     # discord_channel_id가 없으면 notifier 생성 안 함 (채널 생성 실패 포함)
     notifier = DiscordNotifier.from_env(channel_id=discord_channel_id) if discord_channel_id else None
+    # 에이전트 ask_user 도구에 notifier 주입 (None이면 stdin 폴백)
+    _set_hotline_notifier(notifier)
+    _set_hotline_repo_path(repo_path)
 
     def emit(event: dict) -> None:
         if on_progress:
@@ -499,9 +512,7 @@ def run_pipeline(
                 emit({"type": "task_fail", "task_id": task.id, "title": task.title,
                       "reason": task.failure_reason, "is_max_iter": is_max_iter,
                       "elapsed": round(elapsed, 1)})
-                hint = _notify_failure(notifier, task, task.failure_reason, elapsed)
-                if hint:
-                    task.last_error = f"[Discord 힌트] {hint}\n{task.last_error or ''}"
+                _notify_failure(notifier, task, task.failure_reason, elapsed)
 
                 report = build_report(task, result, elapsed_seconds=elapsed, pr_url="")
                 save_report(report, reports_dir=reports_dir)
@@ -572,9 +583,19 @@ def run_pipeline(
                     run_one(task)
 
             # 이 그룹에서 실패한 태스크 ID를 failed_ids에 추가
-            for task in group:
-                if task.status == TaskStatus.FAILED:
-                    failed_ids.add(task.id)
+            group_failed = [t.id for t in runnable if t.status == TaskStatus.FAILED]
+            for tid in group_failed:
+                failed_ids.add(tid)
+
+            # ── 그룹 전체 실패 시 계속 진행 여부 확인 ────────────────────────
+            remaining = groups[groups.index(group) + 1:] if group in groups else []
+            if group_failed and len(group_failed) == len(runnable) and remaining:
+                should_continue = _ask_continue(notifier, group_failed, len(remaining))
+                if not should_continue:
+                    emit({"type": "pipeline_aborted",
+                          "message": "사용자 요청으로 파이프라인 중단"})
+                    _notify(notifier, "🛑 파이프라인을 중단합니다.")
+                    break
 
             # ── 그룹 완료 후 자동 머지 ────────────────────────────────────────
             if auto_merge and not no_pr:
@@ -837,6 +858,11 @@ def _auto_merge_group(
     original = git(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
     pre_merge_sha = git(["rev-parse", "HEAD"]).stdout.strip()
 
+    # 이전 머지가 중단된 채 MERGE_HEAD가 남아 있으면 먼저 정리
+    if (repo_path / ".git" / "MERGE_HEAD").exists():
+        logger.warning("진행 중인 머지 발견 — merge --abort로 정리 후 checkout 시도")
+        git(["merge", "--abort"])
+
     checkout = git(["checkout", base_branch])
     if checkout.returncode != 0:
         msg = f"자동 머지 건너뜀 — {base_branch} checkout 실패: {checkout.stderr.strip()}"
@@ -971,26 +997,74 @@ def _notify_failure(
     task: Task,
     reason: str,
     elapsed: float,
-) -> str | None:
+) -> None:
+    """태스크 실패를 Discord에 단방향으로 알린다. 힌트 대기 없음."""
+    _notify(
+        notifier,
+        f"❌ [{task.id}] \"{task.title}\" 실패 (⏱ {elapsed:.0f}s)\n"
+        f"원인: {reason[:300]}",
+    )
+
+
+def _ask_continue(
+    notifier: DiscordNotifier | None,
+    failed_ids_in_group: list[str],
+    remaining_groups: int,
+) -> bool:
     """
-    태스크 실패를 Discord에 알리고 사용자 힌트를 기다린다.
+    그룹 내 태스크가 전부 실패했을 때 사용자에게 계속 진행 여부를 묻는다.
+    답이 올 때까지 무한 대기한다.
 
     Returns:
-        사용자가 입력한 힌트 문자열, 없으면 None.
+        True  → 계속 진행
+        False → 파이프라인 중단
     """
-    msg = (
-        f"❌ [{task.id}] \"{task.title}\" 실패 (⏱ {elapsed:.0f}s)\n"
-        f"원인: {reason[:300]}\n"
-        f"힌트를 입력하거나 '건너뜀'을 입력하세요. (5분 후 자동 건너뜀)"
-    )
-    message_id = _notify(notifier, msg)
-    if not message_id or not notifier:
-        return None
+    _CONTINUE_KEYWORDS = {"계속", "continue", "yes", "ㅇ", "응", "ㅇㅇ"}
+    _STOP_KEYWORDS     = {"중단", "stop", "no", "ㄴ", "아니", "아니오"}
 
-    reply = notifier.wait_for_reply(message_id, timeout=300)
-    if reply and reply.strip().lower() not in ("건너뜀", "skip"):
-        return reply
-    return None
+    ids_text = ", ".join(failed_ids_in_group)
+    msg = (
+        f"⚠️ **연속 실패 감지**\n\n"
+        f"방금 실행한 태스크가 모두 실패했습니다: {ids_text}\n"
+        f"남은 그룹: {remaining_groups}개\n\n"
+        f"계속 진행하시겠습니까?\n"
+        f"`계속` — 다음 그룹 실행  |  `중단` — 파이프라인 종료"
+    )
+
+    if notifier is None:
+        # stdin 폴백
+        print(f"\n{'='*60}\n{msg}\n{'='*60}")
+        while True:
+            try:
+                reply = input(">>> ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return False
+            if reply in _CONTINUE_KEYWORDS:
+                return True
+            if reply in _STOP_KEYWORDS:
+                return False
+
+    message_id = _notify(notifier, msg)
+    if not message_id:
+        return True  # Discord 실패 시 기본값: 계속
+
+    _POLL_CHUNK = 60
+    while True:
+        reply = notifier.wait_for_reply(after_message_id=message_id, timeout=_POLL_CHUNK)
+        if reply is None:
+            continue
+        lower = reply.strip().lower()
+        if lower in _CONTINUE_KEYWORDS:
+            _notify(notifier, "▶ 파이프라인을 계속 진행합니다.")
+            return True
+        if lower in _STOP_KEYWORDS:
+            _notify(notifier, "🛑 파이프라인을 종료합니다.")
+            return False
+        # 키워드 아닌 메시지 → 안내 재전송
+        message_id = _notify(
+            notifier,
+            f"`계속` 또는 `중단`을 입력해주세요.",
+        ) or message_id
 
 
 # ── CLI 진입점 ────────────────────────────────────────────────────────────────

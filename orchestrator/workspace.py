@@ -96,6 +96,7 @@ class WorkspaceManager:
         self._copy_target_files()
         self._copy_requirements()
         self._copy_project_structure()
+        self._copy_context_docs()
 
         logger.info("workspace 생성: %s", self._path)
         return self
@@ -182,3 +183,20 @@ class WorkspaceManager:
         if structure_doc.exists():
             shutil.copy2(structure_doc, self.path / "PROJECT_STRUCTURE.md")
             logger.debug("PROJECT_STRUCTURE.md 복사 완료")
+
+    def _copy_context_docs(self) -> None:
+        """data/context/ 디렉토리의 문서를 workspace/context/ 에 복사한다.
+
+        tasks.yaml 생성에 쓰인 원본 스펙·요구사항 문서를 에이전트가 참조할 수 있도록 한다.
+        에이전트는 프롬프트에 직접 주입되는 게 아니라 파일로 제공되므로,
+        필요한 시점에 read_file로 on-demand 참조 → 컨텍스트 낭비 없음.
+        """
+        context_dir = self.repo_path / "data" / "context"
+        if not context_dir.exists():
+            return
+        dest_dir = self.path / "context"
+        dest_dir.mkdir(exist_ok=True)
+        for doc in sorted(context_dir.iterdir()):
+            if doc.is_file():
+                shutil.copy2(doc, dest_dir / doc.name)
+        logger.debug("context 문서 복사 완료: %s", [d.name for d in context_dir.iterdir() if d.is_file()])

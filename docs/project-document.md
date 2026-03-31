@@ -1,6 +1,6 @@
 # Multi-Agent Development System
 
-> 프로젝트 문서 v1.4 | 2026-03-31 — Phase 3 추가 구현 완료
+> 프로젝트 문서 v1.5 | 2026-03-31 — Phase 3 운영 안정화 완료
 
 ---
 
@@ -481,6 +481,48 @@ Phase 3 추가 구현 ✅ 완료 (2026-03-31)
         (드롭다운 컨테이너에 onMouseDown stopPropagation 추가)
         startNew(): showDashboard / selectedProject 함께 초기화
 
+Phase 3 운영 안정화 ✅ 완료 (2026-03-31)
+  ├── 오케스트레이터 개입 로직 ✅
+  │     orchestrator/intervention.py — analyze() / generate_report() / save_report()
+  │     에이전트 실패 시 Sonnet이 근본 원인 분석 → RETRY(힌트 주입) or GIVE_UP 결정
+  │     max_orchestrator_retries(기본 2회) 초과 시 마크다운 실패 보고서 자동 생성
+  │     모든 개입 단계(분석 중 / 재시도 / 포기 / 보고서 생성)를 서버 로그·Discord·대시보드에 실시간 기록
+  ├── MAX_ITER 감지 및 표면화 ✅
+  │     ScopedReactLoop 최대 반복 초과 시 failure_reason에 [MAX_ITER] 프리픽스 태깅
+  │     서버 로그 WARNING, Discord 알림, 대시보드 "반복 초과" 주황 뱃지로 구분 표시
+  ├── auto_merge 토글 ✅
+  │     DashboardPage에 토글 버튼 추가 — 파이프라인 중지 상태에서만 활성화
+  │     localStorage('pipeline_auto_merge')로 세션 간 상태 유지
+  │     파이프라인 재개 시 auto_merge 값 전달 → 그룹 완료 후 자동 머지 실행
+  ├── Catch-up 머지 ✅
+  │     auto_merge=ON으로 재개 시 이전에 완료됐지만 아직 머지 안 된 브랜치를 먼저 처리
+  │     resolve_execution_groups() 위상 정렬 순서대로 누락 브랜치 일괄 머지
+  ├── MergeAgent 안정성 개선 ✅
+  │     response.content 블록 파싱 수정 (content.strip() → block.text 추출)
+  │     ast.parse()로 Python 구문 유효성 검증 후 파일 저장
+  │     재시도를 멀티턴 대화 → 독립 단일 프롬프트로 변경
+  │       (원본 충돌 내용 + 이전 오류 + 수정 규칙을 한 메시지에 포함)
+  │     재시도 규칙: leading zeros → 문자열 처리, unterminated string 방지 명시
+  │     커밋 실패 시 git merge --abort 추가 (MERGE_HEAD 잔류 방지)
+  │     _auto_merge_group() 진입 시 MERGE_HEAD 잔류 자동 감지 후 abort
+  ├── Docker 테스트 러너 개선 ✅
+  │     docker run에 -e PYTHONPATH=/workspace 추가 — from src.xxx import 패턴 정상 동작
+  │     PR base 브랜치 결정 로직 개선 — depends_on 중 미머지 브랜치를 base로 선택
+  │     git ls-remote / git merge-base --is-ancestor로 원격 브랜치 존재 및 머지 여부 확인
+  ├── Weekly Report UI ✅
+  │     DashboardPage에 주간 보고서 섹션 추가 (마일스톤 섹션 하위)
+  │     "이번 주 생성" 버튼 → POST /api/reports/weekly → 결과 즉시 뷰어 표시
+  │     목록 클릭 → GET /api/reports/weekly/{year}/{week} → 우측 패널 표시
+  │     마일스톤·주간 보고서 뷰어 패널 통합 (하나 열면 다른 하나 닫힘)
+  ├── 회의 종료 로딩 상태 유지 버그 수정 ✅
+  │     회의종료 버튼 클릭 후 다른 페이지로 이탈했다 돌아오면 로딩이 초기화되던 문제
+  │     sessionStorage로 종료 진행 상태 유지 (FINISH_PENDING_KEY)
+  │     background async 완료 시 CustomEvent('meeting-finish-done') 발송
+  │     새 컴포넌트 인스턴스가 이벤트 수신 → storage에서 결과 읽어 상태 복원
+  └── API 직렬화 버그 수정 ✅
+        GET /api/pipeline/status/{job_id} — PauseController 비직렬화 오류
+        응답에서 pause_ctrl 키 제외 처리
+
 8단계 - 음성 인터페이스 (선택, 별도)
   ├── STT 입력 (Web Speech API)
   ├── TTS 출력
@@ -501,7 +543,11 @@ Phase 3 추가 구현 ✅ 완료 (2026-03-31)
 | 5단계 오케스트레이터 연결 방식 | **확정**: FastAPI 백엔드 + React 프론트엔드 분리, Discord 핫라인 포함 | ✅ 완료 |
 | 에이전트 간 의존성 태스크 처리 | **확정**: DAG 위상 정렬 + 그룹 내 병렬 실행 (ThreadPoolExecutor) | ✅ 완료 |
 | 병렬 실행 시 git 충돌 | **확정**: git worktree 기반 GitWorkflow — HEAD 불변, 병렬 안전 | ✅ 완료 |
-| 머지 충돌 자동 해결 | **확정**: MergeAgent (Haiku LLM 1회 호출/파일) | ✅ 완료 |
+| 머지 충돌 자동 해결 | **확정**: MergeAgent (Haiku LLM 1회 호출/파일, 최대 3회 재시도) | ✅ 완료 |
+| 오케스트레이터 개입 | **확정**: Sonnet 분석 → RETRY/GIVE_UP, 실패 보고서 자동 생성 | ✅ 완료 |
 | DB 전환 | JSON/YAML → SQLite or PostgreSQL | 데이터 복잡도 증가 시 |
 | Milestone Report 컨텍스트 압축 | Daily Summary 계층 미구현 — Milestone만 있음 | 운영 중 필요 시 |
 | CI/CD 통합 | GitHub Actions 유력 | 8단계 또는 별도 |
+| 태스크 타입 분기 | frontend 태스크 제외 로직 — 사람이 직접 구현 예정 | 별도 구현 시 |
+| 핫라인 확장 | 버튼 인터랙션, /run 명령어, PR 요약, 스크린샷 피드백 | 필요 시 |
+| 오케스트레이터 → 사용자 질문 | 스펙 모호 시 Discord로 사람에게 질의하는 흐름 | 미결 |

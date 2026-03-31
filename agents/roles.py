@@ -63,14 +63,16 @@ TEST_WRITER = RoleConfig(
     name="test_writer",
     system_prompt=_load_prompt("test_writer.md"),
     # 테스트 파일 생성만 허용 (edit_file/append 불필요)
-    allowed_tools=tuple(READ_TOOLS + ["write_file"]),
+    # ask_user: 수락 기준이 불명확할 때 사용자에게 질문
+    allowed_tools=tuple(READ_TOOLS + ["write_file", "ask_user"]),
 )
 
 IMPLEMENTER = RoleConfig(
     name="implementer",
     system_prompt=_load_prompt("implementer.md"),
     # 구현 파일 생성 및 수정 모두 허용
-    allowed_tools=tuple(READ_TOOLS + WRITE_TOOLS),
+    # ask_user: 비즈니스 로직이 불명확할 때 사용자에게 질문
+    allowed_tools=tuple(READ_TOOLS + WRITE_TOOLS + ["ask_user"]),
 )
 
 REVIEWER = RoleConfig(

@@ -9,8 +9,53 @@ import subprocess
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 router = APIRouter()
+
+
+class SaveContextDocRequest(BaseModel):
+    repo_path: str
+    filename: str = "spec.md"
+    content: str
+
+
+@router.get("/utils/context-docs")
+def list_context_docs(repo_path: str = ".") -> dict:
+    """
+    {repo_path}/data/context/ 안의 파일 목록을 반환한다.
+    """
+    context_dir = Path(repo_path).expanduser().resolve() / "data" / "context"
+    if not context_dir.exists():
+        return {"docs": []}
+    docs = sorted(
+        [{"name": f.name, "size": f.stat().st_size} for f in context_dir.iterdir() if f.is_file()],
+        key=lambda d: d["name"],
+    )
+    return {"docs": docs}
+
+
+@router.get("/utils/context-docs/{filename}")
+def get_context_doc(filename: str, repo_path: str = ".") -> dict:
+    """
+    {repo_path}/data/context/{filename}의 내용을 반환한다.
+    """
+    path = Path(repo_path).expanduser().resolve() / "data" / "context" / filename
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail=f"문서 '{filename}'를 찾을 수 없습니다.")
+    return {"filename": filename, "content": path.read_text(encoding="utf-8")}
+
+
+@router.post("/utils/save-context-doc")
+def save_context_doc(body: SaveContextDocRequest) -> dict:
+    """
+    content를 {repo_path}/data/context/{filename}에 저장한다.
+    디렉토리가 없으면 자동 생성한다.
+    """
+    dest = Path(body.repo_path).expanduser().resolve() / "data" / "context" / body.filename
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(body.content, encoding="utf-8")
+    return {"saved": str(dest)}
 
 
 def _resolve_initial(initial: str) -> str:

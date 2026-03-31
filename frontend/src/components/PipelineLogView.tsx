@@ -162,8 +162,17 @@ export function PipelineLogView({ jobId, onDone }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    // 새로고침 후 재연결을 위해 jobId 유지
-    localStorage.setItem(ACTIVE_JOB_KEY, jobId)
+    // 새로고침 후 재연결을 위해 jobId를 배열에 추가 (기존 항목 보존)
+    const raw = localStorage.getItem(ACTIVE_JOB_KEY)
+    let ids: string[] = []
+    try {
+      const parsed = JSON.parse(raw ?? '[]')
+      ids = Array.isArray(parsed) ? parsed : [String(parsed)]
+    } catch {
+      ids = raw ? [raw] : []
+    }
+    if (!ids.includes(jobId)) ids = [...ids, jobId]
+    localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(ids))
 
     const es = new EventSource(`${API_BASE}/api/pipeline/stream/${jobId}`)
 
@@ -173,7 +182,15 @@ export function PipelineLogView({ jobId, onDone }: Props) {
         setLogs(prev => [...prev, event])
         if (event.type === 'end') {
           setEnded(true)
-          localStorage.removeItem(ACTIVE_JOB_KEY)
+          // 배열에서 이 jobId만 제거
+          const r = localStorage.getItem(ACTIVE_JOB_KEY)
+          try {
+            const p = JSON.parse(r ?? '[]')
+            const next = (Array.isArray(p) ? p : [String(p)]).filter((id: string) => id !== jobId)
+            next.length > 0
+              ? localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(next))
+              : localStorage.removeItem(ACTIVE_JOB_KEY)
+          } catch { localStorage.removeItem(ACTIVE_JOB_KEY) }
           es.close()
         }
         if (event.type === 'paused') setPaused(true)
@@ -199,7 +216,14 @@ export function PipelineLogView({ jobId, onDone }: Props) {
   }, [logs])
 
   const handleDone = () => {
-    localStorage.removeItem(ACTIVE_JOB_KEY)
+    const r = localStorage.getItem(ACTIVE_JOB_KEY)
+    try {
+      const p = JSON.parse(r ?? '[]')
+      const next = (Array.isArray(p) ? p : [String(p)]).filter((id: string) => id !== jobId)
+      next.length > 0
+        ? localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(next))
+        : localStorage.removeItem(ACTIVE_JOB_KEY)
+    } catch { localStorage.removeItem(ACTIVE_JOB_KEY) }
     onDone()
   }
 

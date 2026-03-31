@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { ChatAttachment, ChatMessage, MeetingContext, MeetingRecord, emptyMeetingContext } from '../types/meeting'
 import { streamingVisibleText, parseContextDoc } from '../utils/contextParser'
 import { parseChoices } from '../utils/choiceParser'
@@ -8,6 +8,9 @@ import { useAnthropicStream, buildSystemPrompt, generateChatTitle, generateConte
 function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
 }
+
+const FINISH_PENDING_KEY = (id: string) => `meeting_finishing_${id}`
+const FINISH_DONE_EVENT = 'meeting-finish-done'
 
 export interface MeetingState {
   id: string
@@ -34,7 +37,10 @@ export function useMeeting(
   )
   const [contextDoc, setContextDoc] = useState<string>(initialRecord?.contextDoc ?? '')
   const [isFinished, setIsFinished] = useState(initialRecord?.isFinished ?? false)
-  const [isRefreshing, setIsRefreshing] = useState(false)
+  // 페이지 이탈 후 돌아왔을 때도 종료 로딩 상태를 유지하기 위해 sessionStorage에서 복원
+  const [isRefreshing, setIsRefreshing] = useState(
+    () => sessionStorage.getItem(FINISH_PENDING_KEY(meetingId)) === '1'
+  )
   const [refreshingDoc, setRefreshingDoc] = useState('')
   const abortControllerRef = useRef<AbortController | null>(null)
 
@@ -149,11 +155,18 @@ export function useMeeting(
       setContextDoc(newDoc)
       setContext(newCtx)
       persistState(msgs, newCtx, finished, undefined, newDoc)
-      if (finished) setIsFinished(true)
+      if (finished) {
+        setIsFinished(true)
+        // 페이지 이탈 후 돌아온 다른 컴포넌트 인스턴스에 완료 알림
+        window.dispatchEvent(
+          new CustomEvent<{ id: string }>(FINISH_DONE_EVENT, { detail: { id: meetingId } })
+        )
+      }
     } finally {
       setIsRefreshing(false)
+      sessionStorage.removeItem(FINISH_PENDING_KEY(meetingId))
     }
-  }, [contextDoc, context, persistState])
+  }, [meetingId, contextDoc, context, persistState])
 
   /** 수동으로 컨텍스트 문서를 Opus 스트리밍으로 갱신합니다. */
   const refreshContextDoc = useCallback(async () => {
@@ -195,8 +208,42 @@ export function useMeeting(
 
   const finishMeeting = useCallback(async () => {
     if (isRefreshing || isStreaming) return
+    // 페이지 이탈 시에도 로딩 상태가 복원되도록 sessionStorage에 마킹
+    sessionStorage.setItem(FINISH_PENDING_KEY(meetingId), '1')
     await generateFinalDoc(messages, true)
-  }, [isRefreshing, isStreaming, messages, generateFinalDoc])
+  }, [meetingId, isRefreshing, isStreaming, messages, generateFinalDoc])
+
+  // 페이지 이탈 후 복귀 시: 백그라운드에서 완료된 종료 작업 결과 반영
+  useEffect(() => {
+    const key = FINISH_PENDING_KEY(meetingId)
+
+    // 마운트 시점에 이미 완료된 경우 (이탈 중에 finish가 끝난 경우)
+    if (sessionStorage.getItem(key) === '1') {
+      const record = storage.get(meetingId)
+      if (record?.isFinished) {
+        setIsRefreshing(false)
+        setIsFinished(true)
+        if (record.contextDoc) setContextDoc(record.contextDoc)
+        sessionStorage.removeItem(key)
+        return
+      }
+    }
+
+    // 아직 진행 중인 경우: 완료 이벤트 대기
+    const handler = (e: Event) => {
+      const { id } = (e as CustomEvent<{ id: string }>).detail
+      if (id !== meetingId) return
+      const record = storage.get(meetingId)
+      setIsRefreshing(false)
+      if (record?.isFinished) {
+        setIsFinished(true)
+        if (record.contextDoc) setContextDoc(record.contextDoc)
+      }
+    }
+    window.addEventListener(FINISH_DONE_EVENT, handler)
+    return () => window.removeEventListener(FINISH_DONE_EVENT, handler)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meetingId])
 
   const resumeMeeting = useCallback(() => {
     setIsFinished(false)

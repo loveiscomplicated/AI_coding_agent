@@ -21,6 +21,7 @@ from tools.file_tools import (
 from tools.shell_tools import execute_command
 from tools.code_tools import get_imports, get_outline, get_function_src
 from tools.git_tools import git_status, git_diff, git_log, git_add, git_commit
+from tools.hotline_tools import ask_user
 
 # ── 타입 별칭 ─────────────────────────────────────────────────────────────────
 # 각 파라미터 항목: (type, description, required, default)
@@ -194,6 +195,18 @@ TOOL_REGISTRY: dict[str, dict] = {
         "params": {
             "repo_path": ("string", "git 저장소 경로 (기본값: '.')", False, "."),
             "message": ("string", "커밋 메시지", True, None),
+        },
+    },
+    "ask_user": {
+        "fn": ask_user,
+        "description": (
+            "컨텍스트 문서로도 해결할 수 없는 모호한 사항을 사용자에게 직접 질문한다. "
+            "반드시 context/ 문서를 먼저 확인한 뒤 호출할 것. "
+            "답변은 Discord(또는 터미널)로 수신되며 도구 결과로 반환된다. "
+            "사용자가 답변할 때까지 무한정 대기한다."
+        ),
+        "params": {
+            "question": ("string", "사용자에게 보낼 질문. 구체적이고 명확하게 작성할 것 (예: '로그인 실패 시 예외를 던져야 하나요, 아니면 None을 반환해야 하나요?')", True, None),
         },
     },
 }

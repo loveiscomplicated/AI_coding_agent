@@ -27,6 +27,7 @@ from __future__ import annotations
 import ast
 import logging
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -144,6 +145,7 @@ class MergeAgent:
             env={**os.environ, "GIT_EDITOR": "true"},
         )
         if commit.returncode != 0:
+            self._git(["merge", "--abort"])
             return MergeResult(
                 success=False,
                 branch=branch,
@@ -203,9 +205,11 @@ class MergeAgent:
                     f"오류: {last_error}\n\n"
                     f"반드시 지킬 규칙:\n"
                     f"1. 앞자리가 0인 숫자(010xxxxxxx, 0123 등)는 정수가 아닌 문자열로 작성하세요: \"010xxxxxxx\"\n"
-                    f"2. 충돌 마커(<<<, ===, >>>)를 완전히 제거하세요\n"
-                    f"3. 설명 없이 파일 내용만 출력하세요\n"
-                    f"4. 코드블록(```)으로 감싸지 마세요"
+                    f"2. 모든 문자열은 여는 따옴표와 닫는 따옴표가 반드시 짝을 이뤄야 합니다.\n"
+                    f"   줄 끝에서 문자열이 잘리면 안 됩니다. triple-quote는 열고 닫는 \"\"\"가 짝으로 있어야 합니다.\n"
+                    f"3. 충돌 마커(<<<, ===, >>>)를 완전히 제거하세요\n"
+                    f"4. 설명 없이 파일 내용만 출력하세요\n"
+                    f"5. 코드블록(```)으로 감싸지 마세요"
                 )
 
             response = self.llm.chat([Message(role="user", content=user_content)])
@@ -230,6 +234,16 @@ class MergeAgent:
                 try:
                     ast.parse(resolved)
                 except SyntaxError as e:
+                    # 알려진 패턴은 LLM 재시도 전에 코드로 자동 수정 시도
+                    fixed = self._try_auto_fix(resolved, e)
+                    if fixed is not None:
+                        file_path.write_text(fixed, encoding="utf-8")
+                        logger.info(
+                            "[MergeAgent] %s 구문 오류 자동 수정 완료: %s",
+                            file_path.name, e,
+                        )
+                        return
+
                     last_error = str(e)
                     logger.warning(
                         "[MergeAgent] %s 구문 오류 (시도 %d/%d): %s",
@@ -256,6 +270,32 @@ class MergeAgent:
             f"LLM이 {self._MAX_RESOLVE_RETRIES}회 시도 후에도 올바른 코드를 생성하지 못했습니다.\n"
             f"파일: {file_path.name}\n마지막 오류: {last_error}"
         )
+
+    @staticmethod
+    def _try_auto_fix(code: str, error: SyntaxError) -> str | None:
+        """
+        알려진 구문 오류 패턴을 코드로 자동 수정한다.
+
+        수정 성공 시 수정된 코드를 반환, 불가능하면 None 반환.
+        현재 지원:
+        - leading zeros in decimal integer literals (예: 01012345678 → "01012345678")
+        """
+        msg = str(error)
+        if "leading zeros in decimal integer literals" not in msg:
+            return None
+
+        # 따옴표·식별자·소수점에 인접하지 않은 0으로 시작하는 정수 리터럴을 문자열로 변환
+        # 예: 01012345678 → "01012345678"  (이미 따옴표 안에 있는 경우는 건드리지 않음)
+        fixed = re.sub(
+            r'(?<![\'"\w.])0([1-9]\d+)(?![\w.\'"])',
+            r'"0\1"',
+            code,
+        )
+        try:
+            ast.parse(fixed)
+            return fixed
+        except SyntaxError:
+            return None
 
     def _git(self, args: list[str]) -> subprocess.CompletedProcess:
         return subprocess.run(

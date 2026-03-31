@@ -48,6 +48,17 @@ interface Milestone {
   created_at: string
 }
 
+interface ContextDoc {
+  name: string
+  size: number
+}
+
+interface WeeklyReportMeta {
+  year: number
+  week: number
+  path: string
+}
+
 interface ProjectConfig {
   reportsDir: string
   tasksPath: string
@@ -303,6 +314,11 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
   const [tasks, setTasks] = useState<DashboardTask[]>([])
   const [milestones, setMilestones] = useState<Milestone[]>([])
   const [selectedMilestone, setSelectedMilestone] = useState<{ filename: string; content: string } | null>(null)
+  const [contextDocs, setContextDocs] = useState<ContextDoc[]>([])
+  const [selectedContextDoc, setSelectedContextDoc] = useState<{ name: string; content: string } | null>(null)
+  const [weeklyReports, setWeeklyReports] = useState<WeeklyReportMeta[]>([])
+  const [selectedWeekly, setSelectedWeekly] = useState<{ year: number; week: number; content: string } | null>(null)
+  const [generatingWeekly, setGeneratingWeekly] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null)
@@ -312,17 +328,24 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
   const [autoMerge, setAutoMerge] = useState<boolean>(() => {
     return localStorage.getItem('pipeline_auto_merge') === 'true'
   })
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState<{ description: string; criteria: string[] }>({ description: '', criteria: [] })
+  const [savingTask, setSavingTask] = useState(false)
+  const [rerunningTaskId, setRerunningTaskId] = useState<string | null>(null)
 
   const loadData = async (cfg: ProjectConfig) => {
     setLoading(true)
     setError('')
     setSelectedMilestone(null)
+    setSelectedWeekly(null)
+    setSelectedContextDoc(null)
     const q = buildQuery(cfg)
     try {
-      const [summaryRes, tasksRes, milestonesRes] = await Promise.all([
+      const [summaryRes, tasksRes, milestonesRes, weeklyRes] = await Promise.all([
         fetch(`${API_BASE}/api/dashboard/summary?${q}`),
         fetch(`${API_BASE}/api/dashboard/tasks?${q}`),
         fetch(`${API_BASE}/api/dashboard/milestones?${q}`),
+        fetch(`${API_BASE}/api/reports/weekly`),
       ])
       if (!summaryRes.ok || !tasksRes.ok || !milestonesRes.ok) {
         throw new Error('API 응답 오류')
@@ -331,6 +354,10 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
       setSummary(s)
       setTasks(t.tasks ?? [])
       setMilestones(m.milestones ?? [])
+      if (weeklyRes.ok) {
+        const w = await weeklyRes.json()
+        setWeeklyReports(w.reports ?? [])
+      }
       saveRecent(cfg)
     } catch {
       setError('대시보드 데이터를 불러오지 못했습니다.')
@@ -340,6 +367,18 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
   }
 
   useEffect(() => { loadData(config) }, [])
+
+  // 컨텍스트 문서 목록 로드 (project.rootDir 기준, 변경 시 재로드)
+  const repoPathForContext = project?.rootDir ?? '.'
+
+  useEffect(() => {
+    let cancelled = false
+    fetch(`${API_BASE}/api/utils/context-docs?repo_path=${encodeURIComponent(repoPathForContext)}`)
+      .then(r => r.ok ? r.json() : { docs: [] })
+      .then(data => { if (!cancelled) setContextDocs(data.docs ?? []) })
+      .catch(() => { if (!cancelled) setContextDocs([]) })
+    return () => { cancelled = true }
+  }, [repoPathForContext])
 
   // 프로젝트 매칭 잡 조회 (파이프라인 제어용)
   const fetchActiveJob = useCallback(async () => {
@@ -405,7 +444,12 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
       if (data.discord_channel_id && data.discord_channel_id !== project.discordChannelId) {
         onDiscordChannelCreated?.(data.discord_channel_id)
       }
-      localStorage.setItem(ACTIVE_JOB_KEY, data.job_id)
+      // 기존 목록에 추가 (복수 파이프라인 지원)
+      const _raw = localStorage.getItem(ACTIVE_JOB_KEY)
+      let _ids: string[] = []
+      try { const v = JSON.parse(_raw ?? '[]'); _ids = Array.isArray(v) ? v : [String(v)] } catch { _ids = _raw ? [_raw] : [] }
+      if (!_ids.includes(data.job_id)) _ids.push(data.job_id)
+      localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(_ids))
       onPipelineStarted?.(data.job_id)
     } catch (e) {
       alert(e instanceof Error ? e.message : '오류 발생')
@@ -414,13 +458,110 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
     }
   }
 
+  async function updateTask(taskId: string) {
+    setSavingTask(true)
+    try {
+      const res = await fetch(`${API_BASE}/api/tasks/${taskId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          description: editDraft.description,
+          acceptance_criteria: editDraft.criteria,
+          tasks_path: config.tasksPath,
+        }),
+      })
+      if (!res.ok) throw new Error('저장 실패')
+      const updated = await res.json()
+      setTasks(prev => prev.map(t => t.id === taskId ? { ...t, description: updated.description, acceptance_criteria: updated.acceptance_criteria } : t))
+      setEditingTaskId(null)
+    } catch (e) {
+      alert(e instanceof Error ? e.message : '저장 실패')
+    } finally {
+      setSavingTask(false)
+    }
+  }
+
+  async function rerunTask(taskId: string) {
+    if (!project) return
+    setRerunningTaskId(taskId)
+    try {
+      const res = await fetch(`${API_BASE}/api/pipeline/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tasks_path: projectTasksPath(project),
+          repo_path: project.rootDir,
+          base_branch: project.baseBranch ?? 'main',
+          task_id: taskId,
+          no_pr: false,
+          discord_channel_id: project.discordChannelId ?? null,
+          auto_merge: autoMerge,
+        }),
+      })
+      if (!res.ok) throw new Error('재실행 시작 실패')
+      const data = await res.json()
+      if (data.discord_channel_id && data.discord_channel_id !== project.discordChannelId) {
+        onDiscordChannelCreated?.(data.discord_channel_id)
+      }
+      onPipelineStarted?.(data.job_id)
+    } catch (e) {
+      alert(e instanceof Error ? e.message : '재실행 실패')
+    } finally {
+      setRerunningTaskId(null)
+    }
+  }
+
+  const openContextDoc = async (name: string) => {
+    try {
+      const repoPath = project?.rootDir ?? '.'
+      const res = await fetch(`${API_BASE}/api/utils/context-docs/${encodeURIComponent(name)}?repo_path=${encodeURIComponent(repoPath)}`)
+      const data = await res.json()
+      setSelectedMilestone(null)
+      setSelectedWeekly(null)
+      setSelectedContextDoc({ name, content: data.content })
+    } catch { /* ignore */ }
+  }
+
   const openMilestone = async (filename: string) => {
     try {
       const q = buildQuery(config)
       const res = await fetch(`${API_BASE}/api/dashboard/milestones/${filename}?${q}`)
       const data = await res.json()
+      setSelectedWeekly(null)
       setSelectedMilestone({ filename, content: data.content })
     } catch { /* ignore */ }
+  }
+
+  const openWeeklyReport = async (year: number, week: number) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/reports/weekly/${year}/${week}`)
+      const data = await res.json()
+      setSelectedMilestone(null)
+      setSelectedWeekly({ year, week, content: data.content })
+    } catch { /* ignore */ }
+  }
+
+  const generateWeeklyReport = async () => {
+    setGeneratingWeekly(true)
+    try {
+      const res = await fetch(`${API_BASE}/api/reports/weekly`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      if (!res.ok) throw new Error('생성 실패')
+      const data = await res.json()
+      setWeeklyReports(prev => {
+        const filtered = prev.filter(r => !(r.year === data.year && r.week === data.week))
+        return [{ year: data.year, week: data.week, path: data.path }, ...filtered]
+      })
+      setSelectedMilestone(null)
+      setSelectedWeekly({ year: data.year, week: data.week, content: data.content })
+    } catch (e) {
+      alert(e instanceof Error ? e.message : '주간 보고서 생성 실패')
+    } finally {
+      setGeneratingWeekly(false)
+    }
   }
 
   const m = summary?.metrics
@@ -644,63 +785,133 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
                         {/* 펼쳐진 세부 내용 */}
                         {expanded && (
                           <div className="px-10 pb-4 pt-1 bg-gray-50 dark:bg-zinc-900/60 space-y-3 text-xs">
-                            {/* description */}
-                            {task.description && (
-                              <div>
-                                <p className="text-gray-500 dark:text-zinc-400 font-semibold mb-0.5">설명</p>
-                                <p className="text-gray-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap">{task.description}</p>
-                              </div>
-                            )}
-                            {/* acceptance_criteria */}
-                            {task.acceptance_criteria?.length > 0 && (
-                              <div>
-                                <p className="text-gray-500 dark:text-zinc-400 font-semibold mb-1">수락 기준</p>
-                                <ul className="space-y-0.5">
-                                  {task.acceptance_criteria.map((c, i) => (
-                                    <li key={i} className="flex gap-1.5 text-gray-700 dark:text-zinc-300">
-                                      <span className="text-gray-400 dark:text-zinc-500 flex-shrink-0">·</span>
-                                      <span>{c}</span>
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
-                            )}
-                            {/* depends_on */}
-                            {task.depends_on?.length > 0 && (
-                              <div>
-                                <p className="text-gray-500 dark:text-zinc-400 font-semibold mb-1">의존성</p>
-                                <div className="flex flex-wrap gap-1">
-                                  {task.depends_on.map(dep => (
-                                    <span key={dep} className="font-mono bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 px-1.5 py-0.5 rounded">
-                                      {dep}
-                                    </span>
-                                  ))}
+                            {editingTaskId === task.id ? (
+                              /* 편집 모드 */
+                              <>
+                                <div>
+                                  <p className="text-gray-500 dark:text-zinc-400 font-semibold mb-1">설명</p>
+                                  <textarea
+                                    value={editDraft.description}
+                                    onChange={e => setEditDraft(prev => ({ ...prev, description: e.target.value }))}
+                                    rows={4}
+                                    className="w-full rounded border border-gray-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 px-2 py-1.5 text-xs leading-relaxed resize-y focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                  />
                                 </div>
-                              </div>
-                            )}
-                            {/* failure_reason */}
-                            {task.failure_reason && (
-                              <div>
-                                <p className="text-red-500 dark:text-red-400 font-semibold mb-0.5">실패 원인</p>
-                                {task.failure_reason.startsWith('[MAX_ITER]') && (
-                                  <p className="text-orange-600 dark:text-orange-400 text-xs font-semibold mb-1">
-                                    ⚠️ 에이전트가 최대 반복 횟수를 초과했습니다. 태스크를 더 작게 분할하세요.
-                                  </p>
+                                <div>
+                                  <p className="text-gray-500 dark:text-zinc-400 font-semibold mb-1">수락 기준</p>
+                                  <div className="space-y-1">
+                                    {editDraft.criteria.map((c, i) => (
+                                      <div key={i} className="flex gap-1.5">
+                                        <input
+                                          value={c}
+                                          onChange={e => setEditDraft(prev => ({ ...prev, criteria: prev.criteria.map((x, j) => j === i ? e.target.value : x) }))}
+                                          className="flex-1 rounded border border-gray-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                        />
+                                        <button
+                                          onClick={() => setEditDraft(prev => ({ ...prev, criteria: prev.criteria.filter((_, j) => j !== i) }))}
+                                          className="text-gray-400 hover:text-red-500 dark:hover:text-red-400 px-1"
+                                        >✕</button>
+                                      </div>
+                                    ))}
+                                    <button
+                                      onClick={() => setEditDraft(prev => ({ ...prev, criteria: [...prev.criteria, ''] }))}
+                                      className="text-blue-500 hover:text-blue-700 dark:hover:text-blue-300"
+                                    >+ 항목 추가</button>
+                                  </div>
+                                </div>
+                                <div className="flex gap-2 pt-1">
+                                  <button
+                                    onClick={() => updateTask(task.id)}
+                                    disabled={savingTask}
+                                    className="rounded px-3 py-1 bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                                  >{savingTask ? '저장 중…' : '저장'}</button>
+                                  <button
+                                    onClick={() => setEditingTaskId(null)}
+                                    className="rounded px-3 py-1 bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300 hover:bg-gray-300 dark:hover:bg-zinc-600 transition-colors"
+                                  >취소</button>
+                                </div>
+                              </>
+                            ) : (
+                              /* 읽기 모드 */
+                              <>
+                                {/* description */}
+                                {task.description && (
+                                  <div>
+                                    <p className="text-gray-500 dark:text-zinc-400 font-semibold mb-0.5">설명</p>
+                                    <p className="text-gray-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap">{task.description}</p>
+                                  </div>
                                 )}
-                                <p className="text-red-600 dark:text-red-400 leading-relaxed whitespace-pre-wrap">
-                                  {task.failure_reason.replace(/^\[MAX_ITER\]\s*/, '')}
-                                </p>
-                              </div>
-                            )}
-                            {/* report 상세 */}
-                            {task.report && (
-                              <div className="flex flex-wrap gap-4 pt-1 border-t border-gray-200 dark:border-zinc-700">
-                                <span className="text-gray-500 dark:text-zinc-400">테스트 <strong className="text-gray-700 dark:text-zinc-300">{task.report.test_count}</strong></span>
-                                <span className="text-gray-500 dark:text-zinc-400">재시도 <strong className="text-gray-700 dark:text-zinc-300">{task.report.retry_count}</strong></span>
-                                {task.report.completed_at && (
-                                  <span className="text-gray-500 dark:text-zinc-400">완료 <strong className="text-gray-700 dark:text-zinc-300">{task.report.completed_at}</strong></span>
+                                {/* acceptance_criteria */}
+                                {task.acceptance_criteria?.length > 0 && (
+                                  <div>
+                                    <p className="text-gray-500 dark:text-zinc-400 font-semibold mb-1">수락 기준</p>
+                                    <ul className="space-y-0.5">
+                                      {task.acceptance_criteria.map((c, i) => (
+                                        <li key={i} className="flex gap-1.5 text-gray-700 dark:text-zinc-300">
+                                          <span className="text-gray-400 dark:text-zinc-500 flex-shrink-0">·</span>
+                                          <span>{c}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
                                 )}
-                              </div>
+                                {/* depends_on */}
+                                {task.depends_on?.length > 0 && (
+                                  <div>
+                                    <p className="text-gray-500 dark:text-zinc-400 font-semibold mb-1">의존성</p>
+                                    <div className="flex flex-wrap gap-1">
+                                      {task.depends_on.map(dep => (
+                                        <span key={dep} className="font-mono bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 px-1.5 py-0.5 rounded">
+                                          {dep}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                                {/* failure_reason */}
+                                {task.failure_reason && (
+                                  <div>
+                                    <p className="text-red-500 dark:text-red-400 font-semibold mb-0.5">실패 원인</p>
+                                    {task.failure_reason.startsWith('[MAX_ITER]') && (
+                                      <p className="text-orange-600 dark:text-orange-400 text-xs font-semibold mb-1">
+                                        ⚠️ 에이전트가 최대 반복 횟수를 초과했습니다. 태스크를 더 작게 분할하세요.
+                                      </p>
+                                    )}
+                                    <p className="text-red-600 dark:text-red-400 leading-relaxed whitespace-pre-wrap">
+                                      {task.failure_reason.replace(/^\[MAX_ITER\]\s*/, '')}
+                                    </p>
+                                  </div>
+                                )}
+                                {/* report 상세 */}
+                                {task.report && (
+                                  <div className="flex flex-wrap gap-4 pt-1 border-t border-gray-200 dark:border-zinc-700">
+                                    <span className="text-gray-500 dark:text-zinc-400">테스트 <strong className="text-gray-700 dark:text-zinc-300">{task.report.test_count}</strong></span>
+                                    <span className="text-gray-500 dark:text-zinc-400">재시도 <strong className="text-gray-700 dark:text-zinc-300">{task.report.retry_count}</strong></span>
+                                    {task.report.completed_at && (
+                                      <span className="text-gray-500 dark:text-zinc-400">완료 <strong className="text-gray-700 dark:text-zinc-300">{task.report.completed_at}</strong></span>
+                                    )}
+                                  </div>
+                                )}
+                                {/* 실패 태스크 액션 */}
+                                {task.status === 'failed' && (
+                                  <div className="flex gap-2 pt-2 border-t border-gray-200 dark:border-zinc-700">
+                                    <button
+                                      onClick={() => {
+                                        setEditDraft({ description: task.description ?? '', criteria: [...(task.acceptance_criteria ?? [])] })
+                                        setEditingTaskId(task.id)
+                                      }}
+                                      className="rounded px-3 py-1 bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300 hover:bg-gray-300 dark:hover:bg-zinc-600 transition-colors"
+                                    >✏️ 수정</button>
+                                    {project && (
+                                      <button
+                                        onClick={() => rerunTask(task.id)}
+                                        disabled={rerunningTaskId === task.id}
+                                        className="rounded px-3 py-1 bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                                      >{rerunningTaskId === task.id ? '시작 중…' : '▶ 재실행'}</button>
+                                    )}
+                                  </div>
+                                )}
+                              </>
                             )}
                           </div>
                         )}
@@ -708,6 +919,41 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
                     )
                   })}
                 </div>
+              </div>
+
+              {/* 컨텍스트 문서 */}
+              <div>
+                <h2 className="text-sm font-semibold text-gray-700 dark:text-zinc-300 mb-3">컨텍스트 문서</h2>
+                {contextDocs.length === 0 ? (
+                  <p className="text-sm text-gray-400 dark:text-zinc-500">
+                    컨텍스트 문서가 없습니다.
+                    <span className="block text-xs mt-0.5 font-mono">{repoPathForContext}/data/context/</span>
+                  </p>
+                ) : (
+                  <div className="border border-gray-200 dark:border-zinc-700 rounded-xl overflow-hidden divide-y divide-gray-100 dark:divide-zinc-800">
+                    {contextDocs.map(doc => (
+                      <button
+                        key={doc.name}
+                        onClick={() => openContextDoc(doc.name)}
+                        className={`w-full text-left flex items-center justify-between px-4 py-2.5 hover:bg-gray-50 dark:hover:bg-zinc-800/50 transition-colors ${
+                          selectedContextDoc?.name === doc.name ? 'bg-blue-50 dark:bg-blue-900/20' : ''
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-gray-400 dark:text-zinc-500 flex-shrink-0">
+                            <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+                              <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
+                            </svg>
+                          </span>
+                          <span className="text-sm text-gray-800 dark:text-zinc-200 font-mono truncate">{doc.name}</span>
+                        </div>
+                        <span className="text-xs text-gray-400 dark:text-zinc-500 flex-shrink-0 ml-2">
+                          {doc.size < 1024 ? `${doc.size}B` : `${(doc.size / 1024).toFixed(1)}KB`}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* 마일스톤 보고서 목록 */}
@@ -730,19 +976,64 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
                   )}
                 </div>
               </div>
+
+              {/* 주간 보고서 */}
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <h2 className="text-sm font-semibold text-gray-700 dark:text-zinc-300">주간 보고서</h2>
+                  <button
+                    onClick={generateWeeklyReport}
+                    disabled={generatingWeekly}
+                    className="text-xs px-3 py-1.5 rounded-lg border border-blue-300 dark:border-blue-700 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+                  >
+                    {generatingWeekly ? (
+                      <>
+                        <span className="inline-block w-3 h-3 border border-blue-500 border-t-transparent rounded-full animate-spin" />
+                        생성 중…
+                      </>
+                    ) : '+ 이번 주 생성'}
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  {weeklyReports.length === 0 ? (
+                    <p className="text-sm text-gray-400 dark:text-zinc-500">주간 보고서가 없습니다.</p>
+                  ) : (
+                    weeklyReports.map(r => (
+                      <button
+                        key={`${r.year}-W${r.week}`}
+                        onClick={() => openWeeklyReport(r.year, r.week)}
+                        className={`w-full text-left flex items-center justify-between px-4 py-3 rounded-xl border transition-colors ${
+                          selectedWeekly?.year === r.year && selectedWeekly?.week === r.week
+                            ? 'border-blue-400 dark:border-blue-600 bg-blue-50 dark:bg-blue-900/20'
+                            : 'border-gray-200 dark:border-zinc-700 hover:bg-gray-50 dark:hover:bg-zinc-800'
+                        }`}
+                      >
+                        <span className="text-sm text-gray-800 dark:text-zinc-200 font-medium">
+                          {r.year}년 {r.week}주차
+                        </span>
+                        <span className="text-xs text-blue-500">열기 →</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </div>
             </>
           )}
         </div>
 
-        {/* 마일스톤 보고서 뷰어 */}
-        {selectedMilestone && (
+        {/* 우측 패널: 마일스톤 / 주간 보고서 / 컨텍스트 문서 뷰어 */}
+        {(selectedMilestone || selectedWeekly || selectedContextDoc) && (
           <div className="w-96 border-l border-gray-200 dark:border-zinc-700 flex flex-col">
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-zinc-700 flex-shrink-0">
               <span className="text-sm font-semibold text-gray-700 dark:text-zinc-300 truncate">
-                {selectedMilestone.filename}
+                {selectedMilestone
+                  ? selectedMilestone.filename
+                  : selectedWeekly
+                  ? `${selectedWeekly.year}년 ${selectedWeekly.week}주차 보고서`
+                  : selectedContextDoc!.name}
               </span>
               <button
-                onClick={() => setSelectedMilestone(null)}
+                onClick={() => { setSelectedMilestone(null); setSelectedWeekly(null); setSelectedContextDoc(null) }}
                 className="text-gray-400 hover:text-gray-600 dark:text-zinc-500 dark:hover:text-zinc-300 ml-2 flex-shrink-0"
               >
                 <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -752,7 +1043,11 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
             </div>
             <div className="flex-1 overflow-y-auto p-4">
               <pre className="text-xs text-gray-700 dark:text-zinc-300 whitespace-pre-wrap font-sans leading-relaxed">
-                {selectedMilestone.content}
+                {selectedMilestone
+                  ? selectedMilestone.content
+                  : selectedWeekly
+                  ? selectedWeekly.content
+                  : selectedContextDoc!.content}
               </pre>
             </div>
           </div>

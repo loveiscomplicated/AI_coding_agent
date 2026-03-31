@@ -114,6 +114,7 @@ class DockerTestRunner:
                     "--memory", "512m",             # 메모리 제한
                     "--cpus", "1",
                     "-v", f"{workspace_dir}:/workspace:ro",
+                    "-e", "PYTHONPATH=/workspace",  # src/ 패키지 import 경로 설정
                     self.image,
                 ],
                 capture_output=True,

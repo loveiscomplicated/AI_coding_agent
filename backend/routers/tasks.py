@@ -176,6 +176,33 @@ def get_task(task_id: str, tasks_path: str = "data/tasks.yaml") -> dict:
     raise HTTPException(status_code=404, detail=f"태스크 '{task_id}'를 찾을 수 없습니다.")
 
 
+class PatchTaskRequest(BaseModel):
+    description: str | None = None
+    acceptance_criteria: list[str] | None = None
+    tasks_path: str = "data/tasks.yaml"
+
+
+@router.patch("/tasks/{task_id}")
+def patch_task(task_id: str, body: PatchTaskRequest) -> dict:
+    """특정 태스크의 description/acceptance_criteria를 부분 업데이트한다."""
+    path = Path(body.tasks_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="tasks 파일을 찾을 수 없습니다.")
+    try:
+        tasks = load_tasks(path)
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    for task in tasks:
+        if task.id == task_id:
+            if body.description is not None:
+                task.description = body.description
+            if body.acceptance_criteria is not None:
+                task.acceptance_criteria = body.acceptance_criteria
+            save_tasks(tasks, path)
+            return task.to_dict()
+    raise HTTPException(status_code=404, detail=f"태스크 '{task_id}'를 찾을 수 없습니다.")
+
+
 class SaveTasksRequest(BaseModel):
     tasks: list[dict]
     tasks_path: str = "data/tasks.yaml"

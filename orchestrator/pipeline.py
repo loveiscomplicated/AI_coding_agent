@@ -39,7 +39,7 @@ from orchestrator.workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 3
+MAX_RETRIES = 2
 
 
 # ── 결과 데이터 클래스 ────────────────────────────────────────────────────────
@@ -98,13 +98,15 @@ class TDDPipeline:
         implementer_llm=None,
         test_runner: DockerTestRunner | None = None,
         max_retries: int = MAX_RETRIES,
-        max_iterations: int = 40,
+        max_iterations: int = 15,
+        reviewer_max_iterations: int = 5,
     ):
         self.agent_llm = agent_llm
         self.implementer_llm = implementer_llm or agent_llm
         self.test_runner = test_runner or DockerTestRunner()
         self.max_retries = max_retries
         self.max_iterations = max_iterations
+        self.reviewer_max_iterations = reviewer_max_iterations
 
     # ── 공개 인터페이스 ───────────────────────────────────────────────────────
 
@@ -192,6 +194,7 @@ class TDDPipeline:
             llm=self.implementer_llm,
             role=IMPLEMENTER,
             workspace_dir=workspace.path,
+            max_iterations=self.max_iterations,
         )
         prompt = _build_implementer_prompt(task, workspace)
         logger.debug("[%s] Implementer 시작 (retry=%d)", task.id, task.retry_count)
@@ -207,6 +210,7 @@ class TDDPipeline:
             llm=self.agent_llm,
             role=REVIEWER,
             workspace_dir=workspace.path,
+            max_iterations=self.reviewer_max_iterations,
         )
         prompt = _build_reviewer_prompt(task, workspace, docker_result)
         logger.debug("[%s] Reviewer 시작", task.id)
@@ -214,6 +218,18 @@ class TDDPipeline:
 
 
 # ── 프롬프트 빌더 ─────────────────────────────────────────────────────────────
+
+
+def _context_hint(workspace: WorkspaceManager) -> str:
+    """context/ 디렉토리가 있으면 참조 안내 문자열을 반환한다."""
+    context_dir = workspace.path / "context"
+    if not context_dir.exists():
+        return ""
+    docs = sorted(f.name for f in context_dir.iterdir() if f.is_file())
+    if not docs:
+        return ""
+    doc_list = ", ".join(f"`context/{d}`" for d in docs)
+    return f"\n상세 스펙·아키텍처 문서: {doc_list} — 구현 전에 참조하세요.\n"
 
 
 def _build_test_writer_prompt(task: Task, workspace: WorkspaceManager) -> str:
@@ -234,7 +250,7 @@ def _build_test_writer_prompt(task: Task, workspace: WorkspaceManager) -> str:
 ## 워크스페이스 경로
 
 `{workspace.path}`
-{structure_hint}
+{structure_hint}{_context_hint(workspace)}
 `src/` 에 있는 기존 코드를 먼저 확인하고,
 `tests/` 에 이 태스크를 검증하는 pytest 테스트를 작성하세요.
 구현이 없으므로 테스트는 실행 시 실패해야 합니다 (Red 단계).
@@ -259,7 +275,7 @@ def _build_implementer_prompt(task: Task, workspace: WorkspaceManager) -> str:
 ## 워크스페이스 경로
 
 `{workspace.path}`
-{structure_hint}
+{structure_hint}{_context_hint(workspace)}
 `tests/` 에 있는 테스트를 먼저 읽고,
 `src/` 에 테스트를 **모두** 통과하는 구현을 작성하세요.
 """

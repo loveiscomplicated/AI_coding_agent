@@ -106,6 +106,8 @@ class ReactLoop:
         on_tool_result=None,   # Callable[[ToolResult], None] — CLI 훅
         on_tool_approval=None, # Callable[[ToolCall], bool] — 승인 요청 훅
         on_token: Callable[[str], None] | None = None,  # 스트리밍 콜백
+        max_tool_result_chars: int = 4000,  # 도구 결과 최대 문자 수 (초과 시 잘림)
+        history_window: int = 6,  # 보존할 최근 turn 쌍 수 (0=무제한)
     ):
         self.llm: BaseLLMClient = llm
         self.max_iterations = max_iterations
@@ -114,6 +116,8 @@ class ReactLoop:
         self.on_tool_result = on_tool_result
         self.on_tool_approval = on_tool_approval
         self.on_token = on_token
+        self.max_tool_result_chars = max_tool_result_chars
+        self.history_window = history_window
         self.TOOLS_SCHEMA = self.get_tools_schema()
 
     # ── 공개 인터페이스 ────────────────────────────────────────────────────────
@@ -265,7 +269,7 @@ class ReactLoop:
                     hard_stop = True
                     break
 
-            # tool_results를 다음 user 턴으로 추가
+            # tool_results를 다음 user 턴으로 추가 (결과가 너무 크면 잘라냄)
             messages.append(
                 Message(
                     role="user",
@@ -273,13 +277,16 @@ class ReactLoop:
                         {
                             "type": "tool_result",
                             "tool_use_id": tr.tool_use_id,
-                            "content": tr.content,
+                            "content": _truncate_tool_result(tr.content, self.max_tool_result_chars),
                             "is_error": tr.is_error,
                         }
                         for tr in tool_results
                     ],
                 )
             )
+
+            # 슬라이딩 윈도우: 초기 태스크 메시지 + 최근 history_window 쌍만 유지
+            messages = _trim_history(messages, self.history_window)
 
             elapsed = (time.perf_counter() - t0) * 1000
             iterations.append(
@@ -390,6 +397,37 @@ def _extract_text(content: list) -> str:
             text = getattr(block, "text", None) or block.get("text", "")
             parts.append(text)
     return "\n".join(parts).strip()
+
+
+def _truncate_tool_result(content: str, max_chars: int) -> str:
+    """
+    도구 결과 문자열이 max_chars를 초과하면 앞부분만 남기고 잘라낸다.
+    read_file 등으로 거대한 파일을 읽을 때 컨텍스트 폭발을 방지한다.
+    """
+    if max_chars <= 0 or len(content) <= max_chars:
+        return content
+    dropped = len(content) - max_chars
+    return content[:max_chars] + f"\n... [{dropped}자 생략 — 컨텍스트 한도 초과]"
+
+
+def _trim_history(messages: list[Message], window: int) -> list[Message]:
+    """
+    초기 태스크 메시지(messages[0])를 유지하고,
+    최근 window 쌍(assistant + tool_result)만 남긴다.
+
+    각 쌍은 2개 메시지(assistant 턴 + user/tool_result 턴)로 구성되므로
+    보존 기준은 1 + 2*window 개 메시지다.
+
+    window=0이면 트리밍하지 않는다.
+    """
+    if window <= 0:
+        return messages
+    max_msgs = 1 + 2 * window
+    if len(messages) <= max_msgs:
+        return messages
+    trimmed = len(messages) - max_msgs
+    logger.debug("히스토리 트리밍: %d개 메시지 드롭 (window=%d)", trimmed, window)
+    return [messages[0]] + messages[-(2 * window):]
 
 
 def _is_fatal_error(error_message: str) -> bool:

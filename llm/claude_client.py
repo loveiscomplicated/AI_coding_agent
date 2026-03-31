@@ -54,16 +54,69 @@ class ClaudeClient(BaseLLMClient):
             )
         self._client = anthropic.Anthropic(api_key=api_key)
 
+    def _build_system(self) -> list[dict] | str:
+        """
+        시스템 프롬프트를 prompt cache 형식으로 래핑한다.
+
+        cache_control을 붙이면 Anthropic이 시스템 프롬프트를 최대 5분간 캐시한다.
+        동일 에이전트 루프에서 반복 호출 시 input 토큰 비용을 ~90% 절감할 수 있다.
+        시스템 프롬프트가 없으면 빈 문자열 반환(omit과 동일하게 동작).
+        """
+        prompt = self.config.system_prompt
+        if not prompt:
+            return ""
+        return [{"type": "text", "text": prompt, "cache_control": {"type": "ephemeral"}}]
+
+    def _build_api_messages(self, messages: list[Message]) -> list[dict]:
+        """
+        system 메시지를 제외하고 API 형식으로 변환한다.
+        첫 번째 user 메시지(초기 태스크 프롬프트)에 cache_control을 추가해
+        반복 루프에서 동일한 태스크 설명이 재전송될 때 캐시 히트를 유도한다.
+        """
+        api_msgs = [m.to_dict() for m in messages if m.role != "system"]
+        if not api_msgs:
+            return api_msgs
+        first = api_msgs[0]
+        if first["role"] == "user" and isinstance(first["content"], str):
+            api_msgs = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": first["content"],
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                },
+                *api_msgs[1:],
+            ]
+        return api_msgs
+
+    def _apply_tools_cache(self, tools) -> list[dict]:
+        """
+        tools 목록 마지막 항목에 cache_control을 추가한다.
+        Anthropic은 마지막으로 표시된 항목까지 모든 tool 정의를 캐싱하므로
+        매 루프 호출마다 반복 전송되는 tool 스키마 토큰을 ~90% 절감한다.
+        """
+        if tools is omit or not tools:
+            return tools
+        tools = list(tools)
+        tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+        return tools
+
     def chat(self, messages: list[Message], **kwargs) -> LLMResponse:
         """동기 방식 채팅 (과부하·속도제한 시 지수 백오프 재시도)"""
+        api_messages = self._build_api_messages(messages)
+        tools = self._apply_tools_cache(kwargs.get("tools", omit))
         delay = _BASE_DELAY
         for attempt in range(_MAX_RETRIES + 1):
             try:
                 response = self._client.messages.create(
                     model=self.config.model,
-                    system=self.config.system_prompt,
-                    messages=[m.to_dict() for m in messages if m.role != "system"],  # type: ignore
-                    tools=kwargs.get("tools", omit),
+                    system=self._build_system(),
+                    messages=api_messages,  # type: ignore
+                    tools=tools,
                     max_tokens=self.config.max_tokens,
                     temperature=self.config.temperature,  # type: ignore
                 )
@@ -88,9 +141,9 @@ class ClaudeClient(BaseLLMClient):
         """스트리밍 방식 채팅 — CLI에서 실시간 출력할 때 사용"""
         with self._client.messages.stream(
             model=self.config.model,
-            system=self.config.system_prompt,
-            messages=[m.to_dict() for m in messages if m.role != "system"],  # type: ignore
-            tools=kwargs.get("TOOLS_SCHEMA", omit),
+            system=self._build_system(),
+            messages=self._build_api_messages(messages),  # type: ignore
+            tools=self._apply_tools_cache(kwargs.get("TOOLS_SCHEMA", omit)),
             max_tokens=self.config.max_tokens,
             temperature=self.config.temperature,  # type: ignore
         ) as stream:
