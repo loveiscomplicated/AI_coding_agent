@@ -20,14 +20,44 @@ Discord(또는 stdin)를 통해 사용자와 대화한다.
 from __future__ import annotations
 
 import logging
-import os
 import threading
 from datetime import datetime
 from pathlib import Path
 
-import anthropic
+from llm import BaseLLMClient, LLMConfig, Message, create_client
 
 logger = logging.getLogger(__name__)
+
+_conv_llm: BaseLLMClient | None = None
+_sum_llm: BaseLLMClient | None = None
+_llm_lock = threading.Lock()
+
+
+def set_llm(conv_llm: BaseLLMClient, sum_llm: BaseLLMClient) -> None:
+    """
+    대화용(conv_llm)과 요약용(sum_llm) LLM 클라이언트를 주입한다.
+    파이프라인 시작 시 run.py에서 호출.
+    """
+    global _conv_llm, _sum_llm
+    with _llm_lock:
+        _conv_llm = conv_llm
+        _sum_llm = sum_llm
+
+
+def create_hotline_llms(provider: str, model: str) -> tuple[BaseLLMClient, BaseLLMClient]:
+    """
+    hotline 모듈에서 사용할 LLM 클라이언트 쌍을 생성한다.
+
+    Returns:
+        (conv_llm, sum_llm) — 각각 올바른 시스템 프롬프트로 설정됨
+    """
+    conv_llm = create_client(
+        provider, LLMConfig(model=model, system_prompt=_CONVERSATION_SYSTEM, max_tokens=1024)
+    )
+    sum_llm = create_client(
+        provider, LLMConfig(model=model, system_prompt=_SUMMARIZE_SYSTEM, max_tokens=512)
+    )
+    return conv_llm, sum_llm
 
 _POLL_CHUNK = 60  # 폴링 단위 (초)
 _CONFIRM_KEYWORDS = {"확정", "결정", "confirm", "done", "완료"}
@@ -194,8 +224,13 @@ def _ask_via_discord(notifier, question: str) -> str:
 
         # 일반 대화 메시지 → 오케스트레이터 LLM이 응답
         conversation.append({"role": "user", "content": user_msg})
-        response = _orchestrator_reply(question, conversation)
-        conversation.append({"role": "assistant", "content": response})
+        try:
+            response = _orchestrator_reply(question, conversation)
+            conversation.append({"role": "assistant", "content": response})
+        except Exception as e:
+            logger.error("[ask_user] 오케스트레이터 응답 실패, conversation에 미추가: %s", e)
+            response = "⚠️ 일시적으로 응답을 생성할 수 없습니다. 계속 대화하시거나 `확정`/`알아서 해`를 입력해주세요."
+            # 실패한 응답은 conversation 히스토리에 추가하지 않음
 
         try:
             last_bot_message_id = notifier.send(response)
@@ -216,33 +251,48 @@ def _poll_forever(notifier, after_message_id: str) -> str:
         logger.debug("[ask_user] 아직 답변 없음 — 계속 대기 중")
 
 
+def _extract_text(response) -> str:
+    """LLMResponse에서 텍스트를 추출한다."""
+    for block in response.content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            return block["text"]
+        if hasattr(block, "type") and block.type == "text":
+            return block.text
+    return ""
+
+
 def _orchestrator_reply(question: str, conversation: list[dict]) -> str:
-    """오케스트레이터 LLM이 대화에 참여해 응답을 생성한다."""
-    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
-    context_msg = f"## 에이전트의 원래 질문\n\n{question}"
-    messages = [{"role": "user", "content": context_msg}] + [
-        {"role": m["role"], "content": m["content"]} for m in conversation
-    ]
-    # messages가 user로 시작하고 번갈아야 하므로, context_msg를 첫 user에 합침
-    # 실제로는 [context, user_1, ...] 구조라 user가 연속될 수 있음 → 합치기
-    merged: list[dict] = []
-    for m in messages:
-        if merged and merged[-1]["role"] == m["role"]:
-            merged[-1]["content"] += "\n\n" + m["content"]
-        else:
-            merged.append({"role": m["role"], "content": m["content"]})
+    """오케스트레이터 LLM이 대화에 참여해 응답을 생성한다.
+
+    multi-turn API 구조 대신 대화 내용을 단일 user 메시지에 인라인으로 넣어 전달한다.
+    GLM 계열 API가 multi-turn에서 1213 오류를 발생시키는 문제를 원천 회피한다.
+    """
+    with _llm_lock:
+        llm = _conv_llm
+    if llm is None:
+        return "(오케스트레이터 LLM 미초기화)"
+
+    # 대화 히스토리를 텍스트로 직렬화
+    history_lines: list[str] = []
+    for m in conversation[:-1]:  # 마지막 user 메시지는 별도로 처리
+        role_label = "사용자" if m["role"] == "user" else "봇"
+        history_lines.append(f"{role_label}: {m['content']}")
+
+    last_user_msg = conversation[-1]["content"] if conversation else ""
+
+    parts = [f"## 에이전트의 원래 질문\n\n{question}"]
+    if history_lines:
+        parts.append("## 지금까지의 대화\n\n" + "\n\n".join(history_lines))
+    parts.append(f"## 사용자의 새 메시지\n\n{last_user_msg}")
+
+    single_user_content = "\n\n---\n\n".join(parts)
 
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1024,
-            system=_CONVERSATION_SYSTEM,
-            messages=merged,
-        )
-        return response.content[0].text if response.content else "(응답 없음)"
+        response = llm.chat([Message(role="user", content=single_user_content)])
+        return _extract_text(response) or "(응답 없음)"
     except Exception as e:
         logger.error("[ask_user] 오케스트레이터 LLM 호출 실패: %s", e)
-        return f"(오케스트레이터 응답 오류: {e})"
+        raise RuntimeError("오케스트레이터 LLM 응답 생성 실패") from e
 
 
 def _synthesize_answer(question: str, conversation: list[dict]) -> str:
@@ -250,7 +300,15 @@ def _synthesize_answer(question: str, conversation: list[dict]) -> str:
     if not conversation:
         return "사용자가 대화 없이 확정을 입력했습니다. 최선의 판단으로 진행하세요."
 
-    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+    with _llm_lock:
+        llm = _sum_llm
+    if llm is None:
+        last_user = next(
+            (m["content"] for m in reversed(conversation) if m["role"] == "user"),
+            "답변 없음",
+        )
+        return last_user
+
     conversation_text = "\n".join(
         f"{'사용자' if m['role'] == 'user' else '오케스트레이터'}: {m['content']}"
         for m in conversation
@@ -261,16 +319,11 @@ def _synthesize_answer(question: str, conversation: list[dict]) -> str:
         f"위 대화에서 결정된 내용을 에이전트에게 전달할 답변으로 정리하세요."
     )
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=512,
-            system=_SUMMARIZE_SYSTEM,
-            messages=[{"role": "user", "content": user_msg}],
-        )
-        return response.content[0].text.strip() if response.content else "(요약 실패)"
+        response = llm.chat([Message(role="user", content=user_msg)])
+        text = _extract_text(response)
+        return text.strip() if text else "(요약 실패)"
     except Exception as e:
         logger.error("[ask_user] 답변 요약 LLM 호출 실패: %s", e)
-        # 폴백: 대화의 마지막 사용자 메시지를 그대로 사용
         last_user = next(
             (m["content"] for m in reversed(conversation) if m["role"] == "user"),
             "답변 없음",

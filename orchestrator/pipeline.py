@@ -26,20 +26,23 @@ TDDPipeline 은 단일 Task 를 받아 다음 순서로 실행한다:
 
 from __future__ import annotations
 
+import ast
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from agents.roles import TEST_WRITER, IMPLEMENTER, REVIEWER
 from agents.scoped_loop import ScopedReactLoop, ScopedResult
 from docker.runner import DockerTestRunner, RunResult
-from llm.base import StopReason
+from llm.base import Message, StopReason
 from orchestrator.task import Task, TaskStatus
 from orchestrator.workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 2
+MAX_REVIEW_RETRIES = 1   # Reviewer CHANGES_REQUESTED → Implementer 재시도 최대 횟수
 
 
 # ── 결과 데이터 클래스 ────────────────────────────────────────────────────────
@@ -98,6 +101,7 @@ class TDDPipeline:
         implementer_llm=None,
         test_runner: DockerTestRunner | None = None,
         max_retries: int = MAX_RETRIES,
+        max_review_retries: int = MAX_REVIEW_RETRIES,
         max_iterations: int = 15,
         reviewer_max_iterations: int = 5,
     ):
@@ -105,20 +109,32 @@ class TDDPipeline:
         self.implementer_llm = implementer_llm or agent_llm
         self.test_runner = test_runner or DockerTestRunner()
         self.max_retries = max_retries
+        self.max_review_retries = max_review_retries
         self.max_iterations = max_iterations
         self.reviewer_max_iterations = reviewer_max_iterations
 
     # ── 공개 인터페이스 ───────────────────────────────────────────────────────
 
-    def run(self, task: Task, workspace: WorkspaceManager) -> PipelineResult:
+    def run(
+        self,
+        task: Task,
+        workspace: WorkspaceManager,
+        on_progress=None,
+    ) -> PipelineResult:
         """
         태스크 전체 파이프라인을 실행한다.
         workspace 는 이미 create() 된 상태여야 한다.
+
+        on_progress : Callable[[dict], None] | None
+            단계별 진행 상황을 전달받을 콜백. run.py 의 emit 을 래핑해서 넣는다.
+            None 이면 아무것도 하지 않는다.
         """
+        _p = on_progress or (lambda e: None)
         logger.info("[%s] 파이프라인 시작", task.id)
 
         # ── Step 1: 테스트 작성 ───────────────────────────────────────────────
         task.status = TaskStatus.WRITING_TESTS
+        _p({"type": "step", "step": "test_writing", "message": "TestWriter: 테스트 작성 중…"})
         test_scoped = self._run_test_writer(task, workspace)
         if not test_scoped.succeeded:
             prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
@@ -126,50 +142,143 @@ class TDDPipeline:
 
         test_files = workspace.list_test_files()
         if not test_files:
-            return PipelineResult.failed(task, "TestWriter 가 tests/ 에 파일을 생성하지 않았습니다.")
+            # 모델이 write_file을 호출하지 않고 종료한 경우 — 즉시 1회 재시도
+            logger.warning("[%s] TestWriter 파일 미생성 — 재시도", task.id)
+            _p({"type": "step", "step": "test_writing_retry", "message": "TestWriter: 파일 미생성 — 재시도 중…"})
+            test_scoped = self._run_test_writer(task, workspace, retry=True)
+            if not test_scoped.succeeded:
+                prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
+                return PipelineResult.failed(task, f"{prefix}TestWriter 실패: {test_scoped.answer}")
+            test_files = workspace.list_test_files()
+            if not test_files:
+                return PipelineResult.failed(task, "TestWriter 가 tests/ 에 파일을 생성하지 않았습니다.")
+        _p({"type": "step", "step": "test_written",
+            "message": f"테스트 파일 생성: {', '.join(test_files)}"})
         logger.info("[%s] 테스트 파일 생성: %s", task.id, test_files)
 
-        # ── Step 2: 구현 + 테스트 실행 (재시도 루프) ─────────────────────────
-        docker_result: RunResult | None = None
-        for attempt in range(self.max_retries):
-            task.status = TaskStatus.IMPLEMENTING
-            impl_scoped = self._run_implementer(task, workspace)
-            if not impl_scoped.succeeded:
-                prefix = "[MAX_ITER] " if _is_max_iter(impl_scoped) else ""
-                return PipelineResult.failed(task, f"{prefix}Implementer 실패: {impl_scoped.answer}")
-
-            task.status = TaskStatus.RUNNING_TESTS
-            docker_result = self.test_runner.run(workspace.path)
-            logger.info(
-                "[%s] 테스트 실행 (시도 %d/%d): %s",
-                task.id, attempt + 1, self.max_retries, docker_result.summary,
+        # ── Step 1.5: 테스트 품질 게이트 (P2 정적 검증 + P3 커버리지) ────────
+        static_issues = _validate_tests_static(test_files, workspace)
+        missing_criteria = _check_criteria_coverage(task, test_files, workspace, self.agent_llm)
+        if static_issues or missing_criteria:
+            logger.warning(
+                "[%s] 테스트 품질 게이트 — 정적 이슈: %s | 미커버 기준: %s",
+                task.id, static_issues, missing_criteria,
             )
-
-            if docker_result.passed:
-                task.retry_count = attempt
-                break
-
-            task.retry_count = attempt + 1
-            task.last_error = docker_result.stdout
-            logger.warning("[%s] 테스트 실패, 재시도 %d회", task.id, task.retry_count)
-
-            if attempt == self.max_retries - 1:
+            issues_summary = "; ".join(
+                (static_issues or []) + [f"미커버: {c}" for c in (missing_criteria or [])]
+            )
+            _p({"type": "step", "step": "quality_gate",
+                "message": f"품질 게이트 재시도 — {issues_summary[:120]}"})
+            test_scoped = self._run_test_writer(
+                task, workspace,
+                static_issues=static_issues,
+                missing_criteria=missing_criteria,
+            )
+            if not test_scoped.succeeded:
+                prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
                 return PipelineResult.failed(
-                    task,
-                    f"테스트가 {self.max_retries}회 모두 실패했습니다.\n"
-                    f"마지막 오류:\n{docker_result.summary}",
+                    task, f"{prefix}TestWriter 품질 보완 실패: {test_scoped.answer}"
+                )
+            test_files = workspace.list_test_files()
+            if not test_files:
+                return PipelineResult.failed(task, "TestWriter 품질 게이트 후 파일 미생성")
+            _p({"type": "step", "step": "quality_gate_ok",
+                "message": f"품질 게이트 통과 — {', '.join(test_files)}"})
+            logger.info("[%s] 품질 게이트 통과 후 테스트 파일: %s", task.id, test_files)
+
+        # ── Step 2–3: 구현 → 테스트 → 리뷰 (리뷰 피드백 반영 재시도 포함) ────
+        docker_result: RunResult | None = None
+        review: ReviewResult | None = None
+        reviewer_feedback: str = ""
+
+        for review_attempt in range(self.max_review_retries + 1):
+            # 리뷰 재시도 시 이전 테스트 에러 초기화 (새 구현 시도가 기준)
+            if review_attempt > 0:
+                task.last_error = ""
+                task.retry_count = 0
+                _p({"type": "step", "step": "review_retry",
+                    "message": f"Reviewer 피드백 반영 — 재구현 시작 (리뷰 재시도 {review_attempt}/{self.max_review_retries})"})
+
+            # ── Step 2: 구현 + 테스트 실행 ───────────────────────────────────
+            docker_result = None
+            for attempt in range(self.max_retries):
+                task.status = TaskStatus.IMPLEMENTING
+                label = (
+                    f"Implementer: 재구현 중… (Reviewer 피드백 반영, 시도 {attempt + 1}/{self.max_retries})"
+                    if reviewer_feedback
+                    else f"Implementer: 구현 중… (시도 {attempt + 1}/{self.max_retries})"
+                )
+                _p({"type": "step", "step": "implementing", "message": label})
+                impl_scoped = self._run_implementer(
+                    task, workspace, reviewer_feedback=reviewer_feedback
+                )
+                if not impl_scoped.succeeded:
+                    prefix = "[MAX_ITER] " if _is_max_iter(impl_scoped) else ""
+                    return PipelineResult.failed(task, f"{prefix}Implementer 실패: {impl_scoped.answer}")
+
+                task.status = TaskStatus.RUNNING_TESTS
+                _p({"type": "step", "step": "docker_running", "message": "Docker 테스트 실행 중…"})
+                docker_result = self.test_runner.run(workspace.path, task.test_framework)
+                logger.info(
+                    "[%s] 테스트 실행 (시도 %d/%d): %s",
+                    task.id, attempt + 1, self.max_retries, docker_result.summary,
                 )
 
-        # ── Step 3: 코드 리뷰 ────────────────────────────────────────────────
-        task.status = TaskStatus.REVIEWING
-        review_scoped = self._run_reviewer(task, workspace, docker_result)
-        review = _parse_review(review_scoped.answer)
-        logger.info("[%s] 리뷰 결과: %s — %s", task.id, review.verdict, review.summary)
+                if docker_result.passed:
+                    task.retry_count = attempt
+                    _p({"type": "step", "step": "docker_pass",
+                        "message": f"테스트 통과 — {docker_result.summary}"})
+                    break
+
+                task.retry_count = attempt + 1
+                task.last_error = docker_result.stdout
+                logger.warning("[%s] 테스트 실패, 재시도 %d회", task.id, task.retry_count)
+                _p({"type": "step", "step": "docker_fail",
+                    "message": f"테스트 실패 — {docker_result.summary}"
+                               + (f" (재시도 {task.retry_count}/{self.max_retries})"
+                                  if task.retry_count < self.max_retries else "")})
+
+                if attempt == self.max_retries - 1:
+                    return PipelineResult.failed(
+                        task,
+                        f"테스트가 {self.max_retries}회 모두 실패했습니다.\n"
+                        f"마지막 오류:\n{docker_result.summary}",
+                    )
+
+            # ── Step 3: 코드 리뷰 ─────────────────────────────────────────────
+            task.status = TaskStatus.REVIEWING
+            _p({"type": "step", "step": "reviewing", "message": "Reviewer: 코드 검토 중…"})
+            review_scoped = self._run_reviewer(task, workspace, docker_result)
+            review = _parse_review(review_scoped.answer)
+            logger.info("[%s] 리뷰 결과: %s — %s", task.id, review.verdict, review.summary)
+
+            if review.approved:
+                _p({"type": "step", "step": "review_approved",
+                    "message": f"Reviewer APPROVED — {review.summary}"})
+                break
+
+            _p({"type": "step", "step": "review_rejected",
+                "message": f"Reviewer CHANGES_REQUESTED — {review.summary}"})
+
+            if review_attempt < self.max_review_retries:
+                # CHANGES_REQUESTED → 피드백을 Implementer에 전달하고 재시도
+                reviewer_feedback = review.details or review.summary
+                logger.warning(
+                    "[%s] Reviewer CHANGES_REQUESTED (리뷰 시도 %d/%d) — 피드백 반영 재구현\n  %s",
+                    task.id, review_attempt + 1, self.max_review_retries,
+                    reviewer_feedback[:200],
+                )
+            # 마지막 review_attempt이면 루프 자연 종료 → 아래 succeeded=False 처리
 
         task.status = TaskStatus.COMMITTING
+        failure_reason = (
+            "" if review.approved
+            else f"Reviewer CHANGES_REQUESTED: {review.summary}"
+        )
         return PipelineResult(
             task=task,
-            succeeded=True,
+            succeeded=review.approved,
+            failure_reason=failure_reason,
             test_result=docker_result,
             review=review,
             test_files=workspace.list_test_files(),
@@ -178,26 +287,51 @@ class TDDPipeline:
 
     # ── 개별 에이전트 실행 ────────────────────────────────────────────────────
 
-    def _run_test_writer(self, task: Task, workspace: WorkspaceManager) -> ScopedResult:
+    def _run_test_writer(
+        self,
+        task: Task,
+        workspace: WorkspaceManager,
+        retry: bool = False,
+        static_issues: list[str] | None = None,
+        missing_criteria: list[str] | None = None,
+    ) -> ScopedResult:
         loop = ScopedReactLoop(
             llm=self.agent_llm,
             role=TEST_WRITER,
             workspace_dir=workspace.path,
             max_iterations=self.max_iterations,
         )
-        prompt = _build_test_writer_prompt(task, workspace)
-        logger.debug("[%s] TestWriter 시작", task.id)
+        prompt = _build_test_writer_prompt(
+            task, workspace,
+            retry=retry,
+            static_issues=static_issues,
+            missing_criteria=missing_criteria,
+        )
+        logger.debug(
+            "[%s] TestWriter 시작 (retry=%s, static_issues=%d, missing=%d)",
+            task.id, retry,
+            len(static_issues or []),
+            len(missing_criteria or []),
+        )
         return loop.run(prompt)
 
-    def _run_implementer(self, task: Task, workspace: WorkspaceManager) -> ScopedResult:
+    def _run_implementer(
+        self,
+        task: Task,
+        workspace: WorkspaceManager,
+        reviewer_feedback: str = "",
+    ) -> ScopedResult:
         loop = ScopedReactLoop(
             llm=self.implementer_llm,
             role=IMPLEMENTER,
             workspace_dir=workspace.path,
             max_iterations=self.max_iterations,
         )
-        prompt = _build_implementer_prompt(task, workspace)
-        logger.debug("[%s] Implementer 시작 (retry=%d)", task.id, task.retry_count)
+        prompt = _build_implementer_prompt(task, workspace, reviewer_feedback=reviewer_feedback)
+        logger.debug(
+            "[%s] Implementer 시작 (retry=%d, reviewer_feedback=%s)",
+            task.id, task.retry_count, bool(reviewer_feedback),
+        )
         return loop.run(prompt)
 
     def _run_reviewer(
@@ -232,10 +366,42 @@ def _context_hint(workspace: WorkspaceManager) -> str:
     return f"\n상세 스펙·아키텍처 문서: {doc_list} — 구현 전에 참조하세요.\n"
 
 
-def _build_test_writer_prompt(task: Task, workspace: WorkspaceManager) -> str:
+def _build_test_writer_prompt(
+    task: Task,
+    workspace: WorkspaceManager,
+    retry: bool = False,
+    static_issues: list[str] | None = None,
+    missing_criteria: list[str] | None = None,
+) -> str:
     structure_hint = ""
     if (workspace.path / "PROJECT_STRUCTURE.md").exists():
         structure_hint = "\n`PROJECT_STRUCTURE.md` 로 전체 코드베이스 구조를 먼저 파악하세요.\n"
+
+    feedback_blocks: list[str] = []
+
+    if retry:
+        feedback_blocks.append(
+            "⚠️ **이전 시도에서 tests/ 에 파일을 생성하지 않았습니다.**\n"
+            "반드시 `write_file` 도구를 호출하여 `tests/` 디렉토리에 테스트 파일을 작성하세요.\n"
+            "설명만 하고 도구를 호출하지 않으면 실패로 처리됩니다."
+        )
+
+    if static_issues:
+        issue_list = "\n".join(f"  - {i}" for i in static_issues)
+        feedback_blocks.append(
+            f"⚠️ **정적 검증 실패 — 아래 문제를 반드시 수정하세요:**\n{issue_list}\n"
+            "각 테스트 함수에 실제 assertion (`assert`, `assertEqual`, `expect(...)` 등)이 있어야 합니다."
+        )
+
+    if missing_criteria:
+        crit_list = "\n".join(f"  - {c}" for c in missing_criteria)
+        feedback_blocks.append(
+            f"⚠️ **수락 기준 미커버 — 아래 항목을 커버하는 테스트를 추가하세요:**\n{crit_list}"
+        )
+
+    feedback_section = ""
+    if feedback_blocks:
+        feedback_section = "\n## 이전 시도 피드백\n\n" + "\n\n".join(feedback_blocks) + "\n"
 
     return f"""## 태스크
 
@@ -250,14 +416,18 @@ def _build_test_writer_prompt(task: Task, workspace: WorkspaceManager) -> str:
 ## 워크스페이스 경로
 
 `{workspace.path}`
-{structure_hint}{_context_hint(workspace)}
+{structure_hint}{_context_hint(workspace)}{feedback_section}
 `src/` 에 있는 기존 코드를 먼저 확인하고,
-`tests/` 에 이 태스크를 검증하는 pytest 테스트를 작성하세요.
+`tests/` 에 **{task.test_framework}** 테스트를 작성하세요.
 구현이 없으므로 테스트는 실행 시 실패해야 합니다 (Red 단계).
 """
 
 
-def _build_implementer_prompt(task: Task, workspace: WorkspaceManager) -> str:
+def _build_implementer_prompt(
+    task: Task,
+    workspace: WorkspaceManager,
+    reviewer_feedback: str = "",
+) -> str:
     structure_hint = ""
     if (workspace.path / "PROJECT_STRUCTURE.md").exists():
         structure_hint = "\n`PROJECT_STRUCTURE.md` 로 전체 코드베이스 구조를 먼저 파악하고, 재사용 가능한 모듈이 있는지 확인하세요.\n"
@@ -279,8 +449,18 @@ def _build_implementer_prompt(task: Task, workspace: WorkspaceManager) -> str:
 `tests/` 에 있는 테스트를 먼저 읽고,
 `src/` 에 테스트를 **모두** 통과하는 구현을 작성하세요.
 """
+    if reviewer_feedback:
+        base += f"""
+## Reviewer 피드백 (이전 구현에서 지적된 사항)
+
+```
+{reviewer_feedback[:2000]}
+```
+
+위 피드백을 반드시 반영하세요. 테스트를 통과하는 것뿐 아니라 코드 품질 문제도 함께 수정해야 합니다.
+"""
+
     if task.last_error:
-        # 긴 오류 로그는 앞 2000자만 포함 (컨텍스트 절약)
         truncated = task.last_error[:2000]
         if len(task.last_error) > 2000:
             truncated += "\n... (이하 생략)"
@@ -322,6 +502,159 @@ def _build_reviewer_prompt(
 
 
 # ── 헬퍼 ─────────────────────────────────────────────────────────────────────
+
+
+# ── 테스트 품질 게이트 ────────────────────────────────────────────────────────
+
+
+def _validate_tests_static(test_files: list[str], workspace: WorkspaceManager) -> list[str]:
+    """
+    테스트 파일을 정적 분석해 품질 문제를 반환한다. 빈 리스트 = 이상 없음.
+
+    Python : ast 모듈로 test_ 함수에 assertion 유무 확인
+    JS/TS  : 정규식으로 expect() / assert() 유무 확인
+    """
+    issues: list[str] = []
+    for fname in test_files:
+        path = workspace.path / fname
+        if not path.exists():
+            continue
+        src = path.read_text(encoding="utf-8", errors="replace")
+        suffix = path.suffix.lower()
+        if suffix == ".py":
+            issues.extend(_validate_python_test(src, fname))
+        elif suffix in (".js", ".ts", ".jsx", ".tsx"):
+            issues.extend(_validate_js_test(src, fname))
+    return issues
+
+
+def _validate_python_test(src: str, fname: str) -> list[str]:
+    issues: list[str] = []
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as e:
+        return [f"{fname}: 문법 오류 — {e}"]
+
+    _ASSERT_ATTRS = {
+        "assertEqual", "assertNotEqual", "assertTrue", "assertFalse",
+        "assertIs", "assertIsNot", "assertIsNone", "assertIsNotNone",
+        "assertIn", "assertNotIn", "assertRaises", "assertRaisesRegex",
+        "assertGreater", "assertGreaterEqual", "assertLess", "assertLessEqual",
+        "assertAlmostEqual", "assertRegex", "assertCountEqual",
+        "assert_called", "assert_called_once", "assert_called_with",
+        "assert_called_once_with", "assert_any_call", "assert_not_called",
+    }
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if not node.name.startswith("test"):
+            continue
+        has_assertion = False
+        for child in ast.walk(node):
+            if isinstance(child, ast.Assert):
+                has_assertion = True
+                break
+            if isinstance(child, ast.Call):
+                func = child.func
+                if isinstance(func, ast.Name) and func.id in _ASSERT_ATTRS:
+                    has_assertion = True
+                    break
+                if isinstance(func, ast.Attribute) and func.attr in _ASSERT_ATTRS:
+                    has_assertion = True
+                    break
+                # pytest.raises / pytest.approx / pytest.warns
+                if (
+                    isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "pytest"
+                ):
+                    has_assertion = True
+                    break
+        if not has_assertion:
+            issues.append(f"{fname}::{node.name} — assertion 없음 (빈 테스트 또는 pass만 있음)")
+    return issues
+
+
+def _validate_js_test(src: str, fname: str) -> list[str]:
+    issues: list[str] = []
+    # test('name', () => { ... }) 또는 it('name', async () => { ... })
+    for m in re.finditer(
+        r'(?:test|it)\s*\(\s*["\'](.+?)["\']\s*,\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{',
+        src,
+    ):
+        name = m.group(1)
+        # 본문 추출: 여는 { 이후 중첩 괄호를 따라 닫는 } 찾기
+        start = m.end() - 1  # points at '{'
+        depth = 0
+        body = ""
+        for i in range(start, len(src)):
+            ch = src[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    body = src[start + 1:i]
+                    break
+        has_assertion = bool(
+            re.search(r"expect\s*\(|assert\s*\(|should\.|\.toBe|\.toEqual|\.toThrow|\.toHaveBeenCalled", body)
+        )
+        if not has_assertion:
+            issues.append(f"{fname}::'{name}' — assertion 없음")
+    return issues
+
+
+def _check_criteria_coverage(
+    task: Task,
+    test_files: list[str],
+    workspace: WorkspaceManager,
+    llm,
+) -> list[str]:
+    """
+    수락 기준 각 항목이 테스트에서 커버되는지 경량 LLM 으로 확인한다.
+    미커버 항목 목록을 반환한다. 빈 리스트 = 모두 커버됨.
+    LLM 호출 실패 시 [] 를 반환해 파이프라인을 차단하지 않는다.
+    """
+    test_parts: list[str] = []
+    for fname in test_files:
+        path = workspace.path / fname
+        if path.exists():
+            content = path.read_text(encoding="utf-8", errors="replace")[:3000]
+            test_parts.append(f"### {fname}\n```\n{content}\n```")
+    if not test_parts:
+        return []
+
+    prompt = (
+        "다음 수락 기준 각 항목이 아래 테스트 코드에서 커버되는지 확인하세요.\n\n"
+        f"## 수락 기준\n\n{task.acceptance_criteria_text()}\n\n"
+        f"## 테스트 코드\n\n{''.join(test_parts)}\n\n"
+        "## 지시\n\n"
+        "각 수락 기준 항목을 검토한 뒤, **커버되지 않은 항목만** 다음 형식으로 출력하세요:\n"
+        "MISSING: <항목 설명>\n\n"
+        "모든 항목이 커버되면: MISSING: 없음\n"
+        "불확실한 경우 커버된 것으로 간주하세요."
+    )
+    try:
+        response = llm.chat([Message(role="user", content=prompt)])
+        if isinstance(response.content, str):
+            raw = response.content
+        else:
+            raw = " ".join(
+                b.get("text", "") for b in response.content if b.get("type") == "text"
+            )
+    except Exception:
+        logger.warning("[pipeline] criteria coverage 확인 실패 — 건너뜀")
+        return []
+
+    missing: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.upper().startswith("MISSING:"):
+            item = stripped.split(":", 1)[1].strip()
+            if item and item.lower() not in ("없음", "none", "없음.", "n/a"):
+                missing.append(item)
+    return missing
 
 
 def _is_max_iter(scoped: ScopedResult) -> bool:

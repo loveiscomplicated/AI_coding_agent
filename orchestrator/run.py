@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import unicodedata
 
 logger = logging.getLogger(__name__)
 import threading
@@ -30,12 +31,23 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from docker.runner import DockerTestRunner
 from hotline.notifier import DiscordNotifier
-from tools.hotline_tools import set_notifier as _set_hotline_notifier, set_repo_path as _set_hotline_repo_path
-from llm import LLMConfig, create_client
+from tools.hotline_tools import (
+    set_notifier as _set_hotline_notifier,
+    set_repo_path as _set_hotline_repo_path,
+    set_llm as _set_hotline_llm,
+    create_hotline_llms,
+)
+from llm import LLMConfig, Message, BaseLLMClient, create_client
 from orchestrator.git_workflow import GitWorkflow, GitWorkflowError, check_prerequisites
 from orchestrator.merge_agent import MergeAgent
 from orchestrator.milestone import generate_milestone_report
-from orchestrator.intervention import analyze as orch_analyze, generate_report as orch_report, save_report as orch_save_report
+from orchestrator.intervention import (
+    analyze as orch_analyze,
+    generate_report as orch_report,
+    save_report as orch_save_report,
+    set_llm as _set_intervention_llm,
+    create_intervention_llms,
+)
 from orchestrator.pipeline import TDDPipeline
 from orchestrator.report import build_report, load_reports, save_report
 from orchestrator.task import Task, TaskStatus, load_tasks, save_tasks
@@ -138,7 +150,10 @@ class PauseController:
     _RESUME_KEYWORDS = {"계속", "resume", "재개"}
     _STOP_KEYWORDS   = {"중단", "stop", "종료", "abort"}
 
+    _PAUSE_RESUME_POLL = 30   # wait_if_paused 타임아웃 단위(초) — 루프로 재확인
+
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self._paused = False
         self._stopped = False
         self._resume_event = threading.Event()
@@ -154,43 +169,54 @@ class PauseController:
             처리된 명령 문자열('paused'|'resumed'|'stopped'), 무관한 메시지는 None.
         """
         lower = text.lower().strip()
-        if lower in self._PAUSE_KEYWORDS:
-            self._paused = True
-            self._resume_event.clear()
-            logger.info("PauseController: 일시정지 요청")
-            return "paused"
-        if lower in self._RESUME_KEYWORDS:
-            if self._paused:
-                self._paused = False
-                self._resume_event.set()
-                logger.info("PauseController: 재개 요청")
-                return "resumed"
-        if lower in self._STOP_KEYWORDS:
-            self._stopped = True
-            self._resume_event.set()  # 대기 중인 wait_if_paused 해제
-            logger.info("PauseController: 중단 요청")
-            return "stopped"
+        with self._lock:
+            if lower in self._PAUSE_KEYWORDS:
+                self._paused = True
+                self._resume_event.clear()
+                logger.info("PauseController: 일시정지 요청")
+                return "paused"
+            if lower in self._RESUME_KEYWORDS:
+                if self._paused:
+                    self._paused = False
+                    self._resume_event.set()
+                    logger.info("PauseController: 재개 요청")
+                    return "resumed"
+            if lower in self._STOP_KEYWORDS:
+                self._stopped = True
+                self._resume_event.set()  # 대기 중인 wait_if_paused 해제
+                logger.info("PauseController: 중단 요청")
+                return "stopped"
         return None
 
     # ── 파이프라인 루프에서 호출 ───────────────────────────────────────────────
 
     @property
     def is_stopped(self) -> bool:
-        return self._stopped
+        with self._lock:
+            return self._stopped
 
     @property
     def is_paused(self) -> bool:
-        return self._paused
+        with self._lock:
+            return self._paused
 
     def wait_if_paused(self) -> bool:
         """
         일시정지 상태면 재개될 때까지 블로킹한다.
+        타임아웃(_PAUSE_RESUME_POLL 초)마다 깨어나 중단 여부를 재확인하여
+        Discord 연결 불안정으로 재개 명령이 유실되어도 무한 블로킹하지 않는다.
 
         Returns:
             True  → 중단 요청이 들어와 파이프라인을 종료해야 함
             False → 정상 재개
         """
-        self._resume_event.wait()
+        while True:
+            signaled = self._resume_event.wait(timeout=self._PAUSE_RESUME_POLL)
+            if signaled or self._stopped:
+                break
+            # 타임아웃: 아직 일시정지 중이면 계속 대기, 재개됐으면 탈출
+            if not self._paused:
+                break
         return self._stopped
 
 
@@ -210,6 +236,11 @@ def run_pipeline(
     discord_channel_id: int | None = None,
     max_orchestrator_retries: int = 1,
     auto_merge: bool = False,
+    provider: str = "claude",
+    model_fast: str = "claude-haiku-4-5",
+    model_capable: str = "claude-sonnet-4-6",
+    provider_fast: str | None = None,    # None이면 provider 사용
+    provider_capable: str | None = None, # None이면 provider 사용
 ) -> dict:
     """
     파이프라인 실행 핵심 로직. CLI와 FastAPI 백엔드 양쪽에서 호출된다.
@@ -235,6 +266,10 @@ def run_pipeline(
         if not all_tasks:
             raise ValueError(f"태스크 ID '{task_id}'를 찾을 수 없습니다.")
 
+    def emit(event: dict) -> None:
+        if on_progress:
+            on_progress(event)  # type: ignore[operator]
+
     # frontend 태스크는 멀티 에이전트 파이프라인 제외 (사람이 직접 구현)
     frontend_tasks = [t for t in all_tasks if t.task_type == "frontend"]
     if frontend_tasks:
@@ -259,24 +294,27 @@ def run_pipeline(
     groups = resolve_execution_groups(pending, all_valid_ids=all_task_ids)
 
     # LLM 클라이언트 + 파이프라인 초기화
-    haiku = create_client("claude", LLMConfig(model="claude-haiku-4-5", max_tokens=8192))
-    sonnet = create_client("claude", LLMConfig(model="claude-sonnet-4-6", max_tokens=8192))
+    _provider_fast = provider_fast or provider
+    _provider_capable = provider_capable or provider
+    fast_llm = create_client(_provider_fast, LLMConfig(model=model_fast, max_tokens=8192))
+    capable_llm = create_client(_provider_capable, LLMConfig(model=model_capable, max_tokens=8192))
     runner = DockerTestRunner()
     if not runner._image_exists():
         runner.build_image()
 
-    pipeline = TDDPipeline(agent_llm=haiku, implementer_llm=sonnet, test_runner=runner)
+    pipeline = TDDPipeline(agent_llm=fast_llm, implementer_llm=fast_llm, test_runner=runner)
     git = GitWorkflow(repo_path, base_branch=base_branch)
-    merge_agent = MergeAgent(llm=haiku, repo_path=repo_path)
+    merge_agent = MergeAgent(llm=fast_llm, repo_path=repo_path)
     # discord_channel_id가 없으면 notifier 생성 안 함 (채널 생성 실패 포함)
     notifier = DiscordNotifier.from_env(channel_id=discord_channel_id) if discord_channel_id else None
-    # 에이전트 ask_user 도구에 notifier 주입 (None이면 stdin 폴백)
+    # 에이전트 ask_user 도구에 notifier + LLM 주입 (None이면 stdin 폴백)
     _set_hotline_notifier(notifier)
     _set_hotline_repo_path(repo_path)
-
-    def emit(event: dict) -> None:
-        if on_progress:
-            on_progress(event)  # type: ignore[operator]
+    conv_llm, sum_llm = create_hotline_llms(_provider_capable, model_capable)
+    _set_hotline_llm(conv_llm, sum_llm)
+    # 오케스트레이터 개입 LLM 주입
+    analyze_llm, report_llm = create_intervention_llms(_provider_capable, model_capable)
+    _set_intervention_llm(analyze_llm, report_llm)
 
     # ── auto_merge catch-up: 이전 실행에서 완료됐지만 미머지된 브랜치 처리 ────────
     if auto_merge and not no_pr:
@@ -343,25 +381,20 @@ def run_pipeline(
         for orch_attempt in range(max_orchestrator_retries + 1):
             with WorkspaceManager(task, repo_path, keep_on_failure=True) as ws:
                 if orch_attempt > 0:
-                    emit({"type": "step", "task_id": task.id, "step": "testing",
+                    emit({"type": "step", "task_id": task.id, "step": "orch_retry",
                           "message": f"오케스트레이터 재시도 {orch_attempt}/{max_orchestrator_retries}…"})
-                else:
-                    emit({"type": "step", "task_id": task.id, "step": "testing",
-                          "message": "TestWriter → Implementer → Docker → Reviewer…"})
 
-                result = pipeline.run(task, ws)
+                def _progress(event: dict, _tid=task.id) -> None:
+                    emit({**event, "task_id": _tid})
+
+                result = pipeline.run(task, ws, on_progress=_progress)
                 elapsed = time.monotonic() - start_time
 
                 # ── 성공 ────────────────────────────────────────────────────────
                 if result.succeeded:
                     pr_url = ""
                     if not no_pr:
-                        if result.test_result:
-                            emit({"type": "step", "task_id": task.id, "step": "test_pass",
-                                  "message": f"테스트 통과: {result.test_result.summary}"})
-                        if result.review:
-                            emit({"type": "step", "task_id": task.id, "step": "review",
-                                  "message": f"리뷰: {result.review.verdict} — {result.review.summary}"})
+                        # test_pass / review 결과는 pipeline on_progress 콜백이 이미 emit했음
                         emit({"type": "step", "task_id": task.id, "step": "git",
                               "message": "브랜치 → 커밋 → 푸시 → PR 생성 중…"})
                         try:
@@ -537,6 +570,8 @@ def run_pipeline(
           "tasks": [t.id for t in pending]})
     _notify(notifier, f"📋 파이프라인 시작 — {len(pending)}개 태스크 / 에이전트 {max_workers}개\n'멈춰' 입력 시 일시정지, '중단' 입력 시 종료")
 
+    _pipeline_aborted = False   # break 사유 추적 — finally 이후 이벤트 분기에 사용
+
     try:
         for group in groups:
             # ── 그룹 시작 전 일시정지/중단 체크 ─────────────────────────────────
@@ -548,12 +583,16 @@ def run_pipeline(
                       "message": f"일시정지 — '계속' 입력 시 {first_id} 재개"})
                 should_stop = pause_ctrl.wait_if_paused()
                 if should_stop:
+                    _pipeline_aborted = True
                     emit({"type": "pipeline_aborted",
                           "message": "사용자 중단 요청으로 파이프라인 종료"})
                     break
                 emit({"type": "resumed", "task_id": first_id, "message": f"{first_id} 재개"})
 
             if pause_ctrl.is_stopped:
+                _pipeline_aborted = True
+                emit({"type": "pipeline_aborted",
+                      "message": "사용자 중단 요청으로 파이프라인 종료"})
                 break
 
             # ── 그룹 내 태스크 실행 (의존성 실패 시 스킵) ────────────────────
@@ -590,8 +629,9 @@ def run_pipeline(
             # ── 그룹 전체 실패 시 계속 진행 여부 확인 ────────────────────────
             remaining = groups[groups.index(group) + 1:] if group in groups else []
             if group_failed and len(group_failed) == len(runnable) and remaining:
-                should_continue = _ask_continue(notifier, group_failed, len(remaining))
+                should_continue = _ask_continue(notifier, group_failed, len(remaining), pause_ctrl)
                 if not should_continue:
+                    _pipeline_aborted = True
                     emit({"type": "pipeline_aborted",
                           "message": "사용자 요청으로 파이프라인 중단"})
                     _notify(notifier, "🛑 파이프라인을 중단합니다.")
@@ -614,18 +654,24 @@ def run_pipeline(
                         emit=emit,
                     )
 
+            # 병렬/순차 실행 중 stop이 들어온 경우: 현재 그룹 태스크가 완료된 후 여기서 감지
+            # (설계 의도: 실행 중인 태스크는 강제 중단 없이 완료 후 종료)
             if pause_ctrl.is_stopped:
+                _pipeline_aborted = True
+                emit({"type": "pipeline_aborted",
+                      "message": "사용자 중단 요청으로 파이프라인 종료"})
                 break
 
     finally:
         # 리스너 스레드 종료
         _listener_stop.set()
 
-    emit({"type": "pipeline_done", "success": success_count, "fail": fail_count})
-    _notify(
-        notifier,
-        f"🏁 파이프라인 완료 — 성공: {success_count}  실패: {fail_count}",
-    )
+    if not _pipeline_aborted:
+        emit({"type": "pipeline_done", "success": success_count, "fail": fail_count})
+        _notify(
+            notifier,
+            f"🏁 파이프라인 완료 — 성공: {success_count}  실패: {fail_count}",
+        )
 
     return {
         "success": success_count,
@@ -673,9 +719,12 @@ def _run_single_task(
     emit({"type": "task_start", "task_id": task.id, "title": task.title})
 
     with WorkspaceManager(task, repo_path, keep_on_failure=True) as ws:
-        emit({"type": "step", "task_id": task.id, "step": "testing", "message": "TestWriter → 테스트 작성 중…"})
         print(_info(f"[{task.id}] TestWriter → Implementer → Docker → Reviewer ..."))
-        result = pipeline.run(task, ws)
+
+        def _progress(event: dict, _tid=task.id) -> None:
+            emit({**event, "task_id": _tid})
+
+        result = pipeline.run(task, ws, on_progress=_progress)
         elapsed = time.monotonic() - start_time
 
         pr_url = ""
@@ -689,15 +738,12 @@ def _run_single_task(
                   "reason": result.failure_reason or "알 수 없음", "elapsed": round(elapsed, 1)})
             _notify_failure(notifier, task, result.failure_reason or "알 수 없음", elapsed)
         else:
+            # test_pass / review 결과는 pipeline on_progress 콜백이 이미 emit했음
             if result.test_result:
                 print(_ok(f"[{task.id}] 테스트: {result.test_result.summary}"))
-                emit({"type": "step", "task_id": task.id, "step": "test_pass",
-                      "message": f"테스트 통과: {result.test_result.summary}"})
             if result.review:
                 icon = "✅" if result.review.approved else "⚠️"
                 print(f"  {icon} [{task.id}] 리뷰: {result.review.verdict} — {result.review.summary}")
-                emit({"type": "step", "task_id": task.id, "step": "review",
-                      "message": f"리뷰: {result.review.verdict} — {result.review.summary}"})
 
             if no_pr:
                 print(_warn(f"[{task.id}] --no-pr: PR 생성 건너뜀"))
@@ -1010,6 +1056,7 @@ def _ask_continue(
     notifier: DiscordNotifier | None,
     failed_ids_in_group: list[str],
     remaining_groups: int,
+    pause_ctrl: "PauseController | None" = None,
 ) -> bool:
     """
     그룹 내 태스크가 전부 실패했을 때 사용자에게 계속 진행 여부를 묻는다.
@@ -1022,6 +1069,12 @@ def _ask_continue(
     _CONTINUE_KEYWORDS = {"계속", "continue", "yes", "ㅇ", "응", "ㅇㅇ"}
     _STOP_KEYWORDS     = {"중단", "stop", "no", "ㄴ", "아니", "아니오"}
 
+    def _matches(text: str, keywords: set) -> bool:
+        """슬래시 접두사 제거 후 키워드 대조 (e.g. /중단 → 중단).
+        NFC 정규화 후 정확 일치 또는 키워드 포함 여부 확인."""
+        normalized = unicodedata.normalize("NFC", text.strip().lstrip("/").strip().lower())
+        return normalized in keywords or any(kw in normalized for kw in keywords)
+
     ids_text = ", ".join(failed_ids_in_group)
     msg = (
         f"⚠️ **연속 실패 감지**\n\n"
@@ -1032,17 +1085,22 @@ def _ask_continue(
     )
 
     if notifier is None:
-        # stdin 폴백
+        # stdin 폴백 — Discord 경로와 동일한 _matches() 사용
         print(f"\n{'='*60}\n{msg}\n{'='*60}")
         while True:
             try:
-                reply = input(">>> ").strip().lower()
+                reply = input(">>> ").strip()
             except (EOFError, KeyboardInterrupt):
                 return False
-            if reply in _CONTINUE_KEYWORDS:
+            if _matches(reply, _CONTINUE_KEYWORDS):
                 return True
-            if reply in _STOP_KEYWORDS:
+            if _matches(reply, _STOP_KEYWORDS):
                 return False
+
+    # listen_for_commands 스레드가 이미 "중단"을 처리했다면 즉시 종료
+    if pause_ctrl and pause_ctrl.is_stopped:
+        _notify(notifier, "🛑 파이프라인을 종료합니다.")
+        return False
 
     message_id = _notify(notifier, msg)
     if not message_id:
@@ -1050,20 +1108,28 @@ def _ask_continue(
 
     _POLL_CHUNK = 60
     while True:
+        # pause_ctrl이 이미 중단 상태면(listen 스레드가 먼저 처리) 즉시 종료
+        if pause_ctrl and pause_ctrl.is_stopped:
+            _notify(notifier, "🛑 파이프라인을 종료합니다.")
+            return False
+
         reply = notifier.wait_for_reply(after_message_id=message_id, timeout=_POLL_CHUNK)
         if reply is None:
             continue
-        lower = reply.strip().lower()
-        if lower in _CONTINUE_KEYWORDS:
+        if _matches(reply, _CONTINUE_KEYWORDS):
             _notify(notifier, "▶ 파이프라인을 계속 진행합니다.")
             return True
-        if lower in _STOP_KEYWORDS:
+        if _matches(reply, _STOP_KEYWORDS):
             _notify(notifier, "🛑 파이프라인을 종료합니다.")
             return False
-        # 키워드 아닌 메시지 → 안내 재전송
+        # 키워드 아닌 메시지 — listen 스레드가 이미 처리했으면 즉시 종료
+        logger.debug("_ask_continue: 미인식 메시지 %r", reply[:80])
+        if pause_ctrl and pause_ctrl.is_stopped:
+            _notify(notifier, "🛑 파이프라인을 종료합니다.")
+            return False
         message_id = _notify(
             notifier,
-            f"`계속` 또는 `중단`을 입력해주세요.",
+            "`계속` 또는 `중단`을 입력해주세요.",
         ) or message_id
 
 
@@ -1155,15 +1221,21 @@ def main() -> int:
 
     # LLM 클라이언트
     try:
-        haiku = create_client("claude", LLMConfig(model="claude-haiku-4-5", max_tokens=8192))
-        sonnet = create_client("claude", LLMConfig(model="claude-sonnet-4-6", max_tokens=8192))
+        fast_llm = create_client(args.provider, LLMConfig(model=args.model_fast, max_tokens=8192))
+        capable_llm = create_client(args.provider, LLMConfig(model=args.model_capable, max_tokens=8192))
     except ValueError as e:
         print(_fail(f"LLM 클라이언트 초기화 실패: {e}"))
         return 1
 
-    pipeline = TDDPipeline(agent_llm=haiku, implementer_llm=sonnet, test_runner=runner)
+    # 오케스트레이터 개입 + hotline LLM 주입
+    analyze_llm, report_llm = create_intervention_llms(args.provider, args.model_capable)
+    _set_intervention_llm(analyze_llm, report_llm)
+    conv_llm, sum_llm = create_hotline_llms(args.provider, args.model_capable)
+    _set_hotline_llm(conv_llm, sum_llm)
+
+    pipeline = TDDPipeline(agent_llm=fast_llm, implementer_llm=fast_llm, test_runner=runner)
     git = GitWorkflow(repo_path, base_branch=args.base_branch)
-    merge_agent = MergeAgent(llm=haiku, repo_path=repo_path)
+    merge_agent = MergeAgent(llm=fast_llm, repo_path=repo_path)
 
     # reports_dir: --reports-dir 명시 시 그 경로, 아니면 대상 레포 안의 data/reports
     reports_dir = Path(args.reports_dir) if args.reports_dir != "data/reports" else repo_path / "data" / "reports"
@@ -1221,18 +1293,20 @@ def main() -> int:
     # ── 마일스톤 보고서 생성 ──────────────────────────────────────────────────
     if success_count > 0:
         try:
-            import anthropic as _anthropic
-            import os as _os
+            _milestone_llm = create_client(
+                args.provider, LLMConfig(model=args.model_capable, max_tokens=4096)
+            )
 
             def _llm_fn(system: str, user: str) -> str:
-                client = _anthropic.Anthropic(api_key=_os.environ.get("ANTHROPIC_API_KEY", ""))
-                resp = client.messages.create(
-                    model="claude-sonnet-4-6",
-                    max_tokens=4096,
-                    system=system,
-                    messages=[{"role": "user", "content": user}],
-                )
-                return resp.content[0].text.strip() if resp.content else ""
+                from llm import LLMConfig as _LLMConfig, Message as _Message, create_client as _cc
+                llm = _cc(args.provider, _LLMConfig(model=args.model_capable, system_prompt=system, max_tokens=4096))
+                resp = llm.chat([_Message(role="user", content=user)])
+                for block in resp.content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        return block["text"].strip()
+                    if hasattr(block, "type") and block.type == "text":
+                        return block.text.strip()
+                return ""
 
             run_label = tasks_path.stem  # 예: "tasks"
             task_reports = load_reports()
@@ -1280,6 +1354,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--reports-dir", default="data/reports",
                         metavar="DIR",
                         help="Task Report 저장 디렉토리 (기본값: data/reports)")
+    parser.add_argument("--provider", default="claude",
+                        choices=["claude", "openai", "ollama"],
+                        help="LLM 프로바이더 (기본값: claude)")
+    parser.add_argument("--model-fast", default="claude-haiku-4-5",
+                        metavar="MODEL",
+                        help="빠른 작업용 모델 (기본값: claude-haiku-4-5)")
+    parser.add_argument("--model-capable", default="claude-sonnet-4-6",
+                        metavar="MODEL",
+                        help="복잡한 작업용 모델 (기본값: claude-sonnet-4-6)")
     return parser.parse_args()
 
 
