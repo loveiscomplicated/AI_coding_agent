@@ -34,6 +34,7 @@ from hotline.notifier import DiscordNotifier
 from tools.hotline_tools import (
     set_notifier as _set_hotline_notifier,
     set_repo_path as _set_hotline_repo_path,
+    set_tasks_path as _set_hotline_tasks_path,
     set_llm as _set_hotline_llm,
     create_hotline_llms,
 )
@@ -257,6 +258,14 @@ def run_pipeline(
     if reports_dir is None:
         reports_dir = repo_path / "data" / "reports"
 
+    # 파이프라인 시작 전 PROJECT_STRUCTURE.md 초기 생성 (없거나 오래된 경우)
+    try:
+        from structure.updater import update as _structure_update
+        _structure_update(root=str(repo_path), output="PROJECT_STRUCTURE.md")
+        logger.info("PROJECT_STRUCTURE.md 초기 생성 완료")
+    except Exception as _e:
+        logger.warning("PROJECT_STRUCTURE.md 초기 생성 실패 (건너뜀): %s", _e)
+
     # 태스크 로드 (전체 — 의존성 검증에 전체 ID가 필요)
     all_tasks = load_tasks(tasks_path)
     all_task_ids = {t.id for t in all_tasks}  # 전체 ID 집합 (의존성 검증용)
@@ -310,6 +319,7 @@ def run_pipeline(
     # 에이전트 ask_user 도구에 notifier + LLM 주입 (None이면 stdin 폴백)
     _set_hotline_notifier(notifier)
     _set_hotline_repo_path(repo_path)
+    _set_hotline_tasks_path(tasks_path)
     conv_llm, sum_llm = create_hotline_llms(_provider_capable, model_capable)
     _set_hotline_llm(conv_llm, sum_llm)
     # 오케스트레이터 개입 LLM 주입
@@ -660,13 +670,28 @@ def run_pipeline(
                 _pipeline_aborted = True
                 emit({"type": "pipeline_aborted",
                       "message": "사용자 중단 요청으로 파이프라인 종료"})
+                _notify(notifier, "🛑 파이프라인을 중단합니다.")
                 break
 
     finally:
         # 리스너 스레드 종료
         _listener_stop.set()
 
-    if not _pipeline_aborted:
+    if _pipeline_aborted:
+        done_tasks = [t for t in all_tasks if t.status == TaskStatus.DONE]
+        failed_tasks = [t for t in all_tasks if t.status == TaskStatus.FAILED]
+        pending_tasks = [t for t in all_tasks if t.status not in (TaskStatus.DONE, TaskStatus.FAILED)]
+        lines = ["⛔ **파이프라인이 중단되었습니다.**", ""]
+        if done_tasks:
+            lines.append(f"✅ 완료: {', '.join(t.id for t in done_tasks)} ({len(done_tasks)}개)")
+        if failed_tasks:
+            lines.append(f"❌ 실패: {', '.join(t.id for t in failed_tasks)} ({len(failed_tasks)}개)")
+        if pending_tasks:
+            lines.append(f"⏸ 미실행: {', '.join(t.id for t in pending_tasks)} ({len(pending_tasks)}개)")
+        emit({"type": "pipeline_aborted_summary",
+              "success": success_count, "fail": fail_count})
+        _notify(notifier, "\n".join(lines))
+    else:
         emit({"type": "pipeline_done", "success": success_count, "fail": fail_count})
         _notify(
             notifier,
@@ -1106,14 +1131,19 @@ def _ask_continue(
     if not message_id:
         return True  # Discord 실패 시 기본값: 계속
 
-    _POLL_CHUNK = 60
+    _POLL_CHUNK = 10
+    _stop_check = (lambda: pause_ctrl.is_stopped) if pause_ctrl else None
     while True:
         # pause_ctrl이 이미 중단 상태면(listen 스레드가 먼저 처리) 즉시 종료
         if pause_ctrl and pause_ctrl.is_stopped:
             _notify(notifier, "🛑 파이프라인을 종료합니다.")
             return False
 
-        reply = notifier.wait_for_reply(after_message_id=message_id, timeout=_POLL_CHUNK)
+        reply = notifier.wait_for_reply(
+            after_message_id=message_id,
+            timeout=_POLL_CHUNK,
+            stop_check=_stop_check,
+        )
         if reply is None:
             continue
         if _matches(reply, _CONTINUE_KEYWORDS):
@@ -1123,7 +1153,8 @@ def _ask_continue(
             _notify(notifier, "🛑 파이프라인을 종료합니다.")
             return False
         # 키워드 아닌 메시지 — listen 스레드가 이미 처리했으면 즉시 종료
-        logger.debug("_ask_continue: 미인식 메시지 %r", reply[:80])
+        logger.warning("_ask_continue: 미인식 메시지 %r (codepoints: %s)",
+                       reply[:80], [hex(ord(c)) for c in reply[:20]])
         if pause_ctrl and pause_ctrl.is_stopped:
             _notify(notifier, "🛑 파이프라인을 종료합니다.")
             return False
@@ -1232,6 +1263,7 @@ def main() -> int:
     _set_intervention_llm(analyze_llm, report_llm)
     conv_llm, sum_llm = create_hotline_llms(args.provider, args.model_capable)
     _set_hotline_llm(conv_llm, sum_llm)
+    _set_hotline_tasks_path(tasks_path)
 
     pipeline = TDDPipeline(agent_llm=fast_llm, implementer_llm=fast_llm, test_runner=runner)
     git = GitWorkflow(repo_path, base_branch=args.base_branch)

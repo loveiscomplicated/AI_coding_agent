@@ -162,6 +162,7 @@ class DiscordNotifier:
         self,
         after_message_id: str,
         timeout: int = _DEFAULT_TIMEOUT,
+        stop_check: Callable[[], bool] | None = None,
     ) -> str | None:
         """
         after_message_id 이후에 사용자(봇 제외)가 보낸 첫 메시지를 기다린다.
@@ -169,9 +170,11 @@ class DiscordNotifier:
         Args:
             after_message_id: 이 메시지 ID 이후의 메시지만 탐색
             timeout: 최대 대기 시간 (초). 초과 시 None 반환
+            stop_check: 폴링 루프마다 호출되는 콜백. True 반환 시 즉시 None 반환
+                        (예: lambda: pause_ctrl.is_stopped)
 
         Returns:
-            사용자 메시지 내용, 타임아웃 시 None
+            사용자 메시지 내용, 타임아웃 또는 stop_check 트리거 시 None
         """
         if self._channel_id is None:
             return None
@@ -181,6 +184,9 @@ class DiscordNotifier:
         last_id = after_message_id
 
         while time.monotonic() < deadline:
+            if stop_check and stop_check():
+                logger.info("wait_for_reply: stop_check 트리거 — 조기 종료")
+                return None
             try:
                 with httpx.Client(timeout=10.0) as client:
                     resp = client.get(
