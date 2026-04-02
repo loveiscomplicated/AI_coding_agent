@@ -23,12 +23,17 @@ from tools.registry import (
     call_tool,
 )
 
+import re
+
 from llm.base import Message, LLMResponse, BaseLLMClient, StopReason
 
 logger = logging.getLogger(__name__)
 
 # 실행 전 사용자 승인이 필요한 도구 목록
 _APPROVAL_REQUIRED = {"write_file", "edit_file", "append_to_file", "execute_command", "git_commit"}
+
+# 파일 쓰기 도구 (코드블록 감지 → 도구 사용 유도에 사용)
+_WRITE_TOOLS = frozenset({"write_file", "edit_file", "append_to_file"})
 
 
 # ── 타입 정의 ─────────────────────────────────────────────────────────────────
@@ -145,6 +150,8 @@ class ReactLoop:
         total_input_tokens: int = 0
         total_output_tokens: int = 0
         _consecutive_missing_tool_use = 0  # tool_use 블록 없이 연속 발생 횟수
+        _write_tool_used = False  # 루프 동안 쓰기 도구가 호출되었는지 추적
+        _nudge_attempted = False  # 코드블록 감지 → 도구 사용 유도를 이미 시도했는지
 
         for i in range(self.max_iterations):
             t0 = time.perf_counter()
@@ -173,6 +180,31 @@ class ReactLoop:
 
             # ── 종료 조건: 도구 없이 텍스트만 반환 ───────────────────────────
             if response.stop_reason == "end_turn":
+                final_text = _extract_text(response.content)
+
+                # 코드 블록이 포함된 텍스트를 출력했지만 write_file 등 쓰기 도구를
+                # 한 번도 호출하지 않은 경우 — 도구 사용을 유도하는 재시도
+                if (
+                    not _write_tool_used
+                    and not _nudge_attempted
+                    and _has_code_block(final_text)
+                    and self.TOOLS_SCHEMA  # 도구가 제공되었을 때만
+                ):
+                    _nudge_attempted = True
+                    logger.warning(
+                        "end_turn 응답에 코드 블록이 있지만 write_file 미호출 — 도구 사용 유도"
+                    )
+                    messages.append(Message(role="assistant", content=response.content or []))
+                    messages.append(Message(
+                        role="user",
+                        content=(
+                            "코드를 텍스트로 출력했지만, 실제 파일이 생성되지 않았습니다. "
+                            "반드시 `write_file` 도구를 호출하여 파일을 생성하세요. "
+                            "텍스트로 코드를 보여주는 것은 파일 생성으로 인정되지 않습니다."
+                        ),
+                    ))
+                    continue
+
                 # on_token 이 설정된 경우 stream() 을 사용해 토큰 전달
                 if self.on_token is not None:
                     try:
@@ -190,8 +222,6 @@ class ReactLoop:
                             total_input_tokens=total_input_tokens,
                             total_output_tokens=total_output_tokens,
                         )
-                else:
-                    final_text = _extract_text(response.content)
                 logger.debug("루프 종료 — end_turn (총 %d회 반복)", i + 1)
                 return LoopResult(
                     answer=final_text,
@@ -241,6 +271,10 @@ class ReactLoop:
             hard_stop = False
 
             for tc in tool_calls:
+                # 쓰기 도구 사용 추적
+                if tc.name in _WRITE_TOOLS:
+                    _write_tool_used = True
+
                 if self.on_tool_call:
                     self.on_tool_call(tc)
 
@@ -357,6 +391,7 @@ class ReactLoop:
         llm_client = type(self.llm).__name__
         schema_dict = {
             "OpenaiClient": TOOLS_SCHEMA_OPENAI,
+            "GlmClient": TOOLS_SCHEMA_OPENAI,
             "ClaudeClient": TOOLS_SCHEMA_ANTHROPIC,
             "OllamaClient": TOOLS_SCHEMA_OLLAMA,
         }
@@ -369,6 +404,14 @@ class ReactLoop:
 
 
 # ── 모듈 수준 헬퍼 ────────────────────────────────────────────────────────────
+
+# 마크다운 코드 블록 패턴 (```python ... ``` 등)
+_CODE_BLOCK_RE = re.compile(r"```\w*\n.+?\n```", re.DOTALL)
+
+
+def _has_code_block(text: str) -> bool:
+    """텍스트에 마크다운 코드 블록(```...```)이 포함되어 있는지 확인한다."""
+    return bool(_CODE_BLOCK_RE.search(text))
 
 
 def _extract_tool_calls(content: list) -> list[ToolCall]:
@@ -418,6 +461,9 @@ def _trim_history(messages: list[Message], window: int) -> list[Message]:
     각 쌍은 2개 메시지(assistant 턴 + user/tool_result 턴)로 구성되므로
     보존 기준은 1 + 2*window 개 메시지다.
 
+    tail의 첫 메시지가 user(tool_result)이면 한 칸 더 잘라 assistant로 시작하게 한다.
+    GLM 등은 messages[0](user/task) 바로 뒤에 user가 오면 1214 오류를 반환한다.
+
     window=0이면 트리밍하지 않는다.
     """
     if window <= 0:
@@ -427,7 +473,12 @@ def _trim_history(messages: list[Message], window: int) -> list[Message]:
         return messages
     trimmed = len(messages) - max_msgs
     logger.debug("히스토리 트리밍: %d개 메시지 드롭 (window=%d)", trimmed, window)
-    return [messages[0]] + messages[-(2 * window):]
+    tail = messages[-(2 * window):]
+    # messages[0]은 user(task)이므로 tail[0]도 assistant여야 한다.
+    # 짝수 개 슬라이싱으로 인해 tail이 user(tool_result)로 시작할 수 있으므로 한 칸 제거.
+    if tail and tail[0].role != "assistant":
+        tail = tail[1:]
+    return [messages[0]] + tail
 
 
 def _is_fatal_error(error_message: str) -> bool:
