@@ -78,6 +78,34 @@ case "$TEST_FRAMEWORK" in
     exec ruby -Ilib -Itest test/**/*.rb 2>&1
     ;;
 
+  # ── Python / 프레임워크 없는 방식 ─────────────────────────────────────────────
+  # tests/test_*.py 를 직접 python으로 실행한다.
+  # 각 파일은 성공 시 exit 0, 실패 시 exit 1 을 반환하는 규약을 따른다.
+  python)
+    PYTHONPATH="/workspace/src:/workspace:${PYTHONPATH:-}"
+    export PYTHONPATH
+    FAILED=0
+    for f in /workspace/tests/test_*.py; do
+        [ -f "$f" ] || continue
+        python "$f" || FAILED=1
+    done
+    exit $FAILED
+    ;;
+
+  # ── JavaScript / 프레임워크 없는 방식 ─────────────────────────────────────────
+  # tests/test_*.js 를 직접 node로 실행한다.
+  # 각 파일은 성공 시 exit 0, 실패 시 exit 1 을 반환하는 규약을 따른다.
+  node)
+    WS=$(_copy_workspace)
+    cd "$WS"
+    FAILED=0
+    for f in tests/test_*.js; do
+        [ -f "$f" ] || continue
+        node "$f" || FAILED=1
+    done
+    exit $FAILED
+    ;;
+
   # ── 그 외: 값 자체를 shell 명령으로 실행 ─────────────────────────────────────
   # 예: "cargo test", "mvn test -q", "dotnet test", "phpunit tests/", "swift test"
   *)

@@ -34,7 +34,7 @@ from pathlib import Path
 
 from agents.roles import TEST_WRITER, IMPLEMENTER, REVIEWER
 from agents.scoped_loop import ScopedReactLoop, ScopedResult
-from docker.runner import DockerTestRunner, RunResult
+from docker.runner import DockerTestRunner, RunResult, _detect_runtime
 from llm.base import Message, StopReason
 from orchestrator.task import Task, TaskStatus
 from orchestrator.workspace import WorkspaceManager
@@ -130,12 +130,13 @@ class TDDPipeline:
             None 이면 아무것도 하지 않는다.
         """
         _p = on_progress or (lambda e: None)
+        _agent_p = lambda e: _p({**e, "task_id": task.id}) if "task_id" not in e else _p(e)
         logger.info("[%s] 파이프라인 시작", task.id)
 
         # ── Step 1: 테스트 작성 ───────────────────────────────────────────────
         task.status = TaskStatus.WRITING_TESTS
         _p({"type": "step", "step": "test_writing", "message": "TestWriter: 테스트 작성 중…"})
-        test_scoped = self._run_test_writer(task, workspace)
+        test_scoped = self._run_test_writer(task, workspace, on_progress=_agent_p)
         if not test_scoped.succeeded:
             prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
             return PipelineResult.failed(task, f"{prefix}TestWriter 실패: {test_scoped.answer}")
@@ -145,7 +146,7 @@ class TDDPipeline:
             # 모델이 write_file을 호출하지 않고 종료한 경우 — 즉시 1회 재시도
             logger.warning("[%s] TestWriter 파일 미생성 — 재시도", task.id)
             _p({"type": "step", "step": "test_writing_retry", "message": "TestWriter: 파일 미생성 — 재시도 중…"})
-            test_scoped = self._run_test_writer(task, workspace, retry=True)
+            test_scoped = self._run_test_writer(task, workspace, retry=True, on_progress=_agent_p)
             if not test_scoped.succeeded:
                 prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
                 return PipelineResult.failed(task, f"{prefix}TestWriter 실패: {test_scoped.answer}")
@@ -173,6 +174,7 @@ class TDDPipeline:
                 task, workspace,
                 static_issues=static_issues,
                 missing_criteria=missing_criteria,
+                on_progress=_agent_p,
             )
             if not test_scoped.succeeded:
                 prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
@@ -210,7 +212,8 @@ class TDDPipeline:
                 )
                 _p({"type": "step", "step": "implementing", "message": label})
                 impl_scoped = self._run_implementer(
-                    task, workspace, reviewer_feedback=reviewer_feedback
+                    task, workspace, reviewer_feedback=reviewer_feedback,
+                    on_progress=_agent_p,
                 )
                 if not impl_scoped.succeeded:
                     prefix = "[MAX_ITER] " if _is_max_iter(impl_scoped) else ""
@@ -218,7 +221,7 @@ class TDDPipeline:
 
                 task.status = TaskStatus.RUNNING_TESTS
                 _p({"type": "step", "step": "docker_running", "message": "Docker 테스트 실행 중…"})
-                docker_result = self.test_runner.run(workspace.path, task.test_framework)
+                docker_result = self.test_runner.run(workspace.path, task.target_files)
                 logger.info(
                     "[%s] 테스트 실행 (시도 %d/%d): %s",
                     task.id, attempt + 1, self.max_retries, docker_result.summary,
@@ -248,7 +251,7 @@ class TDDPipeline:
             # ── Step 3: 코드 리뷰 ─────────────────────────────────────────────
             task.status = TaskStatus.REVIEWING
             _p({"type": "step", "step": "reviewing", "message": "Reviewer: 코드 검토 중…"})
-            review_scoped = self._run_reviewer(task, workspace, docker_result)
+            review_scoped = self._run_reviewer(task, workspace, docker_result, on_progress=_agent_p)
             review = _parse_review(review_scoped.answer)
             logger.info("[%s] 리뷰 결과: %s — %s", task.id, review.verdict, review.summary)
 
@@ -294,12 +297,14 @@ class TDDPipeline:
         retry: bool = False,
         static_issues: list[str] | None = None,
         missing_criteria: list[str] | None = None,
+        on_progress=None,
     ) -> ScopedResult:
         loop = ScopedReactLoop(
             llm=self.agent_llm,
             role=TEST_WRITER,
             workspace_dir=workspace.path,
             max_iterations=self.max_iterations,
+            on_progress=on_progress,
         )
         prompt = _build_test_writer_prompt(
             task, workspace,
@@ -320,12 +325,14 @@ class TDDPipeline:
         task: Task,
         workspace: WorkspaceManager,
         reviewer_feedback: str = "",
+        on_progress=None,
     ) -> ScopedResult:
         loop = ScopedReactLoop(
             llm=self.implementer_llm,
             role=IMPLEMENTER,
             workspace_dir=workspace.path,
             max_iterations=self.max_iterations,
+            on_progress=on_progress,
         )
         prompt = _build_implementer_prompt(task, workspace, reviewer_feedback=reviewer_feedback)
         logger.debug(
@@ -339,12 +346,14 @@ class TDDPipeline:
         task: Task,
         workspace: WorkspaceManager,
         docker_result: RunResult,
+        on_progress=None,
     ) -> ScopedResult:
         loop = ScopedReactLoop(
             llm=self.agent_llm,
             role=REVIEWER,
             workspace_dir=workspace.path,
             max_iterations=self.reviewer_max_iterations,
+            on_progress=on_progress,
         )
         prompt = _build_reviewer_prompt(task, workspace, docker_result)
         logger.debug("[%s] Reviewer 시작", task.id)
@@ -364,6 +373,101 @@ def _context_hint(workspace: WorkspaceManager) -> str:
         return ""
     doc_list = ", ".join(f"`context/{d}`" for d in docs)
     return f"\n상세 스펙·아키텍처 문서: {doc_list} — 구현 전에 참조하세요.\n"
+
+
+def _test_lang_rules(task: Task) -> str:
+    """
+    target_files 기반으로 TestWriter에 주입할 언어·import·출력 규약 섹션을 생성한다.
+    """
+    runtime = _detect_runtime(task.target_files)
+    impl_files = [
+        f for f in task.target_files
+        if not Path(f).name.startswith("test_") and not Path(f).stem.endswith(".test")
+    ]
+
+    if runtime == "node":
+        import_examples = "\n".join(
+            f"  const ... = require('../src/{Path(f).name}');  // {f}"
+            for f in impl_files
+        )
+        return f"""## 테스트 작성 규칙
+
+**언어**: JavaScript (Node.js) — target_files에 .js 파일이 있으므로
+
+**테스트 파일 위치**: `tests/` 디렉토리에 `test_*.js` 이름으로 생성
+
+**import 경로** — target_files 파일명에서 직접 유도, 절대 다른 경로를 만들지 마세요:
+{import_examples}
+
+**출력 규약** — 테스트 파일 마지막에 반드시 아래 형식으로 출력하고 process.exit() 호출:
+```javascript
+// 성공 시
+console.log(`OK: ${{passed}} passed, 0 failed`);
+process.exit(0);
+
+// 실패 시
+console.log(`FAIL: ${{passed}} passed, ${{failed}} failed`);
+failures.forEach(f => console.log(`- ${{f}}`));
+process.exit(1);
+```
+
+**구조 패턴**:
+```javascript
+const failures = [];
+let passed = 0;
+
+// 각 테스트
+try {{
+  // ... assertion
+  passed++;
+}} catch (e) {{
+  failures.push(`test_name: ${{e.message}}`);
+}}
+```
+"""
+    else:
+        import_examples = "\n".join(
+            f"  from {Path(f).stem.replace('-', '_')} import ...  # src/{Path(f).name}"
+            for f in impl_files
+        )
+        return f"""## 테스트 작성 규칙
+
+**언어**: Python — target_files에 .py 파일이 있으므로 (또는 HTML/CSS여서 Python으로 검증)
+
+**테스트 파일 위치**: `tests/` 디렉토리에 `test_*.py` 이름으로 생성
+
+**import 경로** — target_files 파일명에서 직접 유도, 절대 다른 경로를 만들지 마세요:
+  (PYTHONPATH에 /workspace/src 가 포함되어 있어 src/ 모듈을 직접 import할 수 있습니다)
+{import_examples}
+
+**출력 규약** — 테스트 파일 마지막에 반드시 아래 형식으로 출력하고 sys.exit() 호출:
+```python
+import sys
+# 성공 시
+print(f"OK: {{passed}} passed, 0 failed")
+sys.exit(0)
+
+# 실패 시
+print(f"FAIL: {{passed}} passed, {{failed}} failed")
+for f in failures:
+    print(f"- {{f}}")
+sys.exit(1)
+```
+
+**구조 패턴**:
+```python
+import sys
+failures = []
+passed = 0
+
+# 각 테스트
+try:
+    # ... assertion
+    passed += 1
+except Exception as e:
+    failures.append(f"test_name: {{e}}")
+```
+"""
 
 
 def _build_test_writer_prompt(
@@ -403,6 +507,8 @@ def _build_test_writer_prompt(
     if feedback_blocks:
         feedback_section = "\n## 이전 시도 피드백\n\n" + "\n\n".join(feedback_blocks) + "\n"
 
+    lang_rules = _test_lang_rules(task)
+
     return f"""## 태스크
 
 **{task.title}**
@@ -417,8 +523,9 @@ def _build_test_writer_prompt(
 
 `{workspace.path}`
 {structure_hint}{_context_hint(workspace)}{feedback_section}
+{lang_rules}
 `src/` 에 있는 기존 코드를 먼저 확인하고,
-`tests/` 에 **{task.test_framework}** 테스트를 작성하세요.
+`tests/` 에 위 규칙대로 테스트를 작성하세요.
 구현이 없으므로 테스트는 실행 시 실패해야 합니다 (Red 단계).
 """
 

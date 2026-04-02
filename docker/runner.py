@@ -69,13 +69,17 @@ class DockerTestRunner:
         if result.returncode != 0:
             raise RuntimeError(f"이미지 빌드 실패:\n{result.stderr}")
 
-    def run(self, workspace_dir: Path, test_framework: str = "pytest") -> RunResult:
+    def run(self, workspace_dir: Path, target_files: list[str] | None = None) -> RunResult:
         """
         workspace_dir 를 마운트해 테스트를 실행하고 RunResult 를 반환한다.
 
+        target_files 의 확장자에서 런타임을 자동 감지한다:
+          .js/.ts/… → "node"  (프레임워크 없는 JS 테스트)
+          .py/기타   → "python" (프레임워크 없는 Python 테스트)
+
         Args:
             workspace_dir:  테스트가 포함된 로컬 디렉토리 (절대 경로)
-            test_framework: 사용할 테스트 프레임워크 ("pytest" | "jest")
+            target_files:   task.target_files (런타임 감지에 사용)
 
         Returns:
             RunResult — 이미지 미빌드 시 passed=False, returncode=-1
@@ -102,6 +106,8 @@ class DockerTestRunner:
                     summary=f"Docker 이미지 빌드 실패: {e}",
                 )
 
+        runtime = _detect_runtime(target_files or [])
+
         try:
             result = subprocess.run(
                 [
@@ -111,7 +117,7 @@ class DockerTestRunner:
                     "--cpus", "1",
                     "-v", f"{workspace_dir}:/workspace:ro",
                     "-e", "PYTHONPATH=/workspace/src:/workspace",  # src/ 모듈 직접 import 허용
-                    "-e", f"TEST_FRAMEWORK={test_framework}",
+                    "-e", f"TEST_FRAMEWORK={runtime}",
                     self.image,
                 ],
                 capture_output=True,
@@ -153,6 +159,22 @@ class DockerTestRunner:
 # ── 모듈 수준 헬퍼 ────────────────────────────────────────────────────────────
 
 
+_JS_EXTS = {'.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs'}
+
+
+def _detect_runtime(target_files: list[str]) -> str:
+    """
+    target_files 확장자에서 테스트 런타임을 결정한다.
+
+    JS/TS 파일이 하나라도 있으면 "node",
+    그 외(Python, HTML, CSS 등)는 "python".
+    """
+    exts = {Path(f).suffix.lower() for f in target_files}
+    if exts & _JS_EXTS:
+        return "node"
+    return "python"
+
+
 def _check_docker_available() -> None:
     """Docker 데몬이 실행 중인지 확인한다. 아니면 RuntimeError."""
     result = subprocess.run(
@@ -170,12 +192,18 @@ def _parse_summary(stdout: str) -> str:
     """
     여러 테스트 프레임워크 출력에서 요약 줄을 추출한다.
 
+    convention: "OK: N passed, 0 failed" / "FAIL: N passed, M failed"
     pytest:   "5 passed, 2 failed in 0.12s"
     jest:     "Tests: 2 failed, 3 passed, 5 total"
     go test:  "FAIL\tmodule/pkg\t0.123s" / "ok\tmodule/pkg\t0.123s"
     rspec:    "5 examples, 2 failures"
     """
     lines = stdout.splitlines()
+
+    # 출력 규약: "OK: N passed, M failed" / "FAIL: N passed, M failed"
+    for line in reversed(lines):
+        if re.match(r"^(OK|FAIL):\s+\d+\s+passed", line.strip()):
+            return line.strip()
 
     # jest / vitest: "Tests:  N failed, N passed, N total"
     for line in lines:
@@ -208,13 +236,24 @@ def _parse_failed_tests(stdout: str) -> list[str]:
     """
     여러 테스트 프레임워크 출력에서 실패한 테스트 이름 목록을 추출한다.
 
+    convention: "- test_name: reason" (FAIL: 줄 이후)
     pytest:   "FAILED tests/test_foo.py::TestBar::test_baz - ..."
     jest:     "  ✕ test name (5ms)"
     go test:  "--- FAIL: TestFuncName (0.00s)"
     rspec:    "  1) ClassName#method description"
     """
     failed: list[str] = []
+    in_convention_block = False
     for line in stdout.splitlines():
+        # 출력 규약: "FAIL: ..." 줄 이후에 나오는 "- test_name: reason"
+        if re.match(r"^FAIL:\s+\d+\s+passed", line.strip()):
+            in_convention_block = True
+            continue
+        if in_convention_block:
+            m = re.match(r"^\s*-\s+(.+)$", line)
+            if m:
+                failed.append(m.group(1).strip())
+            continue
         # pytest
         m = re.match(r"^FAILED\s+([\w/.:_-]+)", line.strip())
         if m:
