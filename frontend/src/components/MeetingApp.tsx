@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMeeting } from '../hooks/useMeeting'
 import { MeetingRecord } from '../types/meeting'
-import { MessageInput, MessageInputRef } from './MessageInput'
+import { MessageInput, MessageInputRef, ModelOption } from './MessageInput'
 import { MessageList } from './MessageList'
 import { TaskDraftPanel } from './TaskDraftPanel'
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
 
 interface Props {
   initialRecord?: MeetingRecord
@@ -18,11 +20,38 @@ interface Props {
 
 export function MeetingApp({ initialRecord, onFinished, onGoToList, onTitleGenerated, onPipelineStarted, headerLeft, meetingType = 'project', executionBrief }: Props) {
   const resolvedType = initialRecord?.meetingType ?? meetingType
-  const meeting = useMeeting(initialRecord, onTitleGenerated, resolvedType, executionBrief)
+
+  // 모델 선택 상태
+  const [models, setModels] = useState<ModelOption[]>([])
+  const [selectedModel, setSelectedModel] = useState<ModelOption | undefined>()
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/chat/models`)
+      .then((r) => r.json())
+      .then((data) => {
+        const list: ModelOption[] = data.models ?? []
+        setModels(list)
+        // 기본 모델을 목록에서 찾아서 초기 선택
+        const defaultId: string | undefined = data.default
+        const defaultProvider: string | undefined = data.default_provider
+        const found = list.find((m) => m.id === defaultId && m.provider === defaultProvider)
+          ?? list.find((m) => m.id === defaultId)
+          ?? list[0]
+        if (found) setSelectedModel(found)
+      })
+      .catch(() => {})
+  }, [])
+
+  const handleModelChange = (modelId: string) => {
+    const found = models.find((m) => m.id === modelId)
+    if (found) setSelectedModel(found)
+  }
+
+  const meeting = useMeeting(initialRecord, onTitleGenerated, resolvedType, executionBrief, selectedModel?.id, selectedModel?.provider)
   const draftKey = `draft_job_${initialRecord?.id ?? 'new'}`
   const [showDocPanel, setShowDocPanel] = useState(false)
   const [showTaskDraft, setShowTaskDraft] = useState(
-    () => !!sessionStorage.getItem(draftKey)
+    () => !!localStorage.getItem(draftKey)
   )
   const [isDragging, setIsDragging] = useState(false)
   const inputRef = useRef<MessageInputRef>(null)
@@ -85,8 +114,8 @@ export function MeetingApp({ initialRecord, onFinished, onGoToList, onTitleGener
       <TaskDraftPanel
         contextDoc={meeting.contextDoc ?? ''}
         draftKey={draftKey}
-        onBack={() => setShowTaskDraft(false)}
-        onPipelineStarted={onPipelineStarted}
+        onBack={() => { localStorage.removeItem(draftKey); setShowTaskDraft(false) }}
+        onPipelineStarted={(jobId) => { localStorage.removeItem(draftKey); onPipelineStarted?.(jobId) }}
       />
     )
   }
@@ -109,7 +138,7 @@ export function MeetingApp({ initialRecord, onFinished, onGoToList, onTitleGener
           {meeting.contextDoc && (
             <button
               className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
-              onClick={() => setShowTaskDraft(true)}
+              onClick={() => { localStorage.setItem(draftKey, '1'); setShowTaskDraft(true) }}
             >
               🚀 태스크 생성
             </button>
@@ -222,7 +251,14 @@ export function MeetingApp({ initialRecord, onFinished, onGoToList, onTitleGener
       />
 
       {/* 입력창 */}
-      <MessageInput ref={inputRef} onSend={meeting.sendUserMessage} disabled={meeting.isStreaming} />
+      <MessageInput
+        ref={inputRef}
+        onSend={meeting.sendUserMessage}
+        disabled={meeting.isStreaming}
+        models={models}
+        selectedModel={selectedModel?.id}
+        onModelChange={handleModelChange}
+      />
 
       {/* 컨텍스트 문서 패널 */}
       {showDocPanel && (

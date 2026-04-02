@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { projectTasksPath, projectReportsDir } from '../storage/projectStorage'
 import { ACTIVE_JOB_KEY } from './PipelineLogView'
+import { AvailableModel, PipelineModelModal } from './PipelineModelModal'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000') as string
 const RECENT_KEY = 'dashboard_recent_projects'
@@ -105,6 +106,66 @@ function FileIcon() {
 }
 
 // ── 서브 컴포넌트 ─────────────────────────────────────────────────────────────
+
+function ModelInfoRow({
+  lastJob,
+  serverConfig,
+}: {
+  lastJob: any
+  serverConfig: { llm_provider: string; model_fast: string; model_capable: string } | null
+}) {
+  const req = lastJob?.request
+
+  const agentProvider = req?.provider_fast || req?.provider || serverConfig?.llm_provider || ''
+  const agentModel    = req?.model_fast    || serverConfig?.model_fast    || ''
+  const orchProvider  = req?.provider_capable || req?.provider || serverConfig?.llm_provider || ''
+  const orchModel     = req?.model_capable || serverConfig?.model_capable || ''
+
+  if (!agentModel && !orchModel) return null
+
+  const isRunning = lastJob?.status === 'running'
+  const isFromJob = !!req
+
+  const modelName = (id: string) => {
+    // "claude-sonnet-4-6" → "Sonnet 4.6" 등 짧게 표시
+    const map: Record<string, string> = {
+      'claude-haiku-4-5-20251001': 'Haiku 4.5',
+      'claude-sonnet-4-6': 'Sonnet 4.6',
+      'claude-opus-4-6': 'Opus 4.6',
+      'gpt-4o-mini': 'GPT-4o Mini',
+      'gpt-4o': 'GPT-4o',
+    }
+    return map[id] || id
+  }
+
+  return (
+    <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+      {/* 출처 뱃지 */}
+      {isRunning ? (
+        <span className="flex items-center gap-1 text-[10px] font-medium text-green-600 dark:text-green-400">
+          <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse inline-block" />
+          실행 중
+        </span>
+      ) : isFromJob ? (
+        <span className="text-[10px] text-gray-400 dark:text-zinc-500">마지막 실행</span>
+      ) : (
+        <span className="text-[10px] text-gray-400 dark:text-zinc-500">서버 기본값</span>
+      )}
+
+      {/* 코딩 에이전트 */}
+      <span className="flex items-center gap-1 text-[10px] bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 px-2 py-0.5 rounded-full">
+        <span className="text-gray-400 dark:text-zinc-500">에이전트</span>
+        <span className="font-medium">{agentProvider} / {modelName(agentModel)}</span>
+      </span>
+
+      {/* 오케스트레이터 */}
+      <span className="flex items-center gap-1 text-[10px] bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 px-2 py-0.5 rounded-full">
+        <span className="text-gray-400 dark:text-zinc-500">오케스트레이터</span>
+        <span className="font-medium">{orchProvider} / {modelName(orchModel)}</span>
+      </span>
+    </div>
+  )
+}
 
 function MetricCard({ label, value, sub }: { label: string; value: string | number; sub?: string }) {
   return (
@@ -285,6 +346,7 @@ interface ActiveJob {
   job_id: string
   status: string
   paused?: boolean
+  stopping?: boolean
 }
 
 interface DashboardPageProps {
@@ -322,6 +384,10 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null)
+  const [lastMatchedJob, setLastMatchedJob] = useState<any>(null)
+  const [serverConfig, setServerConfig] = useState<{ llm_provider: string; model_fast: string; model_capable: string } | null>(null)
+  const [showResumeModal, setShowResumeModal] = useState(false)
+  const [availableModels, setAvailableModels] = useState<AvailableModel[]>([])
   const [controlling, setControlling] = useState(false)
   const [resuming, setResuming] = useState(false)
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null)
@@ -368,6 +434,17 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
 
   useEffect(() => { loadData(config) }, [])
 
+  useEffect(() => {
+    fetch(`${API_BASE}/api/config`)
+      .then(r => r.json())
+      .then(setServerConfig)
+      .catch(() => {})
+    fetch(`${API_BASE}/api/chat/models`)
+      .then(r => r.json())
+      .then(data => setAvailableModels(data.models ?? []))
+      .catch(() => {})
+  }, [])
+
   // 컨텍스트 문서 목록 로드 (project.rootDir 기준, 변경 시 재로드)
   const repoPathForContext = project?.rootDir ?? '.'
 
@@ -389,8 +466,9 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
       const matched = jobs.find((j: any) =>
         pathsOverlap(project.rootDir, j.request?.repo_path ?? '')
       )
-      // running 상태인 잡만 제어 대상
+      // running 상태인 잡만 제어 대상, 최근 잡은 상태 무관하게 추적
       setActiveJob(matched && matched.status === 'running' ? matched : null)
+      setLastMatchedJob(matched ?? null)
     } catch { /* 무시 */ }
   }, [project])
 
@@ -411,9 +489,9 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
         body: JSON.stringify({ action }),
       })
       if (action === 'stop') {
-        // 파이프라인이 실제 종료될 때까지 시간이 걸리므로 즉시 버튼 숨김.
-        // 폴링이 done 상태를 감지하면 자연스럽게 사라짐.
-        setActiveJob(null)
+        // 신호는 전달됐지만 파이프라인은 현재 태스크가 끝날 때까지 계속 실행됨.
+        // UI에 "중단 요청됨" 상태를 표시하고, 폴링이 done을 감지하면 자연히 사라짐.
+        setActiveJob(prev => prev ? { ...prev, stopping: true } : prev)
       } else {
         await fetchActiveJob()
       }
@@ -422,8 +500,9 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
     }
   }
 
-  async function resumePipeline() {
+  async function resumePipeline(providerFast: string, modelFast: string, providerCapable: string, modelCapable: string) {
     if (!project) return
+    setShowResumeModal(false)
     setResuming(true)
     try {
       const res = await fetch(`${API_BASE}/api/pipeline/run`, {
@@ -436,6 +515,10 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
           no_pr: false,
           discord_channel_id: project.discordChannelId ?? null,
           auto_merge: autoMerge,
+          provider_fast: providerFast,
+          model_fast: modelFast,
+          provider_capable: providerCapable,
+          model_capable: modelCapable,
         }),
       })
       if (!res.ok) throw new Error('파이프라인 시작 실패')
@@ -603,6 +686,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
                 <p className="text-xs text-gray-400 dark:text-zinc-500 mt-0.5 font-mono truncate">
                   {config.reportsDir}
                 </p>
+                <ModelInfoRow lastJob={lastMatchedJob} serverConfig={serverConfig} />
               </div>
 
               {/* 파이프라인 재개 버튼 + auto_merge 토글 (실행 중 잡 없을 때) */}
@@ -628,7 +712,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
                     자동 머지
                   </button>
                   <button
-                    onClick={resumePipeline}
+                    onClick={() => setShowResumeModal(true)}
                     disabled={resuming}
                     className="rounded-lg px-3 py-1.5 text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
                     title="pending/failed 태스크만 이어서 실행"
@@ -641,7 +725,9 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
               {activeJob && (
                 <div className="flex items-center gap-2 flex-shrink-0">
                   <div className="flex items-center gap-1.5">
-                    {activeJob.paused ? (
+                    {activeJob.stopping ? (
+                      <span className="text-xs text-red-400 font-medium">🛑 중단 요청됨…</span>
+                    ) : activeJob.paused ? (
                       <span className="text-xs text-amber-400 font-medium">⏸ 일시정지됨</span>
                     ) : (
                       <span className="flex items-center gap-1 text-xs text-green-500 font-medium">
@@ -650,30 +736,36 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
                       </span>
                     )}
                   </div>
-                  {activeJob.paused ? (
-                    <button
-                      onClick={() => sendControl('resume')}
-                      disabled={controlling}
-                      className="rounded-lg px-3 py-1.5 text-xs font-medium bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 transition-colors"
-                    >
-                      ▶ 계속
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => sendControl('pause')}
-                      disabled={controlling}
-                      className="rounded-lg px-3 py-1.5 text-xs font-medium bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-50 transition-colors"
-                    >
-                      ⏸ 멈춤
-                    </button>
+                  {/* stopping 중엔 버튼 숨김 */}
+                  {!activeJob.stopping && (
+                    <>
+                      {activeJob.paused ? (
+                        <button
+                          onClick={() => sendControl('resume')}
+                          disabled={controlling}
+                          className="rounded-lg px-3 py-1.5 text-xs font-medium bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 transition-colors"
+                        >
+                          ▶ 계속
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => sendControl('pause')}
+                          disabled={controlling}
+                          className="rounded-lg px-3 py-1.5 text-xs font-medium bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-50 transition-colors"
+                        >
+                          ⏸ 멈춤
+                        </button>
+                      )}
+                      <button
+                        onClick={() => { if (confirm('파이프라인을 중단하시겠습니까?')) sendControl('stop') }}
+                        disabled={controlling}
+                        className="rounded-lg px-3 py-1.5 text-xs font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+                        title="현재 태스크 완료 후 종료"
+                      >
+                        ■ 중단
+                      </button>
+                    </>
                   )}
-                  <button
-                    onClick={() => { if (confirm('파이프라인을 중단하시겠습니까?')) sendControl('stop') }}
-                    disabled={controlling}
-                    className="rounded-lg px-3 py-1.5 text-xs font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
-                  >
-                    ■ 중단
-                  </button>
                 </div>
               )}
             </div>
@@ -1053,6 +1145,14 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
           </div>
         )}
       </div>
+
+      {showResumeModal && availableModels.length > 0 && (
+        <PipelineModelModal
+          models={availableModels}
+          onConfirm={resumePipeline}
+          onCancel={() => setShowResumeModal(false)}
+        />
+      )}
     </div>
   )
 }

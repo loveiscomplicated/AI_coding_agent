@@ -7,8 +7,9 @@
  *   generating → editing → saving → running | error
  */
 
-import { useEffect, useReducer, useState } from 'react'
+import { useEffect, useReducer, useRef, useState } from 'react'
 import { PipelineLogView, ACTIVE_JOB_KEY } from './PipelineLogView'
+import { AvailableModel, PipelineModelModal } from './PipelineModelModal'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000') as string
 
@@ -21,6 +22,7 @@ export interface DraftTask {
   acceptance_criteria: string[]
   target_files: string[]
   depends_on: string[]
+  task_type: 'backend' | 'frontend'
   warnings?: string[]
 }
 
@@ -72,6 +74,7 @@ function reducer(state: State, action: Action): State {
         acceptance_criteria: [''],
         target_files: [],
         depends_on: [],
+        task_type: 'backend',
       }
       return { ...state, tasks: [...state.tasks, newTask] }
     }
@@ -110,8 +113,39 @@ interface Props {
 
 // ── 컴포넌트 ──────────────────────────────────────────────────────────────────
 
+const DRAFT_STATE_PREFIX = 'draft_state_'
+
+function loadSavedState(draftKey: string): State | null {
+  try {
+    const raw = localStorage.getItem(DRAFT_STATE_PREFIX + draftKey)
+    if (!raw) return null
+    return JSON.parse(raw) as State
+  } catch {
+    return null
+  }
+}
+
 export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted }: Props) {
-  const [state, dispatch] = useReducer(reducer, {
+  const [modelName, setModelName] = useState<string>('AI')
+  const [availableModels, setAvailableModels] = useState<AvailableModel[]>([])
+  const [showModelModal, setShowModelModal] = useState(false)
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/config`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data?.model_capable) setModelName(data.model_capable) })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/chat/models`)
+      .then(r => r.json())
+      .then(data => setAvailableModels(data.models ?? []))
+      .catch(() => {})
+  }, [])
+
+  const saved = loadSavedState(draftKey)
+  const [state, dispatch] = useReducer(reducer, saved ?? {
     phase: 'generating',
     tasks: [],
     errorMsg: '',
@@ -121,13 +155,24 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
     agentCount: 1,
   })
 
+  // editing 중 상태 변경마다 localStorage에 저장
+  useEffect(() => {
+    if (state.phase === 'editing' || state.phase === 'saving') {
+      localStorage.setItem(DRAFT_STATE_PREFIX + draftKey, JSON.stringify(state))
+    }
+    if (state.phase === 'running' || state.phase === 'done') {
+      localStorage.removeItem(DRAFT_STATE_PREFIX + draftKey)
+    }
+  }, [state, draftKey])
+
   // tasks.yaml은 항상 rootDir/data/tasks.yaml
   const tasksFilePath = state.rootDir === '.'
     ? 'data/tasks.yaml'
     : state.rootDir.replace(/\/+$/, '') + '/data/tasks.yaml'
 
-  // 마운트 시: 진행 중인 잡이 있으면 재연결, 없으면 새로 시작
+  // 마운트 시: 저장된 상태가 있으면 생성 스킵, 없으면 새로 시작
   useEffect(() => {
+    if (saved) return   // 복원된 상태가 있으면 폴링 불필요
     let pollTimer: ReturnType<typeof setTimeout> | null = null
     let stopped = false
 
@@ -190,20 +235,39 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
 
 
   const [browsing, setBrowsing] = useState(false)
+  const browseAbortRef = useRef<AbortController | null>(null)
 
   async function browseRoot() {
+    // 이미 진행 중이면 취소
+    if (browsing) {
+      browseAbortRef.current?.abort()
+      setBrowsing(false)
+      return
+    }
+    const controller = new AbortController()
+    browseAbortRef.current = controller
     setBrowsing(true)
     try {
       const initial = state.rootDir && state.rootDir !== '.' ? state.rootDir : '~'
-      const res = await fetch(`${API_BASE}/api/utils/browse?type=folder&initial=${encodeURIComponent(initial)}`)
+      const res = await fetch(
+        `${API_BASE}/api/utils/browse?type=folder&initial=${encodeURIComponent(initial)}`,
+        { signal: controller.signal },
+      )
       const data = await res.json()
       if (!data.cancelled && data.path) dispatch({ type: 'SET_ROOT', path: data.path })
+    } catch (e) {
+      // AbortError는 정상 취소 — 무시
+      if (e instanceof Error && e.name !== 'AbortError') throw e
     } finally {
       setBrowsing(false)
     }
   }
 
-  async function handleSaveAndRun() {
+  async function handleSaveAndRun(
+    providerFast: string, modelFast: string,
+    providerCapable: string, modelCapable: string,
+  ) {
+    setShowModelModal(false)
     dispatch({ type: 'SAVING' })
     try {
       // 1. 컨텍스트 문서를 data/context/spec.md에 저장
@@ -227,7 +291,8 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
         const err = await saveRes.json().catch(() => ({ detail: saveRes.statusText }))
         throw new Error(err.detail ?? '저장 실패')
       }
-      // 2. 파이프라인 실행
+
+      // 3. 파이프라인 실행
       const runRes = await fetch(`${API_BASE}/api/pipeline/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -237,6 +302,10 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
           base_branch: state.baseBranch || 'main',
           no_pr: false,
           max_workers: state.agentCount,
+          provider_fast: providerFast,
+          model_fast: modelFast,
+          provider_capable: providerCapable,
+          model_capable: modelCapable,
         }),
       })
       if (!runRes.ok) {
@@ -258,7 +327,7 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4">
         <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm text-gray-500 dark:text-zinc-400">Sonnet이 태스크를 생성하고 있습니다…</p>
+        <p className="text-sm text-gray-500 dark:text-zinc-400">{modelName}이 태스크를 생성하고 있습니다…</p>
       </div>
     )
   }
@@ -302,19 +371,35 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
 
   // editing | saving
   return (
+    <>
+    {showModelModal && (
+      <PipelineModelModal
+        models={availableModels}
+        onConfirm={(pf, mf, pc, mc) => handleSaveAndRun(pf, mf, pc, mc)}
+        onCancel={() => setShowModelModal(false)}
+      />
+    )}
     <div className="flex flex-col h-full">
       {/* 헤더 */}
       <div className="flex items-center justify-between px-4 py-3 bg-white dark:bg-zinc-900 border-b border-gray-200 dark:border-zinc-700">
         <div className="flex items-center gap-2">
           <button
             className="text-sm text-gray-500 dark:text-zinc-400 hover:text-gray-700 dark:hover:text-zinc-200"
-            onClick={onBack}
+            onClick={() => {
+              localStorage.removeItem(DRAFT_STATE_PREFIX + draftKey)
+              onBack()
+            }}
           >
             ←
           </button>
           <span className="text-sm font-semibold text-gray-800 dark:text-zinc-100">
             태스크 초안 ({state.tasks.length}개)
           </span>
+          {state.tasks.some(t => t.task_type === 'frontend') && (
+            <span className="text-xs font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-400 px-2 py-0.5 rounded-full">
+              🖥 frontend {state.tasks.filter(t => t.task_type === 'frontend').length}개 제외
+            </span>
+          )}
           {state.tasks.some(t => (t.warnings?.length ?? 0) > 0) && (
             <span className="text-xs font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400 px-2 py-0.5 rounded-full">
               ⚠ 크기 초과 태스크 있음
@@ -339,9 +424,8 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
             </div>
             <button
               onClick={browseRoot}
-              disabled={browsing}
-              className="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300 disabled:opacity-40 px-1 py-1 rounded transition-colors"
-              title="파인더에서 프로젝트 루트 선택"
+              className="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300 px-1 py-1 rounded transition-colors"
+              title={browsing ? '취소 (클릭)' : '파인더에서 프로젝트 루트 선택'}
             >
               {browsing ? (
                 <span className="inline-block w-3.5 h-3.5 border border-gray-400 border-t-transparent rounded-full animate-spin" />
@@ -378,7 +462,7 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
           </div>
           <button
             className="rounded-lg bg-blue-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
-            onClick={handleSaveAndRun}
+            onClick={() => setShowModelModal(true)}
             disabled={state.phase === 'saving' || state.tasks.length === 0}
           >
             {state.phase === 'saving' ? '저장 중…' : '저장 & 파이프라인 시작 🚀'}
@@ -408,6 +492,7 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
         </button>
       </div>
     </div>
+    </>
   )
 }
 
@@ -452,6 +537,17 @@ function TaskCard({ task, idx, total, onUpdate, onDelete, onMove }: CardProps) {
           onChange={e => updateField('title', e.target.value)}
           placeholder="태스크 제목"
         />
+        <button
+          className={`shrink-0 text-[10px] font-medium px-2 py-0.5 rounded-full border transition-colors ${
+            task.task_type === 'frontend'
+              ? 'bg-purple-100 text-purple-700 border-purple-300 dark:bg-purple-900/30 dark:text-purple-400 dark:border-purple-700'
+              : 'bg-gray-100 text-gray-500 border-gray-300 dark:bg-zinc-800 dark:text-zinc-400 dark:border-zinc-600'
+          }`}
+          onClick={() => updateField('task_type', task.task_type === 'frontend' ? 'backend' : 'frontend')}
+          title={task.task_type === 'frontend' ? '프론트엔드 태스크 (파이프라인 제외) — 클릭하여 전환' : '백엔드 태스크 (파이프라인 실행) — 클릭하여 전환'}
+        >
+          {task.task_type === 'frontend' ? '🖥 frontend' : '⚙ backend'}
+        </button>
         <div className="flex items-center gap-1 shrink-0">
           <button
             className="w-6 h-6 flex items-center justify-center rounded text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300 disabled:opacity-30"

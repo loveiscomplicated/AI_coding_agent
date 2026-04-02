@@ -27,6 +27,8 @@ export function useMeeting(
   onTitleGenerated?: () => void,
   meetingType: 'project' | 'system' = 'project',
   executionBrief?: string,
+  model?: string,
+  provider?: string,
 ) {
   const storage = useRef(new MeetingStorage()).current
   const meetingId = useRef(initialRecord?.id ?? generateId()).current
@@ -48,7 +50,7 @@ export function useMeeting(
     initialRecord?.meetingType ?? meetingType,
     executionBrief,
   )
-  const { sendMessage, isStreaming } = useAnthropicStream(systemPrompt)
+  const { sendMessage, isStreaming } = useAnthropicStream(systemPrompt, model, provider)
 
   const persistState = useCallback(
     (msgs: ChatMessage[], ctx: MeetingContext, finished: boolean, titleOverride?: string, doc?: string) => {
@@ -141,7 +143,7 @@ export function useMeeting(
   const generateFinalDoc = useCallback(async (msgs: ChatMessage[], finished: boolean) => {
     setIsRefreshing(true)
     try {
-      const newDoc = await generateContextDocWithOpus(msgs, contextDoc)
+      const newDoc = await generateContextDocWithOpus(msgs, contextDoc, model, provider)
       if (!newDoc) return
       const { meta } = parseContextDoc(newDoc)
       const newCtx: MeetingContext = {
@@ -185,6 +187,8 @@ export function useMeeting(
           setRefreshingDoc(accumulated)
         },
         controller.signal,
+        model,
+        provider,
       )
       if (!controller.signal.aborted && newDoc !== contextDoc) {
         const { meta } = parseContextDoc(newDoc)

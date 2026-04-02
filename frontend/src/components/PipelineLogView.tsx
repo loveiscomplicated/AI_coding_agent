@@ -159,6 +159,7 @@ export function PipelineLogView({ jobId, onDone }: Props) {
   const [disconnected, setDisconnected] = useState(false)
   const [paused, setPaused] = useState(false)
   const [controlling, setControlling] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -235,6 +236,11 @@ export function PipelineLogView({ jobId, onDone }: Props) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }),
       })
+      if (action === 'stop') {
+        // 신호는 전달됐지만 파이프라인은 현재 태스크가 끝날 때까지 실행됨.
+        // pipeline_aborted SSE 이벤트가 오면 ended=true로 자연히 종료됨.
+        setStopping(true)
+      }
     } finally {
       setControlling(false)
     }
@@ -255,7 +261,12 @@ export function PipelineLogView({ jobId, onDone }: Props) {
             <div className="w-3 h-3 rounded-full bg-green-500" />
           )}
           <span className="text-sm font-semibold text-gray-800 dark:text-zinc-100">
-            {paused ? '⏸ 일시정지됨' : !ended ? '파이프라인 실행 중…' : disconnected ? '연결 끊김' : '파이프라인 완료'}
+            {stopping && !ended
+              ? '🛑 중단 요청됨 — 현재 태스크 완료 후 종료'
+              : paused ? '⏸ 일시정지됨'
+              : !ended ? '파이프라인 실행 중…'
+              : disconnected ? '연결 끊김'
+              : '파이프라인 완료'}
           </span>
           <span className="text-xs text-gray-400 dark:text-zinc-500 font-mono">{jobId.slice(0, 8)}</span>
         </div>
@@ -265,8 +276,8 @@ export function PipelineLogView({ jobId, onDone }: Props) {
               백엔드가 재시작되면 대시보드에서 결과를 확인하세요
             </span>
           )}
-          {/* 실행 중 제어 버튼 */}
-          {!ended && (
+          {/* 실행 중 제어 버튼 — stopping 상태면 숨김 (pipeline_aborted SSE 대기 중) */}
+          {!ended && !stopping && (
             <div className="flex items-center gap-1">
               {paused ? (
                 <button
@@ -291,7 +302,7 @@ export function PipelineLogView({ jobId, onDone }: Props) {
                 onClick={() => { if (confirm('파이프라인을 중단하시겠습니까?')) sendControl('stop') }}
                 disabled={controlling}
                 className="rounded px-2.5 py-1 text-xs font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
-                title="파이프라인 중단"
+                title="파이프라인 중단 (현재 태스크 완료 후 종료)"
               >
                 ■ 중단
               </button>

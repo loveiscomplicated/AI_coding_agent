@@ -83,7 +83,7 @@ hint: [남은 미결 사항 또는 다음 논의 필요 내용]
 
 // ─── 내부 헬퍼 ───────────────────────────────────────────────────────────────
 
-function buildAnthropicMessages(messages: ChatMessage[]) {
+function buildMessages(messages: ChatMessage[]) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return messages.map((m): any => {
     if (!m.attachments?.length) return { role: m.role, content: m.content }
@@ -156,7 +156,7 @@ export async function generateChatTitle(message: string): Promise<string> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
+        use_fast_model: true,
         max_tokens: 20,
         messages: [{
           role: 'user',
@@ -175,16 +175,19 @@ export async function generateChatTitle(message: string): Promise<string> {
 export async function generateContextDocWithOpus(
   messages: ChatMessage[],
   prevDoc: string,
+  model?: string,
+  provider?: string,
 ): Promise<string> {
   try {
     const res = await fetch(`${API_BASE}/api/chat/complete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'claude-opus-4-6',
         max_tokens: 16000,
         system: OPUS_CONTEXT_DOC_SYSTEM,
         messages: [{ role: 'user', content: buildContextDocUserContent(messages, prevDoc) }],
+        ...(model ? { model } : {}),
+        ...(provider ? { provider } : {}),
       }),
     })
     if (!res.ok) return prevDoc
@@ -200,15 +203,18 @@ export async function generateContextDocWithOpusStream(
   prevDoc: string,
   onToken: (token: string) => void,
   signal?: AbortSignal,
+  model?: string,
+  provider?: string,
 ): Promise<string> {
   try {
     const result = await readStream(
       `${API_BASE}/api/chat/stream`,
       {
-        model: 'claude-opus-4-6',
         max_tokens: 16000,
         system: OPUS_CONTEXT_DOC_SYSTEM,
         messages: [{ role: 'user', content: buildContextDocUserContent(messages, prevDoc) }],
+        ...(model ? { model } : {}),
+        ...(provider ? { provider } : {}),
       },
       onToken,
       signal,
@@ -221,7 +227,7 @@ export async function generateContextDocWithOpusStream(
 
 // ─── 훅 ───────────────────────────────────────────────────────────────────────
 
-export function useAnthropicStream(systemPrompt?: string) {
+export function useAnthropicStream(systemPrompt?: string, model?: string, provider?: string) {
   const [isStreaming, setIsStreaming] = useState(false)
   const prompt = systemPrompt ?? BASE_SYSTEM_PROMPT
 
@@ -236,10 +242,11 @@ export function useAnthropicStream(systemPrompt?: string) {
         await readStream(
           `${API_BASE}/api/chat/stream`,
           {
-            model: 'claude-opus-4-6',
             max_tokens: 4096,
             system: prompt,
-            messages: buildAnthropicMessages(messages),
+            messages: buildMessages(messages),
+            ...(model ? { model } : {}),
+            ...(provider ? { provider } : {}),
           },
           onToken,
         )
@@ -248,7 +255,7 @@ export function useAnthropicStream(systemPrompt?: string) {
         onDone()
       }
     },
-    [prompt],
+    [prompt, model, provider],
   )
 
   return { sendMessage, isStreaming }
