@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from backend.config import DISCORD_BOT_TOKEN, DISCORD_GUILD_ID
+from backend.config import DISCORD_BOT_TOKEN, DISCORD_GUILD_ID, LLM_PROVIDER, LLM_MODEL_FAST, LLM_MODEL_CAPABLE
 from hotline.notifier import DiscordNotifier
 from orchestrator.run import PauseController, run_pipeline
 
@@ -60,6 +60,11 @@ class RunRequest(BaseModel):
     discord_channel_id: str | None = None  # 프로젝트 Discord 채널 ID (없으면 자동 생성)
     max_orchestrator_retries: int = 2   # 오케스트레이터 자동 재시도 최대 횟수
     auto_merge: bool = False            # 그룹 완료 후 base_branch 에 자동 머지
+    provider: str | None = None          # 공통 기본 프로바이더 (None → 서버 환경변수)
+    model_fast: str | None = None        # 코딩 에이전트 모델
+    model_capable: str | None = None     # 오케스트레이터 모델
+    provider_fast: str | None = None     # 코딩 에이전트 프로바이더 (None → provider)
+    provider_capable: str | None = None  # 오케스트레이터 프로바이더 (None → provider)
 
 
 # ── 엔드포인트 ────────────────────────────────────────────────────────────────
@@ -122,6 +127,11 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
                 discord_channel_id=int(resolved_channel_id) if resolved_channel_id else None,
                 max_orchestrator_retries=body.max_orchestrator_retries,
                 auto_merge=body.auto_merge,
+                provider=body.provider or LLM_PROVIDER,
+                model_fast=body.model_fast or LLM_MODEL_FAST,
+                model_capable=body.model_capable or LLM_MODEL_CAPABLE,
+                provider_fast=body.provider_fast,
+                provider_capable=body.provider_capable,
             )
             with _lock:
                 _jobs[job_id]["status"] = "done"

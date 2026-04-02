@@ -11,7 +11,19 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from backend.config import LLM_PROVIDER, LLM_MODEL_FAST, LLM_MODEL_CAPABLE
+
 router = APIRouter()
+
+
+@router.get("/config")
+def get_config() -> dict:
+    """현재 백엔드 LLM 설정을 반환한다."""
+    return {
+        "llm_provider": LLM_PROVIDER,
+        "model_fast": LLM_MODEL_FAST,
+        "model_capable": LLM_MODEL_CAPABLE,
+    }
 
 
 class SaveContextDocRequest(BaseModel):
@@ -98,11 +110,15 @@ def browse_path(
             f'default location POSIX file "{expanded}")'
         )
 
-    result = subprocess.run(
-        ["osascript", "-e", script],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=120,  # 2분 이상 선택 안 하면 취소로 간주
+        )
+    except subprocess.TimeoutExpired:
+        return {"path": None, "cancelled": True}
 
     if result.returncode != 0:
         # 사용자가 취소하면 returncode=1, stderr에 "User canceled" 포함

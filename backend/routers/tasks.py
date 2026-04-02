@@ -17,14 +17,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import anthropic
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from backend.config import ANTHROPIC_API_KEY
+from backend.config import LLM_PROVIDER, LLM_MODEL_CAPABLE
+from llm import LLMConfig, Message, create_client
 from orchestrator.task import Task, load_tasks, save_tasks
-
-_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # ── 초안 생성 잡 저장소 ──────────────────────────────────────────────────────
 _draft_jobs: dict[str, dict] = {}
@@ -43,6 +41,9 @@ _DRAFT_SYSTEM_PROMPT = """\
 - depends_on: 먼저 완료되어야 하는 태스크 id 목록 (없으면 빈 배열)
 - 컨텍스트 문서에 언급되지 않은 기능을 임의로 추가하지 말 것
 - id는 "task-001", "task-002", ... 형식
+- task_type: "backend" 또는 "frontend" 중 하나
+  - "frontend": HTML/CSS/JS/React/Vue 등 브라우저에서 실행되는 UI 코드. 멀티 에이전트 파이프라인이 실행하지 않으므로 수락 기준을 자동으로 검증할 수 없음. 이 경우에도 태스크를 생성하되, task_type을 "frontend"로 설정할 것.
+  - "backend": 서버, CLI, 라이브러리, 테스트, 인프라 등 나머지 모든 것
 
 [분할 예시]
 나쁜 예 — 파일 7개를 한 태스크에:
@@ -55,7 +56,7 @@ _DRAFT_SYSTEM_PROMPT = """\
 
 [출력 형식]
 다음 JSON만 출력하세요. 마크다운 코드블록, 설명 텍스트 없이 순수 JSON만:
-{"tasks": [{"id": "task-001", "title": "...", "description": "...", "acceptance_criteria": ["..."], "target_files": ["..."], "depends_on": []}]}
+{"tasks": [{"id": "task-001", "title": "...", "description": "...", "acceptance_criteria": ["..."], "target_files": ["..."], "depends_on": [], "task_type": "backend"}]}
 """
 
 router = APIRouter()
@@ -70,15 +71,21 @@ class DraftRequest(BaseModel):
 # ── 엔드포인트 ────────────────────────────────────────────────────────────────
 
 def _run_draft(job_id: str, context_doc: str) -> None:
-    """백그라운드 스레드에서 Sonnet 초안 생성을 실행한다."""
+    """백그라운드 스레드에서 LLM 초안 생성을 실행한다."""
     try:
-        response = _client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=16000,
-            system=_DRAFT_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": context_doc}],
+        client = create_client(
+            LLM_PROVIDER,
+            LLMConfig(model=LLM_MODEL_CAPABLE, max_tokens=16000, system_prompt=_DRAFT_SYSTEM_PROMPT),
         )
-        raw = response.content[0].text if response.content else ""
+        llm_response = client.chat([Message(role="user", content=context_doc)])
+        raw = ""
+        for block in llm_response.content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                raw = block["text"]
+                break
+            if hasattr(block, "type") and block.type == "text":
+                raw = block.text
+                break
 
         cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip())
         cleaned = re.sub(r"\s*```$", "", cleaned)
@@ -86,11 +93,10 @@ def _run_draft(job_id: str, context_doc: str) -> None:
         try:
             data: Any = json.loads(cleaned)
         except json.JSONDecodeError as e:
-            stop = getattr(response, "stop_reason", None)
-            if stop == "max_tokens":
+            if llm_response.stop_reason == "max_tokens":
                 error = "태스크가 너무 많아 응답이 잘렸습니다. 컨텍스트 문서를 줄이거나 태스크를 분할하세요."
             else:
-                error = f"Sonnet 응답 파싱 실패: {e}\n응답:\n{raw[:300]}"
+                error = f"LLM 응답 파싱 실패: {e}\n응답:\n{raw[:300]}"
             with _draft_lock:
                 _draft_jobs[job_id]["status"] = "error"
                 _draft_jobs[job_id]["error"] = error
@@ -100,7 +106,7 @@ def _run_draft(job_id: str, context_doc: str) -> None:
         if not isinstance(tasks, list):
             with _draft_lock:
                 _draft_jobs[job_id]["status"] = "error"
-                _draft_jobs[job_id]["error"] = "Sonnet 응답에 'tasks' 배열이 없습니다."
+                _draft_jobs[job_id]["error"] = "LLM 응답에 'tasks' 배열이 없습니다."
             return
 
         for task in tasks:

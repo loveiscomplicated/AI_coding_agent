@@ -10,12 +10,32 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
+# LLM 프로바이더 설정 (기본값: claude)
+LLM_PROVIDER: str = os.environ.get("LLM_PROVIDER", "claude")
+LLM_MODEL_FAST: str = os.environ.get("LLM_MODEL_FAST", "claude-haiku-4-5-20251001")
+LLM_MODEL_CAPABLE: str = os.environ.get("LLM_MODEL_CAPABLE", "claude-opus-4-6")
 
-if not ANTHROPIC_API_KEY:
+# API 키 (provider에 따라 필요 여부 다름)
+ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
+OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
+ZAI_API_KEY: str = os.environ.get("ZAI_API_KEY", "")
+
+# provider별 API 키 필수 확인
+if LLM_PROVIDER == "claude" and not ANTHROPIC_API_KEY:
     raise RuntimeError(
         "ANTHROPIC_API_KEY 환경 변수가 설정되지 않았습니다.\n"
-        "프로젝트 루트의 .env 파일에 ANTHROPIC_API_KEY=sk-ant-... 를 추가하세요."
+        "프로젝트 루트의 .env 파일에 ANTHROPIC_API_KEY=sk-ant-... 를 추가하세요.\n"
+        "다른 프로바이더를 사용하려면 LLM_PROVIDER 환경 변수를 설정하세요."
+    )
+if LLM_PROVIDER == "openai" and not OPENAI_API_KEY:
+    raise RuntimeError(
+        "OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.\n"
+        "프로젝트 루트의 .env 파일에 OPENAI_API_KEY=sk-... 를 추가하세요."
+    )
+if LLM_PROVIDER == "glm" and not ZAI_API_KEY:
+    raise RuntimeError(
+        "ZAI_API_KEY 환경 변수가 설정되지 않았습니다.\n"
+        "프로젝트 루트의 .env 파일에 ZAI_API_KEY=... 를 추가하세요."
     )
 
 # Discord 핫라인 (Step 5). 미설정 시 Discord 기능 비활성화.

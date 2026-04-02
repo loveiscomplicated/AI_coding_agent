@@ -5,6 +5,7 @@ main.py — AI Coding Agent 진입점
     python main.py                        # claude (기본값)
     python main.py -p ollama -m qwen2.5-coder:14b
     python main.py -p openai  -m gpt-4o
+    python main.py -p openai  -m gpt-4.1-mini
     python main.py -p claude  -s <세션-ID-앞자리>  # 세션 이어하기
 """
 

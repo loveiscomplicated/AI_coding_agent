@@ -24,11 +24,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import anthropic
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from backend.config import ANTHROPIC_API_KEY
+from backend.config import LLM_PROVIDER, LLM_MODEL_CAPABLE
+from llm import LLMConfig, Message, create_client
 from orchestrator.report import load_reports
 from orchestrator.weekly import (
     current_iso_week,
@@ -38,8 +40,6 @@ from orchestrator.weekly import (
 )
 
 router = APIRouter()
-
-_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
 _BRIEF_SYSTEM = """\
 당신은 소프트웨어 개발 에이전트 시스템의 성능 분석가입니다.
@@ -108,13 +108,18 @@ async def generate_execution_brief(body: ExecutionBriefRequest) -> dict[str, Any
         )
     report_text = "\n---\n".join(lines)
 
-    response = await _client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2048,
-        system=_BRIEF_SYSTEM,
-        messages=[{"role": "user", "content": report_text}],
+    client = create_client(
+        LLM_PROVIDER, LLMConfig(model=LLM_MODEL_CAPABLE, system_prompt=_BRIEF_SYSTEM, max_tokens=2048)
     )
-    brief = response.content[0].text.strip() if response.content else ""
+    response = await asyncio.to_thread(client.chat, [Message(role="user", content=report_text)])
+    brief = ""
+    for block in response.content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            brief = block["text"].strip()
+            break
+        if hasattr(block, "type") and block.type == "text":
+            brief = block.text.strip()
+            break
     return {"brief": brief}
 
 
@@ -136,18 +141,18 @@ class WeeklyReportRequest(BaseModel):
 
 
 def _make_llm_fn():
-    """동기 Anthropic 호출 래퍼 (generate_weekly_report가 동기 llm_fn을 기대함)."""
-    import anthropic as _anthropic
-    sync_client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
+    """동기 LLM 호출 래퍼 (generate_weekly_report가 동기 llm_fn을 기대함)."""
     def llm_fn(system: str, user: str) -> str:
-        resp = sync_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=4096,
-            system=system,
-            messages=[{"role": "user", "content": user}],
+        client = create_client(
+            LLM_PROVIDER, LLMConfig(model=LLM_MODEL_CAPABLE, system_prompt=system, max_tokens=4096)
         )
-        return resp.content[0].text.strip() if resp.content else ""
+        resp = client.chat([Message(role="user", content=user)])
+        for block in resp.content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                return block["text"].strip()
+            if hasattr(block, "type") and block.type == "text":
+                return block.text.strip()
+        return ""
 
     return llm_fn
 
