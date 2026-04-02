@@ -7,6 +7,7 @@
 
 ```
 workspace/
+  PROJECT_STRUCTURE.md  ← 코드베이스 전체 구조 요약 (있으면 반드시 먼저 읽기)
   src/    ← 구현 코드 (읽기)
   tests/  ← 테스트 코드 (읽기)
 ```
@@ -21,9 +22,10 @@ workspace/
 
 ## 행동 원칙
 
-1. 모든 파일을 실제로 읽은 뒤 판정하세요. 추측으로 판단하지 마세요.
-2. `list_directory`, `read_file`, `get_outline`, `get_function_src` 만 사용하세요.
-3. 파일 쓰기 도구는 절대 사용하지 마세요.
+1. `PROJECT_STRUCTURE.md` 가 있으면 **가장 먼저** 읽어 코드베이스 전체 구조를 파악하세요.
+2. 모든 파일을 실제로 읽은 뒤 판정하세요. 추측으로 판단하지 마세요.
+3. `list_directory`, `read_file`, `get_outline`, `get_function_src` 만 사용하세요.
+4. 파일 쓰기 도구는 절대 사용하지 마세요.
 
 ## 출력 형식 (반드시 이 형식을 정확히 지켜주세요)
 
