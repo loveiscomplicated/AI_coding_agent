@@ -111,6 +111,7 @@ class ReactLoop:
         on_tool_result=None,   # Callable[[ToolResult], None] — CLI 훅
         on_tool_approval=None, # Callable[[ToolCall], bool] — 승인 요청 훅
         on_token: Callable[[str], None] | None = None,  # 스트리밍 콜백
+        on_iteration: Callable[[dict], None] | None = None,  # 매 ReAct 반복 완료 후 훅
         max_tool_result_chars: int = 4000,  # 도구 결과 최대 문자 수 (초과 시 잘림)
         history_window: int = 6,  # 보존할 최근 turn 쌍 수 (0=무제한)
     ):
@@ -121,6 +122,7 @@ class ReactLoop:
         self.on_tool_result = on_tool_result
         self.on_tool_approval = on_tool_approval
         self.on_token = on_token
+        self.on_iteration = on_iteration
         self.max_tool_result_chars = max_tool_result_chars
         self.history_window = history_window
         self.TOOLS_SCHEMA = self.get_tools_schema()
@@ -331,6 +333,15 @@ class ReactLoop:
                     elapsed_ms=elapsed,
                 )
             )
+            if self.on_iteration:
+                self.on_iteration({
+                    "iteration": i + 1,
+                    "tool_calls": [
+                        {"name": tc.name, "input_preview": repr(tc.input)[:150]}
+                        for tc in tool_calls
+                    ],
+                    "elapsed_ms": round(elapsed, 1),
+                })
             logger.debug(
                 "반복 %d 완료 — %.1fms, 도구 %d개", i + 1, elapsed, len(tool_calls)
             )

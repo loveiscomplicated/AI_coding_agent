@@ -58,8 +58,13 @@ class ScopedReactLoop(ReactLoop):
         role: RoleConfig,
         workspace_dir: str | Path,
         max_iterations: int = 20,
+        on_progress=None,
         **kwargs,
     ):
+        if on_progress is not None:
+            kwargs["on_iteration"] = lambda data: on_progress(
+                {"type": "agent_iteration", **data}
+            )
         super().__init__(llm=llm, max_iterations=max_iterations, **kwargs)
         self._role = role
         self._workspace_dir = Path(workspace_dir).resolve()

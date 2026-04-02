@@ -5,11 +5,53 @@ import { MeetingApp } from './components/MeetingApp'
 import { ChatListPage } from './components/ChatListPage'
 import { DashboardPage } from './components/DashboardPage'
 import { PipelineLogView, ACTIVE_JOB_KEY } from './components/PipelineLogView'
+import { PipelineTaskTracker } from './components/PipelineTaskTracker'
 import { ProjectListPage } from './components/ProjectListPage'
 import { Project, loadProjects, saveProjects } from './storage/projectStorage'
 
 const storage = new MeetingStorage()
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000') as string
+
+// ── 파이프라인 탭 래퍼 ────────────────────────────────────────────────────────
+
+type PipelineTab = 'tracker' | 'log'
+
+function PipelineView({ jobId, onDone }: { jobId: string; onDone: () => void }) {
+  const [tab, setTab] = useState<PipelineTab>('tracker')
+  return (
+    <div className="flex flex-col h-full">
+      {/* 탭 헤더 */}
+      <div className="flex items-center gap-0.5 px-3 pt-2 pb-0 bg-white dark:bg-zinc-900 border-b border-gray-200 dark:border-zinc-700 flex-shrink-0">
+        <button
+          onClick={() => setTab('tracker')}
+          className={`px-3 py-1.5 text-xs font-medium rounded-t transition-colors ${
+            tab === 'tracker'
+              ? 'bg-zinc-800 text-zinc-100 border border-b-zinc-800 border-zinc-700'
+              : 'text-zinc-500 hover:text-zinc-300'
+          }`}
+        >
+          라이브 뷰
+        </button>
+        <button
+          onClick={() => setTab('log')}
+          className={`px-3 py-1.5 text-xs font-medium rounded-t transition-colors ${
+            tab === 'log'
+              ? 'bg-zinc-800 text-zinc-100 border border-b-zinc-800 border-zinc-700'
+              : 'text-zinc-500 hover:text-zinc-300'
+          }`}
+        >
+          로그
+        </button>
+      </div>
+      <div className="flex-1 min-h-0">
+        {tab === 'tracker'
+          ? <PipelineTaskTracker key={jobId} jobId={jobId} />
+          : <PipelineLogView key={jobId} jobId={jobId} onDone={onDone} />
+        }
+      </div>
+    </div>
+  )
+}
 
 function SidebarToggleIcon() {
   return (
@@ -453,8 +495,7 @@ export default function App() {
       {/* ── 메인 ── */}
       <div className="flex-1 flex flex-col min-w-0">
         {viewingJobId && !showDashboard && !showListPage && !activeId ? (
-          <PipelineLogView
-            key={viewingJobId}
+          <PipelineView
             jobId={viewingJobId}
             onDone={() => {
               setRunningJobIds(prev => {
