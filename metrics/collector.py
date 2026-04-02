@@ -14,17 +14,19 @@ import yaml
 @dataclass
 class TaskReport:
     """태스크 실행 결과 리포트"""
+    # 필수 필드
     task_id: str
     title: str
     status: str
     completed_at: Optional[str]
     retry_count: int
-    test_count: int
-    test_pass_first_try: bool
-    reviewer_verdict: str
     time_elapsed_seconds: float
-    failure_reasons: list
-    reviewer_feedback: str
+    # 선택 필드 (기본값 있음)
+    test_count: int = 0
+    test_pass_first_try: bool = False
+    reviewer_verdict: str = ""
+    failure_reasons: list = field(default_factory=list)
+    reviewer_feedback: str = ""
 
 
 def save_report(report: TaskReport, reports_dir: str = "data/reports") -> Path:

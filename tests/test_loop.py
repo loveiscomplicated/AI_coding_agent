@@ -458,8 +458,9 @@ class TestReactLoopRun:
         assert tool_result_content["is_error"] is True
 
     def test_tool_use_response_without_tool_blocks(self):
-        """stop_reason=tool_use인데 tool_use 블록이 없는 경우 → end_turn 처리"""
-        llm = _SequentialMockLLM([_empty_tool_response()])
+        """stop_reason=tool_use인데 tool_use 블록이 없는 경우 → 3회 연속 후 end_turn 처리"""
+        # 루프는 연속 3회 tool_use 블록 없음을 감지하고 END_TURN으로 종료한다
+        llm = _SequentialMockLLM([_empty_tool_response()] * 3)
         loop = ReactLoop(llm=llm)
 
         result = loop.run("비정상 응답 테스트")
