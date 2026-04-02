@@ -20,6 +20,7 @@ Discord(또는 stdin)를 통해 사용자와 대화한다.
 from __future__ import annotations
 
 import logging
+import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -71,6 +72,10 @@ _notifier_lock = threading.Lock()
 _repo_path: Path | None = None
 _repo_path_lock = threading.Lock()
 
+# 태스크 파일 경로 (run.py가 주입) — 오케스트레이터 컨텍스트 로드용
+_tasks_path: Path | None = None
+_tasks_path_lock = threading.Lock()
+
 _CONVERSATION_SYSTEM = """\
 당신은 AI 코딩 에이전트 파이프라인의 중앙 오케스트레이터입니다.
 하위 에이전트가 구현 중 모호한 사항을 발견해 사용자에게 질문했습니다.
@@ -110,6 +115,232 @@ def set_repo_path(repo_path: str | Path | None) -> None:
     global _repo_path
     with _repo_path_lock:
         _repo_path = Path(repo_path).resolve() if repo_path else None
+
+
+def set_tasks_path(tasks_path: str | Path | None) -> None:
+    """
+    tasks.yaml 경로를 주입한다. 파이프라인 시작 시 run.py에서 호출.
+    오케스트레이터가 사용자 대화 중 태스크 내용을 참조할 수 있게 한다.
+    """
+    global _tasks_path
+    with _tasks_path_lock:
+        _tasks_path = Path(tasks_path).resolve() if tasks_path else None
+
+
+def _load_orchestrator_context() -> str:
+    """
+    오케스트레이터 대화에 주입할 정적 프로젝트 컨텍스트를 로드한다.
+
+    포함 항목:
+    - PROJECT_STRUCTURE.md (코드베이스 전체 구조 요약)
+    - tasks.yaml 전체 내용
+    - data/context/*.md 파일들
+
+    반환값은 LLM 프롬프트에 직접 삽입되는 문자열이다.
+    특정 파일 내용이 필요하면 오케스트레이터가 read_file 도구를 호출한다.
+    """
+    parts: list[str] = []
+
+    with _repo_path_lock:
+        rp = _repo_path
+
+    # PROJECT_STRUCTURE.md (최대 8000자)
+    if rp:
+        ps_file = rp / "PROJECT_STRUCTURE.md"
+        if ps_file.exists():
+            try:
+                text = ps_file.read_text(encoding="utf-8")
+                if len(text) > 8000:
+                    text = text[:8000] + f"\n... [{len(text)-8000}자 생략]"
+                parts.append(f"## PROJECT_STRUCTURE.md\n\n{text.strip()}")
+            except Exception as e:
+                logger.warning("[hotline] PROJECT_STRUCTURE.md 로드 실패: %s", e)
+
+    # tasks.yaml
+    with _tasks_path_lock:
+        tp = _tasks_path
+    if tp and tp.exists():
+        try:
+            content = tp.read_text(encoding="utf-8")
+            parts.append(f"## tasks.yaml\n\n```yaml\n{content}\n```")
+        except Exception as e:
+            logger.warning("[hotline] tasks.yaml 로드 실패: %s", e)
+
+    # data/context/*.md
+    if rp:
+        ctx_dir = rp / "data" / "context"
+        if ctx_dir.is_dir():
+            for md_file in sorted(ctx_dir.glob("*.md")):
+                try:
+                    text = md_file.read_text(encoding="utf-8")
+                    if text.strip():
+                        parts.append(f"## {md_file.name}\n\n{text.strip()}")
+                except Exception as e:
+                    logger.warning("[hotline] %s 로드 실패: %s", md_file.name, e)
+
+    if not parts:
+        return ""
+    return "# 프로젝트 컨텍스트\n\n" + "\n\n---\n\n".join(parts)
+
+
+# ── 오케스트레이터 코드베이스 접근 도구 ──────────────────────────────────────
+
+
+def _safe_repo_path(rel: str) -> Path | None:
+    """rel 이 _repo_path 밖으로 탈출하지 않는지 검증하고 절대 경로를 반환한다."""
+    with _repo_path_lock:
+        repo = _repo_path
+    if repo is None:
+        return None
+    resolved = (repo / rel).resolve()
+    # path traversal 방지
+    if not str(resolved).startswith(str(repo)):
+        return None
+    return resolved
+
+
+def _hotline_read_file(path: str) -> str:
+    """레포 내 파일을 읽어 반환한다 (최대 6000자)."""
+    p = _safe_repo_path(path)
+    if p is None:
+        return f"오류: 접근 불가 경로 ({path})"
+    if not p.exists():
+        return f"오류: 파일 없음 — {path}"
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if len(text) > 6000:
+            text = text[:6000] + f"\n... [{len(text) - 6000}자 생략]"
+        return text
+    except Exception as e:
+        return f"오류: 읽기 실패 — {e}"
+
+
+def _hotline_list_dir(path: str = ".") -> str:
+    """레포 내 디렉토리 목록을 반환한다."""
+    p = _safe_repo_path(path)
+    if p is None:
+        return f"오류: 접근 불가 경로 ({path})"
+    if not p.exists():
+        return f"오류: 디렉토리 없음 — {path}"
+    try:
+        entries = []
+        for item in sorted(p.iterdir()):
+            suffix = "/" if item.is_dir() else f"  ({item.stat().st_size:,}B)"
+            entries.append(f"{item.name}{suffix}")
+        return "\n".join(entries) if entries else "(비어 있음)"
+    except Exception as e:
+        return f"오류: 목록 조회 실패 — {e}"
+
+
+def _hotline_search_code(pattern: str, path: str = ".") -> str:
+    """레포 내 코드를 정규식으로 검색한다 (grep, 최대 50줄)."""
+    p = _safe_repo_path(path)
+    if p is None:
+        return f"오류: 접근 불가 경로 ({path})"
+    try:
+        result = subprocess.run(
+            ["grep", "-rn", "-m", "50", "--include=*.py",
+             "--include=*.ts", "--include=*.tsx", "--include=*.js",
+             "--include=*.go", "--include=*.java", "--include=*.rs",
+             "--include=*.yaml", "--include=*.yml", "--include=*.md",
+             pattern, str(p)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        output = result.stdout[:4000]
+        return output if output else f"'{pattern}' 검색 결과 없음"
+    except subprocess.TimeoutExpired:
+        return "오류: 검색 타임아웃"
+    except Exception as e:
+        return f"오류: 검색 실패 — {e}"
+
+
+def _exec_hotline_tool(name: str, args: dict) -> str:
+    """hotline 도구 이름과 인자로 실제 실행 결과를 반환한다."""
+    if name == "read_file":
+        return _hotline_read_file(args.get("path", ""))
+    if name == "list_dir":
+        return _hotline_list_dir(args.get("path", "."))
+    if name == "search_code":
+        return _hotline_search_code(
+            args.get("pattern", ""),
+            args.get("path", "."),
+        )
+    return f"알 수 없는 도구: {name}"
+
+
+def _build_hotline_tools(provider: str) -> list[dict]:
+    """LLM provider 에 맞는 도구 스키마를 반환한다."""
+    tools_def = [
+        {
+            "name": "read_file",
+            "description": "레포지토리의 소스 파일 내용을 읽는다. 코드·설정·문서 확인에 사용한다.",
+            "params": {
+                "path": {
+                    "type": "string",
+                    "description": "repo 루트 기준 상대 경로 (예: src/game/state.py)",
+                },
+            },
+            "required": ["path"],
+        },
+        {
+            "name": "list_dir",
+            "description": "레포지토리의 디렉토리 내 파일·폴더 목록을 확인한다.",
+            "params": {
+                "path": {
+                    "type": "string",
+                    "description": "repo 루트 기준 상대 경로 (기본값: . — 루트)",
+                },
+            },
+            "required": [],
+        },
+        {
+            "name": "search_code",
+            "description": "레포지토리 전체(또는 특정 경로)에서 코드·텍스트를 정규식으로 검색한다.",
+            "params": {
+                "pattern": {
+                    "type": "string",
+                    "description": "검색할 문자열 또는 정규식",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "검색 범위 상대 경로 (기본값: . — 전체)",
+                },
+            },
+            "required": ["pattern"],
+        },
+    ]
+
+    if provider == "anthropic":
+        return [
+            {
+                "name": t["name"],
+                "description": t["description"],
+                "input_schema": {
+                    "type": "object",
+                    "properties": t["params"],
+                    "required": t["required"],
+                },
+            }
+            for t in tools_def
+        ]
+    else:  # openai / glm / ollama
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "parameters": {
+                        "type": "object",
+                        "properties": t["params"],
+                        "required": t["required"],
+                    },
+                },
+            }
+            for t in tools_def
+        ]
 
 
 def _append_decision(question: str, answer: str, method: str) -> None:
@@ -200,23 +431,26 @@ def _ask_via_discord(notifier, question: str) -> str:
 
         if user_msg.strip().lower() in _SKIP_KEYWORDS:
             logger.info("[ask_user] skip 수신 — 에이전트 자율 판단으로 진행")
-            skip_answer = "사용자가 답변을 건너뛰었습니다. 컨텍스트 문서와 일반적인 관례를 바탕으로 최선의 판단으로 진행하세요."
-            _append_decision(question, skip_answer, "에이전트 자율 판단")
             try:
-                notifier.send("⏭ **건너뜀** — 에이전트가 최선의 판단으로 진행합니다.")
+                notifier.send("⏭ 입력 확인! 에이전트가 알아서 진행합니다.")
             except Exception:
                 pass
+            skip_answer = "사용자가 답변을 건너뛰었습니다. 컨텍스트 문서와 일반적인 관례를 바탕으로 최선의 판단으로 진행하세요."
+            _append_decision(question, skip_answer, "에이전트 자율 판단")
             return skip_answer
 
         if user_msg.strip().lower() in _CONFIRM_KEYWORDS:
+            try:
+                notifier.send("✅ 확정 입력 확인! 대화 내용 정리 중이에요…")
+            except Exception:
+                pass
             # 대화 내용을 요약해 에이전트에게 전달할 단일 답변 생성
             final_answer = _synthesize_answer(question, conversation)
             logger.info("[ask_user] 확정 수신 — 최종 답변: %r", final_answer[:80])
             _append_decision(question, final_answer, "사용자 확정")
             try:
                 notifier.send(
-                    f"✅ **확정 완료**\n\n"
-                    f"에이전트에게 전달할 답변:\n>>> {final_answer}"
+                    f"📋 **에이전트에게 전달할 답변**\n>>> {final_answer}"
                 )
             except Exception:
                 pass
@@ -251,48 +485,92 @@ def _poll_forever(notifier, after_message_id: str) -> str:
         logger.debug("[ask_user] 아직 답변 없음 — 계속 대기 중")
 
 
-def _extract_text(response) -> str:
-    """LLMResponse에서 텍스트를 추출한다."""
-    for block in response.content:
-        if isinstance(block, dict) and block.get("type") == "text":
-            return block["text"]
-        if hasattr(block, "type") and block.type == "text":
-            return block.text
-    return ""
+def _infer_provider(llm) -> str:
+    """LLM 클라이언트 타입에서 provider 이름을 추론한다."""
+    mapping = {
+        "ClaudeClient":  "anthropic",
+        "OpenaiClient":  "openai",
+        "GlmClient":     "openai",
+        "OllamaClient":  "ollama",
+    }
+    return mapping.get(type(llm).__name__, "anthropic")
 
 
 def _orchestrator_reply(question: str, conversation: list[dict]) -> str:
-    """오케스트레이터 LLM이 대화에 참여해 응답을 생성한다.
-
-    multi-turn API 구조 대신 대화 내용을 단일 user 메시지에 인라인으로 넣어 전달한다.
-    GLM 계열 API가 multi-turn에서 1213 오류를 발생시키는 문제를 원천 회피한다.
     """
+    오케스트레이터 LLM이 대화에 참여해 응답을 생성한다.
+
+    미니 ReAct 루프로 동작한다:
+    - read_file / list_dir / search_code 도구를 호출해 코드베이스를 탐색한 뒤 답변한다.
+    - 도구 호출 없이 end_turn이면 즉시 텍스트를 반환한다.
+    - 최대 _MAX_TOOL_ROUNDS 회 도구 호출 후에는 그 시점의 텍스트를 반환한다.
+
+    대화 히스토리는 GLM 호환성을 위해 단일 user 메시지로 직렬화하여 전달한다.
+    """
+    _MAX_TOOL_ROUNDS = 5
+
     with _llm_lock:
         llm = _conv_llm
     if llm is None:
         return "(오케스트레이터 LLM 미초기화)"
 
-    # 대화 히스토리를 텍스트로 직렬화
-    history_lines: list[str] = []
-    for m in conversation[:-1]:  # 마지막 user 메시지는 별도로 처리
-        role_label = "사용자" if m["role"] == "user" else "봇"
-        history_lines.append(f"{role_label}: {m['content']}")
-
+    # ── 초기 user 메시지 구성 ────────────────────────────────────────────────
+    history_lines = [
+        f"{'사용자' if m['role'] == 'user' else '봇'}: {m['content']}"
+        for m in conversation[:-1]
+    ]
     last_user_msg = conversation[-1]["content"] if conversation else ""
+    project_ctx = _load_orchestrator_context()
 
-    parts = [f"## 에이전트의 원래 질문\n\n{question}"]
+    parts: list[str] = []
+    if project_ctx:
+        parts.append(project_ctx)
+    parts.append(f"## 에이전트의 원래 질문\n\n{question}")
     if history_lines:
         parts.append("## 지금까지의 대화\n\n" + "\n\n".join(history_lines))
     parts.append(f"## 사용자의 새 메시지\n\n{last_user_msg}")
 
-    single_user_content = "\n\n---\n\n".join(parts)
+    provider = _infer_provider(llm)
+    tools = _build_hotline_tools(provider)
+    messages: list[Message] = [Message(role="user", content="\n\n---\n\n".join(parts))]
 
-    try:
-        response = llm.chat([Message(role="user", content=single_user_content)])
-        return _extract_text(response) or "(응답 없음)"
-    except Exception as e:
-        logger.error("[ask_user] 오케스트레이터 LLM 호출 실패: %s", e)
-        raise RuntimeError("오케스트레이터 LLM 응답 생성 실패") from e
+    # 순환 import 방지를 위해 함수 내에서 지연 import
+    from core.loop import _extract_tool_calls, _extract_text as _loop_extract_text  # noqa: PLC0415
+
+    # ── 미니 ReAct 루프 ───────────────────────────────────────────────────────
+    last_text = ""
+    for _round in range(_MAX_TOOL_ROUNDS + 1):
+        try:
+            response = llm.chat(messages=messages, tools=tools)
+        except Exception as e:
+            logger.error("[ask_user] 오케스트레이터 LLM 호출 실패: %s", e)
+            raise RuntimeError("오케스트레이터 LLM 응답 생성 실패") from e
+
+        last_text = _loop_extract_text(response.content) or ""
+
+        # 종료 조건: 도구 호출 없음
+        tool_calls = _extract_tool_calls(response.content)
+        if not tool_calls or _round == _MAX_TOOL_ROUNDS:
+            return last_text or "(응답 없음)"
+
+        # 도구 실행 후 결과를 다음 메시지로 추가
+        messages.append(Message(role="assistant", content=response.content))
+        tool_results = [
+            {
+                "type": "tool_result",
+                "tool_use_id": tc.id,
+                "content": _exec_hotline_tool(tc.name, tc.input),
+            }
+            for tc in tool_calls
+        ]
+        messages.append(Message(role="user", content=tool_results))
+        logger.debug(
+            "[ask_user] 도구 호출 %d회: %s",
+            _round + 1,
+            [tc.name for tc in tool_calls],
+        )
+
+    return last_text or "(응답 없음)"
 
 
 def _synthesize_answer(question: str, conversation: list[dict]) -> str:
