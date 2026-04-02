@@ -42,6 +42,7 @@ class RoleConfig:
     name: str
     system_prompt: str
     allowed_tools: tuple[str, ...]
+    blocked_write_dirs: tuple[str, ...] = ()  # workspace 내에서도 쓰기 금지 디렉토리 (상대 경로)
 
     def allows(self, tool_name: str) -> bool:
         return tool_name in self.allowed_tools
@@ -73,6 +74,8 @@ IMPLEMENTER = RoleConfig(
     # 구현 파일 생성 및 수정 모두 허용
     # ask_user: 비즈니스 로직이 불명확할 때 사용자에게 질문
     allowed_tools=tuple(READ_TOOLS + WRITE_TOOLS + ["ask_user"]),
+    # tests/는 TestWriter가 작성한 그대로 보존 — Implementer가 덮어쓰기 금지
+    blocked_write_dirs=("tests",),
 )
 
 REVIEWER = RoleConfig(

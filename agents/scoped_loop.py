@@ -104,7 +104,7 @@ class ScopedReactLoop(ReactLoop):
             logger.warning(msg)
             return ToolResult(tool_use_id=tc.id, content=msg, is_error=True)
 
-        # 2. workspace 경로 검사 (쓰기 도구만)
+        # 2. workspace 경로 검사 + 상대 경로 정규화 (쓰기 도구만)
         if tc.name in _PATH_ARG_WRITE_TOOLS:
             path_str = tc.input.get("path", "")
             if path_str:
@@ -113,6 +113,12 @@ class ScopedReactLoop(ReactLoop):
                     return ToolResult(
                         tool_use_id=tc.id, content=violation, is_error=True
                     )
+                # 검증은 workspace 기준으로 통과했지만, 실제 write_file은 CWD 기준으로
+                # Path(path)를 해석한다. 상대 경로를 절대 경로로 정규화해서 일치시킨다.
+                p = Path(path_str)
+                if not p.is_absolute():
+                    absolute_path = str((self._workspace_dir / path_str).resolve())
+                    tc = ToolCall(id=tc.id, name=tc.name, input={**tc.input, "path": absolute_path})
 
         return super()._execute_tool(tc)
 
@@ -130,7 +136,7 @@ class ScopedReactLoop(ReactLoop):
 
     def _check_workspace_path(self, path_str: str) -> str | None:
         """
-        경로가 workspace_dir 밖이면 오류 메시지를 반환하고, 안이면 None 을 반환한다.
+        경로가 workspace_dir 밖이거나 역할의 blocked_write_dirs 안이면 오류를 반환한다.
 
         상대 경로는 workspace_dir 기준으로 해석한다.
         """
@@ -142,9 +148,9 @@ class ScopedReactLoop(ReactLoop):
         except Exception:
             return f"[경로 오류] 잘못된 경로: {path_str!r}"
 
+        # workspace 범위 검사
         try:
             resolved.relative_to(self._workspace_dir)
-            return None  # 정상
         except ValueError:
             return (
                 f"[workspace 격리] workspace 밖 경로 접근 금지.\n"
@@ -152,6 +158,22 @@ class ScopedReactLoop(ReactLoop):
                 f"  허용 범위: {self._workspace_dir}\n"
                 f"  파일은 반드시 workspace 안에 저장하세요."
             )
+
+        # 역할별 쓰기 금지 디렉토리 검사
+        for blocked_rel in self._role.blocked_write_dirs:
+            blocked_abs = (self._workspace_dir / blocked_rel).resolve()
+            try:
+                resolved.relative_to(blocked_abs)
+                return (
+                    f"[역할 제약] '{self._role.name}' 역할에서는 "
+                    f"'{blocked_rel}/' 디렉토리에 쓸 수 없습니다.\n"
+                    f"  요청 경로: {resolved}\n"
+                    f"  이 역할의 쓰기 금지 디렉토리: {list(self._role.blocked_write_dirs)}"
+                )
+            except ValueError:
+                pass  # 이 blocked_dir 안에 없음, 다음 검사로
+
+        return None  # 정상
 
     def _scan_workspace(self) -> list[str]:
         """workspace 안의 모든 파일을 상대 경로 목록으로 반환한다."""
@@ -173,6 +195,7 @@ def _infer_provider(llm) -> str:
     mapping = {
         "ClaudeClient": "anthropic",
         "OpenaiClient": "openai",
+        "GlmClient": "openai",
         "OllamaClient": "ollama",
     }
     return mapping.get(name, "anthropic")

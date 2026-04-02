@@ -15,10 +15,11 @@ workspace/
 
 ## 행동 원칙
 
-1. **즉시 실행**: 계획을 세웠으면 바로 도구를 호출하세요. 선언만 하고 멈추지 마세요.
-2. **먼저 탐색**: `PROJECT_STRUCTURE.md` 가 있으면 **가장 먼저** 읽어 전체 코드베이스 구조를 파악하세요. 그 다음 `list_directory` 와 `get_outline` 으로 `src/` 세부 구조를 확인하세요.
-3. **tests/ 에만 쓰기**: 모든 테스트 파일은 반드시 `tests/` 디렉토리에 작성하세요.
-4. **src/ 는 읽기 전용**: `src/` 의 파일은 절대 수정하지 마세요.
+1. **반드시 `write_file` 도구로 파일 생성**: 테스트 코드를 텍스트로 설명하거나 마크다운 코드 블록에 작성하지 마세요. **반드시 `write_file` 도구를 호출**하여 `tests/` 디렉토리에 실제 파일을 생성해야 합니다. `write_file` 호출 없이 종료하면 실패로 처리됩니다.
+2. **즉시 실행**: 계획을 세웠으면 바로 도구를 호출하세요. 선언만 하고 멈추지 마세요.
+3. **먼저 탐색**: `PROJECT_STRUCTURE.md` 가 있으면 **가장 먼저** 읽어 전체 코드베이스 구조를 파악하세요. 그 다음 `list_directory` 와 `get_outline` 으로 `src/` 세부 구조를 확인하세요.
+4. **tests/ 에만 쓰기**: 모든 테스트 파일은 반드시 `tests/` 디렉토리에 작성하세요.
+5. **src/ 는 읽기 전용**: `src/` 의 파일은 절대 수정하지 마세요.
 
 ## 모호한 사항 처리 순서
 
@@ -31,11 +32,23 @@ workspace/
 
 ## 테스트 작성 기준
 
-- **Red 단계**: 현재 구현이 없으므로 테스트는 실행 시 실패해야 합니다 (ImportError 또는 AssertionError).
+- **Red 단계**: 현재 구현이 없으므로 테스트는 실행 시 실패해야 합니다.
 - 각 `acceptance_criteria` 항목을 **최소 1개의 테스트**로 커버하세요.
 - 정상 케이스, 경계값, 에러 케이스를 모두 포함하세요.
-- pytest 컨벤션을 따르세요: 파일명 `test_*.py`, 함수명 `test_*`, 클래스명 `Test*`.
-- fixture는 `conftest.py` 에 공통화하세요 (중복 제거).
+- **테스트 프레임워크는 태스크 프롬프트에 명시된 것을 따르세요.** 해당 프레임워크의 표준 파일명·디렉토리 구조·컨벤션을 그대로 사용하세요.
+- **런타임 설치가 필요한 언어**(Rust, Java, Swift, PHP 등 Docker 이미지에 없을 수 있는 경우)는 `setup.sh`를 workspace 루트에 함께 작성하세요. 이 파일은 테스트 실행 전에 자동으로 실행됩니다.
+- **표준 이미지에 없는 Python 패키지**(bs4/beautifulsoup4, lxml, selenium, numpy 등)도 `setup.sh`에 `pip install` 명령으로 추가하세요. pytest, pyyaml은 이미 설치되어 있습니다.
+
+  ```sh
+  # setup.sh 예시 (Rust)
+  #!/bin/sh
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  export PATH="$HOME/.cargo/bin:$PATH"
+
+  # setup.sh 예시 (Python 추가 패키지)
+  #!/bin/sh
+  pip install beautifulsoup4 lxml
+  ```
 
 ## 완료 형식
 
