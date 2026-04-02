@@ -165,3 +165,6 @@ data/*.db
 
 # macOS
 .DS_Store
+
+# AI agent workspaces (task isolation dirs + git worktrees)
+.agent-workspace/

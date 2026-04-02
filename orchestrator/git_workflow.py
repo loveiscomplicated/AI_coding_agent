@@ -5,7 +5,7 @@ orchestrator/git_workflow.py — 브랜치 생성 · 커밋 · PR 생성
 GitHub PR 을 생성한다.
 
 흐름 (git worktree 기반, 병렬 실행 안전):
-  1. git worktree add  — 임시 worktree 생성 (main repo HEAD 불변)
+  1. git worktree add  — {repo}/.agent-workspace/worktrees/ 아래 worktree 생성 (main repo HEAD 불변)
   2. workspace → worktree 파일 복사
   3. git add + git commit  (worktree 안에서)
   4. git push origin {branch} --force
@@ -31,7 +31,6 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 from textwrap import dedent
@@ -77,7 +76,8 @@ class GitWorkflow:
             GitWorkflowError: git / gh 명령 실패 시
         """
         branch = task.branch_name
-        wt_path = Path(tempfile.mkdtemp(prefix=f"wt-{task.id}-{int(time.time())}-"))
+        wt_path = self.repo_path / ".agent-workspace" / "worktrees" / f"wt-{task.id}-{int(time.time())}"
+        wt_path.mkdir(parents=True, exist_ok=True)
         logger.info("[%s] git 워크플로우 시작 (worktree: %s)", task.id, wt_path)
 
         try:

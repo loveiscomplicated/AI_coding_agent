@@ -1,18 +1,20 @@
 """
 orchestrator/workspace.py — 태스크 워크스페이스 관리
 
-WorkspaceManager 는 태스크 실행을 위한 격리된 임시 디렉토리를 생성하고
+WorkspaceManager 는 태스크 실행을 위한 격리된 작업 디렉토리를 생성하고
 관리한다. 에이전트는 이 workspace 안에서만 파일을 읽고 쓴다.
 
 워크스페이스 구조:
-    /tmp/agent_workspaces/{task_id}_{timestamp}/
+    {repo_path}/.agent-workspace/{task_id}_{timestamp}/
         src/        ← task.target_files 를 repo에서 복사해 옴 (경로 유지)
         tests/      ← TestWriter 에이전트가 여기에 테스트 파일을 생성
         (requirements.txt) ← repo 루트에 있으면 복사 (DockerTestRunner용)
 
+.agent-workspace/ 는 .gitignore 에 등록되어 git 에 노출되지 않는다.
+
 사용 예:
     with WorkspaceManager(task, repo_path="/path/to/repo") as ws:
-        print(ws.path)       # /tmp/agent_workspaces/task-001_1234567890
+        print(ws.path)       # /path/to/repo/.agent-workspace/task-001_1234567890
         print(ws.src_dir)    # .../src
         print(ws.tests_dir)  # .../tests
         ws.list_files()      # workspace 안의 모든 파일 목록
@@ -31,9 +33,6 @@ from orchestrator.task import Task
 
 logger = logging.getLogger(__name__)
 
-_BASE_DIR = Path("/tmp/agent_workspaces")
-
-
 class WorkspaceManager:
     """
     태스크 실행용 격리 워크스페이스.
@@ -50,12 +49,11 @@ class WorkspaceManager:
         task: Task,
         repo_path: str | Path,
         keep_on_failure: bool = True,
-        base_dir: Path = _BASE_DIR,
     ):
         self.task = task
         self.repo_path = Path(repo_path).resolve()
         self.keep_on_failure = keep_on_failure
-        self._base_dir = base_dir
+        self._base_dir = self.repo_path / ".agent-workspace"
         self._path: Path | None = None
 
     # ── 컨텍스트 매니저 ───────────────────────────────────────────────────────
@@ -97,6 +95,7 @@ class WorkspaceManager:
         self._copy_requirements()
         self._copy_project_structure()
         self._copy_context_docs()
+        self._ensure_python_init()
 
         logger.info("workspace 생성: %s", self._path)
         return self
@@ -183,6 +182,25 @@ class WorkspaceManager:
         if structure_doc.exists():
             shutil.copy2(structure_doc, self.path / "PROJECT_STRUCTURE.md")
             logger.debug("PROJECT_STRUCTURE.md 복사 완료")
+
+    def _ensure_python_init(self) -> None:
+        """Python 프로젝트이면 src/__init__.py 를 보장한다.
+
+        target_files 에 .py 파일이 하나라도 있으면 Python 프로젝트로 판단하고
+        src/__init__.py 가 없을 경우 빈 파일을 생성한다.
+        이 파일이 없으면 `from src.xxx import ...` 패턴이 동작하지 않는다.
+        """
+        py_exts = {'.py'}
+        has_python = any(
+            Path(f).suffix.lower() in py_exts
+            for f in self.task.target_files
+        )
+        if not has_python:
+            return
+        init_file = self.src_dir / "__init__.py"
+        if not init_file.exists():
+            init_file.touch()
+            logger.debug("src/__init__.py 생성 (Python 패키지 인식용)")
 
     def _copy_context_docs(self) -> None:
         """data/context/ 디렉토리의 문서를 workspace/context/ 에 복사한다.
