@@ -69,17 +69,13 @@ class DockerTestRunner:
         if result.returncode != 0:
             raise RuntimeError(f"이미지 빌드 실패:\n{result.stderr}")
 
-    def run(self, workspace_dir: Path) -> RunResult:
+    def run(self, workspace_dir: Path, test_framework: str = "pytest") -> RunResult:
         """
         workspace_dir 를 마운트해 테스트를 실행하고 RunResult 를 반환한다.
 
         Args:
-            workspace_dir: 테스트가 포함된 로컬 디렉토리 (절대 경로)
-                           구조 예시:
-                               workspace_dir/
-                                 src/          ← 구현 코드
-                                 tests/        ← 테스트 코드
-                                 requirements.txt (선택)
+            workspace_dir:  테스트가 포함된 로컬 디렉토리 (절대 경로)
+            test_framework: 사용할 테스트 프레임워크 ("pytest" | "jest")
 
         Returns:
             RunResult — 이미지 미빌드 시 passed=False, returncode=-1
@@ -114,7 +110,8 @@ class DockerTestRunner:
                     "--memory", "512m",             # 메모리 제한
                     "--cpus", "1",
                     "-v", f"{workspace_dir}:/workspace:ro",
-                    "-e", "PYTHONPATH=/workspace",  # src/ 패키지 import 경로 설정
+                    "-e", "PYTHONPATH=/workspace/src:/workspace",  # src/ 모듈 직접 import 허용
+                    "-e", f"TEST_FRAMEWORK={test_framework}",
                     self.image,
                 ],
                 capture_output=True,
@@ -171,20 +168,37 @@ def _check_docker_available() -> None:
 
 def _parse_summary(stdout: str) -> str:
     """
-    pytest 출력에서 요약 줄을 추출한다.
+    여러 테스트 프레임워크 출력에서 요약 줄을 추출한다.
 
-    예: "5 passed, 2 failed in 0.12s"
-        "3 passed in 0.05s"
-        "ERROR collecting tests/test_foo.py"
+    pytest:   "5 passed, 2 failed in 0.12s"
+    jest:     "Tests: 2 failed, 3 passed, 5 total"
+    go test:  "FAIL\tmodule/pkg\t0.123s" / "ok\tmodule/pkg\t0.123s"
+    rspec:    "5 examples, 2 failures"
     """
-    # pytest 최종 요약 줄 패턴: "= N passed ... in Xs ="
-    for line in reversed(stdout.splitlines()):
+    lines = stdout.splitlines()
+
+    # jest / vitest: "Tests:  N failed, N passed, N total"
+    for line in lines:
+        if re.match(r"\s*Tests:\s+", line):
+            return line.strip()
+
+    # go test: "ok" 또는 "FAIL" 로 시작하는 결과 줄
+    for line in reversed(lines):
+        if re.match(r"^(ok|FAIL)\s+\S+\s+[\d.]+s", line.strip()):
+            return line.strip()
+
+    # rspec: "N examples, N failures"
+    for line in reversed(lines):
+        if re.search(r"\d+ example", line):
+            return line.strip()
+
+    # pytest: "= N passed ... in Xs ="
+    for line in reversed(lines):
         line = line.strip()
         if re.search(r"\d+ (passed|failed|error)", line):
-            # "======= 5 passed in 0.12s =======" → "5 passed in 0.12s"
             return re.sub(r"=+\s*", "", line).strip()
-    # 요약 줄을 못 찾으면 마지막 비어 있지 않은 줄 반환
-    for line in reversed(stdout.splitlines()):
+
+    for line in reversed(lines):
         if line.strip():
             return line.strip()
     return "(출력 없음)"
@@ -192,14 +206,32 @@ def _parse_summary(stdout: str) -> str:
 
 def _parse_failed_tests(stdout: str) -> list[str]:
     """
-    pytest 출력에서 실패한 테스트 이름 목록을 추출한다.
+    여러 테스트 프레임워크 출력에서 실패한 테스트 이름 목록을 추출한다.
 
-    예: "FAILED tests/test_foo.py::TestBar::test_baz - AssertionError: ..."
-        → ["tests/test_foo.py::TestBar::test_baz"]
+    pytest:   "FAILED tests/test_foo.py::TestBar::test_baz - ..."
+    jest:     "  ✕ test name (5ms)"
+    go test:  "--- FAIL: TestFuncName (0.00s)"
+    rspec:    "  1) ClassName#method description"
     """
     failed: list[str] = []
     for line in stdout.splitlines():
+        # pytest
         m = re.match(r"^FAILED\s+([\w/.:_-]+)", line.strip())
         if m:
             failed.append(m.group(1))
+            continue
+        # jest / vitest (✕ 또는 × 기호)
+        m = re.match(r"^\s*[✕×]\s+(.+?)(?:\s+\(\d+ms\))?$", line)
+        if m:
+            failed.append(m.group(1).strip())
+            continue
+        # go test
+        m = re.match(r"^--- FAIL:\s+(\S+)", line.strip())
+        if m:
+            failed.append(m.group(1))
+            continue
+        # rspec (번호 목록)
+        m = re.match(r"^\s+\d+\)\s+(.+)$", line)
+        if m:
+            failed.append(m.group(1).strip())
     return failed

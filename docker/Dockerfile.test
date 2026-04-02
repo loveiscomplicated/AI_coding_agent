@@ -2,11 +2,25 @@ FROM python:3.12-slim
 
 WORKDIR /workspace
 
-# 기본 테스트 의존성
-RUN pip install --no-cache-dir pytest pytest-cov pyyaml
+# ── Python ────────────────────────────────────────────────────────────────────
+RUN pip install --no-cache-dir pytest pytest-cov pyyaml beautifulsoup4 requests
 
-# 실행 시 workspace 안의 requirements.txt가 있으면 먼저 설치
-# (프로젝트별 의존성 지원)
+# ── 공통 빌드 도구 + 런타임 설치 ─────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Node.js / JavaScript
+    nodejs npm \
+    # Go
+    golang-go \
+    # Ruby
+    ruby-full \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 전역 패키지
+RUN npm install -g jest vitest 2>/dev/null || true
+
+# Ruby 전역 gem
+RUN gem install bundler rspec --no-document
+
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
