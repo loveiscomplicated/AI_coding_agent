@@ -1,7 +1,8 @@
 """
-llm/openai_client.py
+llm/glm_client.py
 
-OpenAI LLM 연동 클라이언트 (Chat Completions API).
+Zai LLM 연동 클라이언트 (Chat Completions API).
+Openai python SDK를 지원하므로 이를 사용.
 base.py의 BaseLLMClient를 구현함.
 
 사전 준비:
@@ -16,7 +17,7 @@ import time
 from typing import Generator
 
 try:
-    from openai import OpenAI, RateLimitError, BadRequestError
+    from openai import OpenAI, RateLimitError, InternalServerError, APIStatusError
 except ImportError:
     raise ImportError("openai 패키지가 없어요. 실행: uv add openai")
 
@@ -93,13 +94,13 @@ def _to_openai_messages(messages: list[Message]) -> list[dict]:
     return result
 
 
-class OpenaiClient(BaseLLMClient):
+class GlmClient(BaseLLMClient):
     """
-    OpenAI Chat Completions API 클라이언트.
+    Zai (GLM) Chat Completions API 클라이언트.
 
     사용 예시:
-        config = LLMConfig(model="gpt-4.1-mini", temperature=0.0)
-        client = OpenaiClient(config)
+        config = LLMConfig(model="glm-4.5-air", temperature=0.0)
+        client = GlmClient(config)
         response = client.chat([Message("user", "hello")])
         print(response.content)
     """
@@ -107,15 +108,18 @@ class OpenaiClient(BaseLLMClient):
     def __init__(self, config: LLMConfig):
         super().__init__(config)
 
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = os.getenv("ZAI_API_KEY")
         if not api_key:
             raise ValueError(
-                "OPENAI_API_KEY 환경변수가 설정되지 않았어요. .env 파일을 확인해주세요."
+                "ZAI_API_KEY 환경변수가 설정되지 않았어요. .env 파일을 확인해주세요."
             )
-        self._client = OpenAI(api_key=api_key)
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.z.ai/api/paas/v4/",
+        )
 
     def chat(self, messages: list[Message], **kwargs) -> LLMResponse:
-        """동기 방식 채팅 (Chat Completions API)"""
+        """동기 방식 채팅 (과부하·속도제한 시 지수 백오프 재시도)"""
         create_kwargs: dict = {
             "model": self.config.model,
             "messages": [  # type: ignore[arg-type]
@@ -127,7 +131,8 @@ class OpenaiClient(BaseLLMClient):
         tools = kwargs.get("tools")
         if tools:
             create_kwargs["tools"] = tools
-        if self.config.temperature is not None:
+        # GLM은 temperature=0.0 미지원 (1만 허용) — 0.0은 기본값으로 처리
+        if self.config.temperature is not None and self.config.temperature > 0:
             create_kwargs["temperature"] = self.config.temperature
 
         delay = _BASE_DELAY
@@ -135,27 +140,31 @@ class OpenaiClient(BaseLLMClient):
             try:
                 response = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
                 break
-            except RateLimitError as e:
+            except (RateLimitError, InternalServerError) as e:
                 if attempt == _MAX_RETRIES:
                     raise
                 logger.warning(
-                    "OpenAI RateLimitError (시도 %d/%d) — %.0f초 후 재시도: %s",
+                    "GLM API 일시 오류 (시도 %d/%d) — %.0f초 후 재시도: %s",
                     attempt + 1, _MAX_RETRIES, delay, e,
                 )
                 time.sleep(delay)
                 delay *= 2
-            except BadRequestError as e:
-                # reasoning 모델(o1/o3)은 temperature 파라미터 자체를 거부함
-                if "temperature" in str(e) and "temperature" in create_kwargs:
+            except APIStatusError as e:
+                # 1213: 프롬프트 내용 문제 — 재시도해도 동일하게 실패하므로 즉시 raise
+                error_body = getattr(e, "body", {}) or {}
+                glm_code = str((error_body.get("error") or {}).get("code", ""))
+                if glm_code == "1213":
+                    raise
+                # 400 오류 중 일시적 서버 문제(code 1214 등)는 재시도
+                if e.status_code == 400 and attempt < _MAX_RETRIES:
                     logger.warning(
-                        "모델 %s이 temperature를 지원하지 않습니다. temperature 없이 재시도합니다.",
-                        self.config.model,
+                        "GLM 400 오류 (시도 %d/%d) — %.0f초 후 재시도: %s",
+                        attempt + 1, _MAX_RETRIES, delay, e,
                     )
-                    del create_kwargs["temperature"]
-                    # 재시도 (attempt 증가 없이)
-                    response = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
-                    break
-                raise
+                    time.sleep(delay)
+                    delay *= 2
+                else:
+                    raise
 
         msg = response.choices[0].message
         blocks: list = []
@@ -191,28 +200,17 @@ class OpenaiClient(BaseLLMClient):
             "max_completion_tokens": self.config.max_tokens,
             "stream": True,
         }
-        if self.config.temperature is not None:
+        if self.config.temperature is not None and self.config.temperature > 0:
             create_kwargs["temperature"] = self.config.temperature
 
-        try:
-            stream = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
-        except BadRequestError as e:
-            if "temperature" in str(e) and "temperature" in create_kwargs:
-                logger.warning(
-                    "모델 %s이 temperature를 지원하지 않습니다. temperature 없이 재시도합니다.",
-                    self.config.model,
-                )
-                del create_kwargs["temperature"]
-                stream = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
-            else:
-                raise
+        stream = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
         for chunk in stream:
             delta = chunk.choices[0].delta.content  # type: ignore[union-attr]
             if delta:
                 yield delta
 
     def is_available(self) -> bool:
-        """OpenAI API에서 사용 가능한 모델이 있는지 확인"""
+        """Zai API에서 사용 가능한 모델이 있는지 확인"""
         try:
             models = self._client.models.list()
             available = [m.id for m in models.data]
@@ -225,7 +223,7 @@ class OpenaiClient(BaseLLMClient):
             return False
 
     def list_models(self) -> list[str]:
-        """현재 OpenAI API에서 이용할 수 있는 모델 목록 반환"""
+        """현재 Zai API에서 이용할 수 있는 모델 목록 반환"""
         try:
             models = self._client.models.list()
             return [m.id for m in models]

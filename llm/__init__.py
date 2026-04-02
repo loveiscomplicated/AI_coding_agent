@@ -17,12 +17,14 @@ from .base import BaseLLMClient, LLMConfig, LLMResponse, Message
 from .ollama_client import OllamaClient
 from .openai_client import OpenaiClient
 from .claude_client import ClaudeClient
+from .glm_client import GlmClient
 
 # 나중에 provider 추가할 때 여기에 등록하면 됨
 _PROVIDERS: dict[str, type[BaseLLMClient]] = {
     "ollama": OllamaClient,
     "openai": OpenaiClient,
     "claude": ClaudeClient,
+    "glm": GlmClient,
     # "lmstudio": LMStudioClient,
 }
 
@@ -62,6 +64,7 @@ __all__ = [
     # -- model re-exporting --
     "OllamaClient",
     "OpenaiClient",
+    "GlmClient",
     "create_client",
     "list_providers",
 ]
