@@ -80,18 +80,8 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
 
     pause_ctrl = PauseController()
 
-    # Discord 채널 확보 (동기, 워커 시작 전)
-    resolved_channel_id: str | None = body.discord_channel_id
-    if not resolved_channel_id and DISCORD_BOT_TOKEN and DISCORD_GUILD_ID:
-        try:
-            notifier = DiscordNotifier.from_env()
-            if notifier:
-                project_name = Path(body.repo_path).name or "project"
-                resolved_channel_id = notifier.create_channel(project_name)
-        except Exception as exc:
-            # 채널 생성 실패는 치명적이지 않음 — 알림 없이 진행
-            import logging as _log
-            _log.getLogger(__name__).warning("Discord 채널 생성 실패 (무시): %s", exc)
+    # Discord 채널 ID — 이미 알고 있으면 그대로, 모르면 워커에서 비동기 생성
+    preset_channel_id: str | None = body.discord_channel_id
 
     with _lock:
         _jobs[job_id] = {
@@ -103,7 +93,7 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
             "error": None,
             "events": [],
             "request": body.model_dump(),
-            "discord_channel_id": resolved_channel_id,
+            "discord_channel_id": preset_channel_id,  # 워커에서 생성 후 갱신될 수 있음
             "pause_ctrl": pause_ctrl,   # 제어용 (직렬화 제외)
         }
         _event_queues[job_id] = q
@@ -112,6 +102,19 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
         _emit(job_id, event)
 
     def _worker() -> None:
+        # Discord 채널 확보 — 백그라운드에서 실행하여 run 응답을 즉시 반환
+        resolved_channel_id: str | None = preset_channel_id
+        if not resolved_channel_id and DISCORD_BOT_TOKEN and DISCORD_GUILD_ID:
+            try:
+                notifier = DiscordNotifier.from_env()
+                if notifier:
+                    project_name = Path(body.repo_path).name or "project"
+                    resolved_channel_id = notifier.create_channel(project_name)
+                    with _lock:
+                        _jobs[job_id]["discord_channel_id"] = resolved_channel_id
+            except Exception as exc:
+                logger.warning("Discord 채널 생성 실패 (무시): %s", exc)
+
         try:
             result = run_pipeline(
                 tasks_path=Path(body.tasks_path),
@@ -151,7 +154,7 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
     return {
         "job_id": job_id,
         "status": "running",
-        "discord_channel_id": resolved_channel_id,
+        "discord_channel_id": preset_channel_id,  # 이미 알고 있으면 즉시 반환, 없으면 null
     }
 
 

@@ -361,6 +361,25 @@ function pathsOverlap(a: string, b: string): boolean {
   return a === b || a.endsWith('/' + b) || b.endsWith('/' + a)
 }
 
+/** 채널 ID가 워커에서 생성될 때까지 status 폴링 후 콜백 호출 (최대 15초) */
+async function pollDiscordChannelId(
+  jobId: string,
+  currentChannelId: string | undefined,
+  onCreated: (id: string) => void,
+) {
+  const deadline = Date.now() + 15_000
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 2000))
+    try {
+      const data = await fetch(`${API_BASE}/api/pipeline/status/${jobId}`).then(r => r.json())
+      if (data.discord_channel_id && data.discord_channel_id !== currentChannelId) {
+        onCreated(data.discord_channel_id)
+        return
+      }
+    } catch { return }
+  }
+}
+
 export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordChannelCreated }: DashboardPageProps = {}) {
   const [config, setConfig] = useState<ProjectConfig>(() => {
     if (project) {
@@ -523,9 +542,11 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
       })
       if (!res.ok) throw new Error('파이프라인 시작 실패')
       const data = await res.json()
-      // 새로 생성된 Discord 채널 ID를 Project에 저장
+      // Discord 채널 ID — 즉시 반환되면 저장, 아직 없으면 워커 완료 후 폴링으로 획득
       if (data.discord_channel_id && data.discord_channel_id !== project.discordChannelId) {
         onDiscordChannelCreated?.(data.discord_channel_id)
+      } else if (!project.discordChannelId && onDiscordChannelCreated) {
+        pollDiscordChannelId(data.job_id, project.discordChannelId, onDiscordChannelCreated)
       }
       // 기존 목록에 추가 (복수 파이프라인 지원)
       const _raw = localStorage.getItem(ACTIVE_JOB_KEY)
@@ -585,6 +606,8 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
       const data = await res.json()
       if (data.discord_channel_id && data.discord_channel_id !== project.discordChannelId) {
         onDiscordChannelCreated?.(data.discord_channel_id)
+      } else if (!project.discordChannelId && onDiscordChannelCreated) {
+        pollDiscordChannelId(data.job_id, project.discordChannelId, onDiscordChannelCreated)
       }
       onPipelineStarted?.(data.job_id)
     } catch (e) {
