@@ -23,13 +23,15 @@ WorkspaceManager 는 태스크 실행을 위한 격리된 작업 디렉토리를
 
 from __future__ import annotations
 
+import ast
 import logging
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from types import TracebackType
 
-from orchestrator.task import Task
+from orchestrator.task import Task, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +51,12 @@ class WorkspaceManager:
         task: Task,
         repo_path: str | Path,
         keep_on_failure: bool = True,
+        base_dir: str | Path | None = None,
     ):
         self.task = task
         self.repo_path = Path(repo_path).resolve()
         self.keep_on_failure = keep_on_failure
-        self._base_dir = self.repo_path / ".agent-workspace"
+        self._base_dir = Path(base_dir) if base_dir else self.repo_path / ".agent-workspace"
         self._path: Path | None = None
 
     # ── 컨텍스트 매니저 ───────────────────────────────────────────────────────
@@ -218,3 +221,117 @@ class WorkspaceManager:
             if doc.is_file():
                 shutil.copy2(doc, dest_dir / doc.name)
         logger.debug("context 문서 복사 완료: %s", [d.name for d in context_dir.iterdir() if d.is_file()])
+
+    def inject_dependency_context(self, dep_tasks: list[Task]) -> None:
+        """
+        완료된 선행 태스크의 산출물을 workspace에 주입한다.
+
+        1) 선행 태스크의 git 브랜치에서 target_files를 읽어 workspace/src/ 에 복사
+           → 후속 태스크가 `from src.xxx import YYY` 로 자연스럽게 import 가능
+        2) context/dependency_artifacts.md 에 파일 목록 + 주요 심볼(클래스, 함수 시그니처) 요약
+           → 에이전트가 무엇을 import할 수 있는지 즉시 파악 가능
+        """
+        if not dep_tasks:
+            return
+
+        done_deps = [t for t in dep_tasks if t.status == TaskStatus.DONE]
+        if not done_deps:
+            return
+
+        artifacts_lines: list[str] = [
+            "# 선행 태스크 산출물\n",
+            "이 파일은 depends_on 으로 연결된 선행 태스크의 완료 산출물을 요약합니다.\n"
+            "해당 파일들은 이미 `src/` 디렉토리에 복사되어 있으므로 바로 import 할 수 있습니다.\n",
+        ]
+
+        for dep in done_deps:
+            branch = dep.branch_name  # agent/{task_id}
+            copied_files: list[str] = []
+            file_summaries: list[str] = []
+
+            for rel_path in dep.target_files:
+                content = self._read_from_branch(branch, rel_path)
+                if content is None:
+                    continue
+
+                # workspace/src/ 에 복사
+                dest = self.src_dir / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content, encoding="utf-8")
+                copied_files.append(rel_path)
+
+                # __init__.py 보장 (중간 패키지)
+                self._ensure_init_files(dest)
+
+                # Python 파일이면 심볼 요약 추출
+                if rel_path.endswith(".py"):
+                    summary = _extract_python_signatures(content, rel_path)
+                    if summary:
+                        file_summaries.append(summary)
+
+            if copied_files:
+                artifacts_lines.append(f"\n## {dep.id}: {dep.title}\n")
+                artifacts_lines.append(f"**파일**: {', '.join(copied_files)}\n")
+                if file_summaries:
+                    artifacts_lines.append("\n".join(file_summaries))
+                logger.info(
+                    "[%s] 선행 태스크 %s 산출물 %d개 파일 주입",
+                    self.task.id, dep.id, len(copied_files),
+                )
+
+        # context/ 에 요약 문서 작성
+        if any(t.target_files for t in done_deps):
+            context_dir = self.path / "context"
+            context_dir.mkdir(exist_ok=True)
+            (context_dir / "dependency_artifacts.md").write_text(
+                "\n".join(artifacts_lines), encoding="utf-8",
+            )
+
+    def _read_from_branch(self, branch: str, rel_path: str) -> str | None:
+        """git show 로 특정 브랜치의 파일 내용을 읽는다. 실패 시 None."""
+        try:
+            result = subprocess.run(
+                ["git", "show", f"{branch}:{rel_path}"],
+                capture_output=True, text=True, cwd=self.repo_path, timeout=10,
+            )
+            if result.returncode == 0:
+                return result.stdout
+        except Exception as e:
+            logger.debug("git show 실패 (%s:%s): %s", branch, rel_path, e)
+        return None
+
+    def _ensure_init_files(self, file_path: Path) -> None:
+        """파일 경로의 중간 디렉토리에 __init__.py 가 없으면 생성한다."""
+        if not file_path.name.endswith(".py"):
+            return
+        current = file_path.parent
+        while current != self.src_dir and current.is_relative_to(self.src_dir):
+            init = current / "__init__.py"
+            if not init.exists():
+                init.touch()
+            current = current.parent
+
+
+def _extract_python_signatures(source: str, rel_path: str) -> str:
+    """Python 소스에서 클래스/함수 시그니처를 추출해 마크다운 요약을 반환한다."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return ""
+
+    lines: list[str] = [f"\n### `{rel_path}`\n```python"]
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.ClassDef):
+            bases = ", ".join(ast.unparse(b) for b in node.bases) if node.bases else ""
+            lines.append(f"class {node.name}({bases}):")
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef):
+                    args = ast.unparse(item.args)
+                    ret = f" -> {ast.unparse(item.returns)}" if item.returns else ""
+                    lines.append(f"    def {item.name}({args}){ret}: ...")
+        elif isinstance(node, ast.FunctionDef):
+            args = ast.unparse(node.args)
+            ret = f" -> {ast.unparse(node.returns)}" if node.returns else ""
+            lines.append(f"def {node.name}({args}){ret}: ...")
+    lines.append("```")
+    return "\n".join(lines) if len(lines) > 3 else ""  # 시그니처가 없으면 빈 문자열
