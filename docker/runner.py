@@ -74,6 +74,8 @@ class DockerTestRunner:
         workspace_dir: Path,
         target_files: list[str] | None = None,
         test_framework: str | None = None,
+        language: str = "python",
+        test_files: list[str] | None = None,
     ) -> RunResult:
         """
         workspace_dir 를 마운트해 테스트를 실행하고 RunResult 를 반환한다.
@@ -92,6 +94,16 @@ class DockerTestRunner:
         Returns:
             RunResult — 이미지 미빌드 시 passed=False, returncode=-1
         """
+        # 미지원 언어는 Docker 실행 없이 즉시 반환
+        if language != "python":
+            return RunResult(
+                passed=False,
+                returncode=-1,
+                stdout="",
+                summary=f"[UNSUPPORTED_LANGUAGE] {language} 테스트 러너가 구현되지 않았습니다.",
+                failed_tests=["unsupported_language"],
+            )
+
         _check_docker_available()
 
         workspace_dir = workspace_dir.resolve()
@@ -116,18 +128,24 @@ class DockerTestRunner:
 
         runtime = test_framework if test_framework else _detect_runtime(target_files or [])
 
+        # Docker 실행 커맨드 조립
+        docker_cmd = [
+            "docker", "run", "--rm",
+            "--network", "none",            # 네트워크 차단
+            "--memory", "512m",             # 메모리 제한
+            "--cpus", "1",
+            "-v", f"{workspace_dir}:/workspace:ro",
+            "-e", "PYTHONPATH=/workspace/src:/workspace",  # src/ 모듈 직접 import 허용
+            "-e", f"TEST_FRAMEWORK={runtime}",
+        ]
+        # 특정 테스트 파일만 실행
+        if test_files:
+            docker_cmd += ["-e", f"TEST_FILES={' '.join(test_files)}"]
+        docker_cmd.append(self.image)
+
         try:
             result = subprocess.run(
-                [
-                    "docker", "run", "--rm",
-                    "--network", "none",            # 네트워크 차단
-                    "--memory", "512m",             # 메모리 제한
-                    "--cpus", "1",
-                    "-v", f"{workspace_dir}:/workspace:ro",
-                    "-e", "PYTHONPATH=/workspace/src:/workspace",  # src/ 모듈 직접 import 허용
-                    "-e", f"TEST_FRAMEWORK={runtime}",
-                    self.image,
-                ],
+                docker_cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,

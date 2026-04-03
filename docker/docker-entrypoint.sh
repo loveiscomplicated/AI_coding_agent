@@ -37,6 +37,10 @@ case "$TEST_FRAMEWORK" in
     # 예: tests/에서 `from eggDoneness import ...` → src/eggDoneness.py 를 찾음
     PYTHONPATH="/workspace/src:/workspace:${PYTHONPATH:-}"
     export PYTHONPATH
+    # TEST_FILES가 지정되면 해당 파일만 실행, 아니면 전체 실행
+    if [ -n "${TEST_FILES:-}" ]; then
+        exec python -m pytest $TEST_FILES -v --tb=short 2>&1
+    fi
     exec python -m pytest --tb=short -q --no-header "$@"
     ;;
 
