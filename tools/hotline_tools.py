@@ -26,12 +26,17 @@ from datetime import datetime
 from pathlib import Path
 
 from llm import BaseLLMClient, LLMConfig, Message, create_client
+from tools.schemas import ToolResult as _ToolResult
 
 logger = logging.getLogger(__name__)
 
 _conv_llm: BaseLLMClient | None = None
 _sum_llm: BaseLLMClient | None = None
 _llm_lock = threading.Lock()
+
+# 현재 사용 중인 provider/model 기록 (런타임 변경 지원용)
+_hotline_provider: str = "claude"
+_hotline_conv_model: str = ""
 
 
 def set_llm(conv_llm: BaseLLMClient, sum_llm: BaseLLMClient) -> None:
@@ -45,6 +50,25 @@ def set_llm(conv_llm: BaseLLMClient, sum_llm: BaseLLMClient) -> None:
         _sum_llm = sum_llm
 
 
+def get_conv_model() -> dict:
+    """현재 Discord 대화용 LLM provider/model을 반환한다."""
+    return {"provider": _hotline_provider, "model": _hotline_conv_model}
+
+
+def set_conv_model(model: str, provider: str | None = None) -> None:
+    """Discord 대화용 LLM 모델을 런타임에 변경한다."""
+    global _conv_llm, _hotline_conv_model, _hotline_provider
+    target_provider = provider or _hotline_provider
+    with _llm_lock:
+        new_conv = create_client(
+            target_provider,
+            LLMConfig(model=model, system_prompt=_CONVERSATION_SYSTEM, max_tokens=1024),
+        )
+        _conv_llm = new_conv
+        _hotline_conv_model = model
+        _hotline_provider = target_provider
+
+
 def create_hotline_llms(provider: str, model: str) -> tuple[BaseLLMClient, BaseLLMClient]:
     """
     hotline 모듈에서 사용할 LLM 클라이언트 쌍을 생성한다.
@@ -52,6 +76,9 @@ def create_hotline_llms(provider: str, model: str) -> tuple[BaseLLMClient, BaseL
     Returns:
         (conv_llm, sum_llm) — 각각 올바른 시스템 프롬프트로 설정됨
     """
+    global _hotline_provider, _hotline_conv_model
+    _hotline_provider = provider
+    _hotline_conv_model = model
     conv_llm = create_client(
         provider, LLMConfig(model=model, system_prompt=_CONVERSATION_SYSTEM, max_tokens=1024)
     )
@@ -60,9 +87,14 @@ def create_hotline_llms(provider: str, model: str) -> tuple[BaseLLMClient, BaseL
     )
     return conv_llm, sum_llm
 
-_POLL_CHUNK = 60  # 폴링 단위 (초)
+_POLL_CHUNK = 5  # 폴링 단위 (초)
 _CONFIRM_KEYWORDS = {"확정", "결정", "confirm", "done", "완료"}
 _SKIP_KEYWORDS   = {"알아서 해", "알아서해", "skip", "건너뛰기", "패스", "pass"}
+_STOP_KEYWORDS   = {"중단", "stop", "종료", "abort"}
+
+# run.py가 주입하는 PauseController (중단 명령 전달용)
+_pause_controller = None
+_pause_controller_lock = threading.Lock()
 
 
 def _is_confirm(msg: str) -> bool:
@@ -76,9 +108,27 @@ def _is_skip(msg: str) -> bool:
     lower = msg.strip().lower()
     return any(kw in lower for kw in _SKIP_KEYWORDS)
 
+
+def _is_stop(msg: str) -> bool:
+    """중단 키워드와 정확히 일치하는지 확인한다.
+    핫라인 대화 맥락에서 '시스템 종료 오류' 같은 문장이 오탐을 일으키지 않도록 exact match 사용.
+    리스너 경로(urgent_callback)는 PauseController.handle_command가 별도로 처리한다."""
+    lower = msg.strip().lower()
+    return lower in _STOP_KEYWORDS
+
 # 파이프라인 시작 시 run.py가 주입하는 DiscordNotifier (없으면 stdin 폴백)
 _notifier = None
 _notifier_lock = threading.Lock()
+
+# 핫라인 대화 활성 여부 — True면 listen_for_commands가 메시지를 무시
+_hotline_active = False
+_hotline_active_lock = threading.Lock()
+
+
+def is_hotline_active() -> bool:
+    """핫라인 대화가 진행 중인지 반환한다. listen_for_commands에서 참조."""
+    with _hotline_active_lock:
+        return _hotline_active
 
 # 결정 사항 기록용 레포 경로 (run.py가 주입)
 _repo_path: Path | None = None
@@ -138,6 +188,16 @@ def set_notifier(notifier) -> None:
     global _notifier
     with _notifier_lock:
         _notifier = notifier
+
+
+def set_pause_controller(ctrl) -> None:
+    """
+    PauseController 인스턴스를 주입한다. 파이프라인 시작 시 run.py에서 호출.
+    핫라인 대화 중 "중단" 메시지가 오면 PauseController에 전달한다.
+    """
+    global _pause_controller
+    with _pause_controller_lock:
+        _pause_controller = ctrl
 
 
 def set_repo_path(repo_path: str | Path | None) -> None:
@@ -424,7 +484,7 @@ def _append_decision(question: str, answer: str, method: str) -> None:
             logger.warning("[decisions] workspace 동기화 실패 (%s): %s", ws_ctx, e)
 
 
-def ask_user(question: str) -> str:
+def ask_user(question: str) -> _ToolResult:
     """
     에이전트가 사용자에게 직접 질문한다.
     사용자가 오케스트레이터와 자유롭게 대화한 뒤 "확정"을 입력하면 종료된다.
@@ -437,19 +497,20 @@ def ask_user(question: str) -> str:
         question: 사용자에게 보낼 질문 (구체적일수록 좋음)
 
     Returns:
-        대화에서 확정된 답변 문자열.
+        ToolResult — 대화에서 확정된 답변.
     """
     question = question.strip()
     if not question:
-        return "질문 내용이 비어 있습니다. 질문을 구체적으로 작성하세요."
+        return _ToolResult(success=False, output="", error="질문 내용이 비어 있습니다. 질문을 구체적으로 작성하세요.")
 
     with _notifier_lock:
         notifier = _notifier
 
     if notifier is not None:
-        return _ask_via_discord(notifier, question)
+        answer = _ask_via_discord(notifier, question)
     else:
-        return _ask_via_stdin(question)
+        answer = _ask_via_stdin(question)
+    return _ToolResult(success=True, output=answer)
 
 
 # ── 내부 구현 ──────────────────────────────────────────────────────────────────
@@ -460,6 +521,9 @@ def _ask_via_discord(notifier, question: str) -> str:
     Discord에서 사용자와 멀티턴 대화를 진행한다.
     오케스트레이터 LLM이 대화 파트너로 참여하고, "확정" 입력 시 종료한다.
     """
+    global _hotline_active
+    with _hotline_active_lock:
+        _hotline_active = True
     try:
         opening = (
             f"❓ **에이전트 질문**\n\n"
@@ -469,74 +533,122 @@ def _ask_via_discord(notifier, question: str) -> str:
         last_bot_message_id = notifier.send(opening)
         logger.info("[ask_user] Discord 질문 전송 — 대화 대기 중")
     except Exception as e:
+        with _hotline_active_lock:
+            _hotline_active = False
         logger.warning("[ask_user] Discord 전송 실패, stdin 폴백: %s", e)
         return _ask_via_stdin(question)
 
     conversation: list[dict] = []  # {"role": "user"|"assistant", "content": str}
 
-    while True:
-        # 사용자 메시지 올 때까지 무한 대기
-        user_msg = _poll_forever(notifier, last_bot_message_id)
+    try:
+        while True:
+            # urgent_callback이 이미 중단을 처리했으면 즉시 탈출
+            with _pause_controller_lock:
+                ctrl = _pause_controller
+            if ctrl is not None and ctrl.is_stopped:
+                logger.info("[ask_user] PauseController 중단 상태 감지 — 핫라인 종료")
+                return "사용자가 파이프라인 중단을 요청했습니다."
 
-        # 빈 메시지 방어 (notifier 필터링 후에도 혹시 남는 경우 대비)
-        if not user_msg.strip():
-            logger.debug("[ask_user] 빈 메시지 수신 — 무시하고 계속 대기")
-            continue
+            # 사용자 메시지 올 때까지 무한 대기
+            user_msg = _poll_forever(notifier, last_bot_message_id)
 
-        if _is_skip(user_msg):
-            logger.info("[ask_user] skip 수신 — 에이전트 자율 판단으로 진행")
+            # 빈 메시지 방어 (notifier 필터링 후에도 혹시 남는 경우 대비)
+            if not user_msg.strip():
+                logger.debug("[ask_user] 빈 메시지 수신 — 무시하고 계속 대기")
+                continue
+
+            # 중단 명령 → PauseController에 전달하고 대화 종료
+            if _is_stop(user_msg):
+                logger.info("[ask_user] 중단 명령 수신 — PauseController에 전달")
+                with _pause_controller_lock:
+                    ctrl = _pause_controller
+                # urgent_callback이 먼저 처리했으면 이미 stopped=True 상태
+                # 그 경우엔 알림 중복 전송을 막기 위해 send를 건너뜀
+                already_stopped = ctrl is not None and ctrl.is_stopped
+                if ctrl is not None:
+                    ctrl.handle_command(user_msg)
+                if not already_stopped:
+                    try:
+                        notifier.send("🛑 중단 요청 확인! 현재 태스크 완료 후 파이프라인을 종료합니다.")
+                    except Exception:
+                        pass
+                return "사용자가 파이프라인 중단을 요청했습니다."
+
+            if _is_skip(user_msg):
+                logger.info("[ask_user] skip 수신 — 에이전트 자율 판단으로 진행")
+                try:
+                    notifier.send("⏭ 입력 확인! 에이전트가 알아서 진행합니다.")
+                except Exception as e:
+                    logger.warning("[ask_user] skip 확인 메시지 전송 실패: %s", e)
+                skip_answer = "사용자가 답변을 건너뛰었습니다. 컨텍스트 문서와 일반적인 관례를 바탕으로 최선의 판단으로 진행하세요."
+                _append_decision(question, skip_answer, "에이전트 자율 판단")
+                return skip_answer
+
+            if _is_confirm(user_msg):
+                try:
+                    notifier.send("✅ 확정 입력 확인! 대화 내용 정리 중이에요…")
+                except Exception as e:
+                    logger.warning("[ask_user] 확정 확인 메시지 전송 실패: %s", e)
+                # 대화 내용을 요약해 에이전트에게 전달할 단일 답변 생성
+                final_answer = _synthesize_answer(question, conversation)
+                logger.info("[ask_user] 확정 수신 — 최종 답변: %r", final_answer[:80])
+                _append_decision(question, final_answer, "사용자 확정")
+                try:
+                    notifier.send(
+                        f"📋 **에이전트에게 전달할 답변**\n>>> {final_answer}"
+                    )
+                except Exception as e:
+                    logger.warning("[ask_user] 최종 답변 전송 실패: %s", e)
+                return final_answer
+
+            # 일반 대화 메시지 → 오케스트레이터 LLM이 응답
+            conversation.append({"role": "user", "content": user_msg})
             try:
-                notifier.send("⏭ 입력 확인! 에이전트가 알아서 진행합니다.")
-            except Exception:
-                pass
-            skip_answer = "사용자가 답변을 건너뛰었습니다. 컨텍스트 문서와 일반적인 관례를 바탕으로 최선의 판단으로 진행하세요."
-            _append_decision(question, skip_answer, "에이전트 자율 판단")
-            return skip_answer
+                response = _orchestrator_reply(question, conversation)
+                conversation.append({"role": "assistant", "content": response})
+            except Exception as e:
+                logger.error("[ask_user] 오케스트레이터 응답 실패, conversation에 미추가: %s", e)
+                response = "⚠️ 일시적으로 응답을 생성할 수 없습니다. 계속 대화하시거나 `확정`/`알아서 해`를 입력해주세요."
+                # 실패한 응답은 conversation 히스토리에 추가하지 않음
 
-        if _is_confirm(user_msg):
             try:
-                notifier.send("✅ 확정 입력 확인! 대화 내용 정리 중이에요…")
-            except Exception:
-                pass
-            # 대화 내용을 요약해 에이전트에게 전달할 단일 답변 생성
-            final_answer = _synthesize_answer(question, conversation)
-            logger.info("[ask_user] 확정 수신 — 최종 답변: %r", final_answer[:80])
-            _append_decision(question, final_answer, "사용자 확정")
-            try:
-                notifier.send(
-                    f"📋 **에이전트에게 전달할 답변**\n>>> {final_answer}"
-                )
-            except Exception:
-                pass
-            return final_answer
+                last_bot_message_id = notifier.send(response)
+            except Exception as e:
+                logger.warning("[ask_user] Discord 응답 전송 실패: %s", e)
 
-        # 일반 대화 메시지 → 오케스트레이터 LLM이 응답
-        conversation.append({"role": "user", "content": user_msg})
+    except Exception as e:
+        # 대화 루프 자체에서 예상치 못한 예외 → 사용자에게 알리고 자율 판단으로 전환
+        logger.error("[ask_user] 대화 루프 예외 발생 — 자율 판단으로 전환: %s", e, exc_info=True)
         try:
-            response = _orchestrator_reply(question, conversation)
-            conversation.append({"role": "assistant", "content": response})
-        except Exception as e:
-            logger.error("[ask_user] 오케스트레이터 응답 실패, conversation에 미추가: %s", e)
-            response = "⚠️ 일시적으로 응답을 생성할 수 없습니다. 계속 대화하시거나 `확정`/`알아서 해`를 입력해주세요."
-            # 실패한 응답은 conversation 히스토리에 추가하지 않음
-
-        try:
-            last_bot_message_id = notifier.send(response)
-        except Exception as e:
-            logger.warning("[ask_user] Discord 응답 전송 실패: %s", e)
+            notifier.send(
+                f"⚠️ 대화 처리 중 오류가 발생했습니다. 에이전트가 자율 판단으로 계속 진행합니다.\n"
+                f"오류: `{type(e).__name__}: {e}`"
+            )
+        except Exception:
+            pass
+        fallback = "대화 처리 오류로 자율 판단으로 진행합니다. 컨텍스트 문서와 일반적인 관례를 바탕으로 최선의 판단으로 진행하세요."
+        _append_decision(question, fallback, "에이전트 자율 판단 (오류 복구)")
+        return fallback
+    finally:
+        with _hotline_active_lock:
+            _hotline_active = False
 
 
 def _poll_forever(notifier, after_message_id: str) -> str:
     """사용자 메시지가 올 때까지 chunk 단위로 폴링을 반복한다."""
     current_after = after_message_id
     while True:
-        reply = notifier.wait_for_reply(
-            after_message_id=current_after,
-            timeout=_POLL_CHUNK,
-        )
+        try:
+            reply, current_after = notifier.wait_for_reply(
+                after_message_id=current_after,
+                timeout=_POLL_CHUNK,
+            )
+        except Exception as e:
+            logger.warning("[ask_user] 폴링 중 예외 발생, 재시도: %s", e)
+            continue
         if reply is not None:
             return reply
-        logger.debug("[ask_user] 아직 답변 없음 — 계속 대기 중")
+        logger.debug("[ask_user] 아직 답변 없음 (after=%s) — 계속 대기 중", current_after)
 
 
 def _infer_provider(llm) -> str:
@@ -561,7 +673,7 @@ def _orchestrator_reply(question: str, conversation: list[dict]) -> str:
 
     대화 히스토리는 GLM 호환성을 위해 단일 user 메시지로 직렬화하여 전달한다.
     """
-    _MAX_TOOL_ROUNDS = 5
+    _MAX_TOOL_ROUNDS = 2
 
     with _llm_lock:
         llm = _conv_llm

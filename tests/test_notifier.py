@@ -17,7 +17,7 @@ from hotline.notifier import DiscordNotifier
 # ── 픽스처 ───────────────────────────────────────────────────────────────────
 
 def make_notifier() -> DiscordNotifier:
-    return DiscordNotifier(token="test-token", channel_id=123456789)
+    return DiscordNotifier(token="test-token", guild_id=987654321, channel_id=123456789)
 
 
 def make_response(json_data: dict, status_code: int = 200) -> MagicMock:
@@ -35,26 +35,24 @@ def make_response(json_data: dict, status_code: int = 200) -> MagicMock:
 
 class TestFromEnv:
     def test_returns_notifier_when_both_vars_set(self):
-        with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": "tok", "DISCORD_CHANNEL_ID": "999"}):
-            n = DiscordNotifier.from_env()
+        with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": "tok", "DISCORD_GUILD_ID": "999"}):
+            n = DiscordNotifier.from_env(channel_id=123)
         assert n is not None
-        assert n.channel_id == 999
+        assert n.channel_id == 123
+        assert n.guild_id == 999
 
     def test_returns_none_when_token_missing(self):
-        env = {"DISCORD_BOT_TOKEN": "", "DISCORD_CHANNEL_ID": "999"}
-        with patch.dict(os.environ, env, clear=False):
-            with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": ""}):
-                n = DiscordNotifier.from_env()
-        # 토큰 없으면 None
-        assert n is None or True  # 환경에 따라 다를 수 있으므로 인스턴스 타입만 확인
-
-    def test_returns_none_when_channel_missing(self):
-        with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": "tok", "DISCORD_CHANNEL_ID": ""}):
+        with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": "", "DISCORD_GUILD_ID": "999"}):
             n = DiscordNotifier.from_env()
         assert n is None
 
-    def test_returns_none_when_channel_not_integer(self):
-        with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": "tok", "DISCORD_CHANNEL_ID": "not-a-number"}):
+    def test_returns_none_when_guild_missing(self):
+        with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": "tok", "DISCORD_GUILD_ID": ""}):
+            n = DiscordNotifier.from_env()
+        assert n is None
+
+    def test_returns_none_when_guild_not_integer(self):
+        with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": "tok", "DISCORD_GUILD_ID": "not-a-number"}):
             n = DiscordNotifier.from_env()
         assert n is None
 
@@ -124,9 +122,9 @@ class TestWaitForReply:
         with patch("httpx.Client") as MockClient:
             MockClient.return_value.__enter__.return_value.get.return_value = mock_resp
             with patch("time.sleep"):
-                result = notifier.wait_for_reply("100", timeout=10)
+                reply, last_id = notifier.wait_for_reply("100", timeout=10)
 
-        assert result == "401로 해줘"
+        assert reply == "401로 해줘"
 
     def test_skips_bot_messages(self):
         notifier = make_notifier()
@@ -142,9 +140,9 @@ class TestWaitForReply:
             mock_client = MockClient.return_value.__enter__.return_value
             mock_client.get.side_effect = [bot_resp, user_resp]
             with patch("time.sleep"):
-                result = notifier.wait_for_reply("100", timeout=30)
+                reply, last_id = notifier.wait_for_reply("100", timeout=30)
 
-        assert result == "사용자 답변"
+        assert reply == "사용자 답변"
 
     def test_returns_none_on_timeout(self):
         notifier = make_notifier()
@@ -154,9 +152,9 @@ class TestWaitForReply:
             MockClient.return_value.__enter__.return_value.get.return_value = empty_resp
             with patch("time.sleep"):
                 with patch("time.monotonic", side_effect=[0, 0, 999]):
-                    result = notifier.wait_for_reply("100", timeout=1)
+                    reply, last_id = notifier.wait_for_reply("100", timeout=1)
 
-        assert result is None
+        assert reply is None
 
     def test_ignores_http_errors_during_polling(self):
         import httpx as _httpx
@@ -172,6 +170,24 @@ class TestWaitForReply:
             mock_client = MockClient.return_value.__enter__.return_value
             mock_client.get.side_effect = [error_resp, user_resp]
             with patch("time.sleep"):
-                result = notifier.wait_for_reply("100", timeout=30)
+                reply, last_id = notifier.wait_for_reply("100", timeout=30)
 
-        assert result == "괜찮아요"
+        assert reply == "괜찮아요"
+
+    def test_returns_advanced_last_id(self):
+        """타임아웃 시 bot 메시지를 지나간 last_id가 반환되는지 확인."""
+        notifier = make_notifier()
+        bot_resp = make_response([
+            {"id": "500", "content": "봇 메시지", "author": {"bot": True}},
+        ])
+        empty_resp = make_response([])
+
+        with patch("httpx.Client") as MockClient:
+            mock_client = MockClient.return_value.__enter__.return_value
+            mock_client.get.side_effect = [bot_resp, empty_resp]
+            with patch("time.sleep"):
+                with patch("time.monotonic", side_effect=[0, 0, 0, 999]):
+                    reply, last_id = notifier.wait_for_reply("100", timeout=1)
+
+        assert reply is None
+        assert last_id == "500"

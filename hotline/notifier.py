@@ -25,7 +25,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _DISCORD_API = "https://discord.com/api/v10"
-_POLL_INTERVAL = 3   # 초
+_POLL_INTERVAL = 1   # 초
 _DEFAULT_TIMEOUT = 300  # 초 (5분)
 
 
@@ -163,7 +163,7 @@ class DiscordNotifier:
         after_message_id: str,
         timeout: int = _DEFAULT_TIMEOUT,
         stop_check: Callable[[], bool] | None = None,
-    ) -> str | None:
+    ) -> tuple[str | None, str]:
         """
         after_message_id 이후에 사용자(봇 제외)가 보낸 첫 메시지를 기다린다.
 
@@ -174,10 +174,11 @@ class DiscordNotifier:
                         (예: lambda: pause_ctrl.is_stopped)
 
         Returns:
-            사용자 메시지 내용, 타임아웃 또는 stop_check 트리거 시 None
+            (사용자 메시지 내용 또는 None, 마지막으로 확인한 메시지 ID)
+            타임아웃/stop_check 시 (None, last_id) 반환 — last_id를 다음 호출에 재사용 가능
         """
         if self._channel_id is None:
-            return None
+            return None, after_message_id
 
         url = f"{_DISCORD_API}/channels/{self._channel_id}/messages"
         deadline = time.monotonic() + timeout
@@ -186,7 +187,7 @@ class DiscordNotifier:
         while time.monotonic() < deadline:
             if stop_check and stop_check():
                 logger.info("wait_for_reply: stop_check 트리거 — 조기 종료")
-                return None
+                return None, last_id
             try:
                 with httpx.Client(timeout=10.0) as client:
                     resp = client.get(
@@ -194,28 +195,38 @@ class DiscordNotifier:
                         headers=self._headers,
                         params={"after": last_id, "limit": 10},
                     )
-                    if resp.is_success:
-                        messages = resp.json()
-                        # 봇 메시지 제외, 오래된 것부터 정렬
-                        user_msgs = [
-                            m for m in messages
-                            if not m.get("author", {}).get("bot", False)
-                            and m.get("content", "").strip()  # 빈 메시지(첨부파일·스티커 전용) 제외
-                        ]
-                        user_msgs.sort(key=lambda m: int(m["id"]))
-                        if user_msgs:
-                            reply = user_msgs[0]["content"].strip()
-                            logger.info("Discord 답변 수신: %r", reply[:100])
-                            return reply
-                        if messages:
-                            last_id = max(m["id"] for m in messages)
+                    if not resp.is_success:
+                        # 429 Rate Limit: retry_after 만큼 대기
+                        if resp.status_code == 429:
+                            try:
+                                retry_after = resp.json().get("retry_after", 1)
+                                time.sleep(float(retry_after))
+                            except Exception:
+                                time.sleep(_POLL_INTERVAL)
+                        continue
+
+                    messages = resp.json()
+                    # 봇 메시지 제외, 오래된 것부터 정렬
+                    user_msgs = [
+                        m for m in messages
+                        if not m.get("author", {}).get("bot", False)
+                        and m.get("content", "").strip()  # 빈 메시지(첨부파일·스티커 전용) 제외
+                    ]
+                    user_msgs.sort(key=lambda m: int(m["id"]))
+                    if user_msgs:
+                        reply = user_msgs[0]["content"].strip()
+                        logger.info("Discord 답변 수신: %r", reply[:100])
+                        return reply, last_id
+                    if messages:
+                        # 숫자 기준 max (문자열 비교 오류 방지)
+                        last_id = str(max(int(m["id"]) for m in messages))
             except httpx.HTTPError as e:
                 logger.warning("Discord 폴링 오류: %s", e)
 
             time.sleep(_POLL_INTERVAL)
 
         logger.info("Discord 답변 대기 타임아웃 (%ds)", timeout)
-        return None
+        return None, last_id
 
     # ── 명령 리스너 ────────────────────────────────────────────────────────────
 
@@ -240,17 +251,25 @@ class DiscordNotifier:
         callback: Callable[[str], None],
         after_message_id: str | None = None,
         stop_event: threading.Event | None = None,
+        skip_check: Callable[[], bool] | None = None,
+        urgent_callback: Callable[[str], bool] | None = None,
     ) -> None:
         """
         Discord 채널을 폴링하며 사용자 메시지 수신 시 callback(content)을 호출한다.
         stop_event가 set되면 루프를 종료한다.
+        skip_check가 주어지고 True를 반환하면 일반 메시지를 건너뛴다 (핫라인 대화 중 경쟁 방지).
+        urgent_callback이 주어지면 skip_check와 관계없이 모든 사용자 메시지에 대해 먼저 호출한다.
+          True 반환 시 해당 메시지는 처리 완료로 간주하고 callback은 호출하지 않는다.
         블로킹 함수이므로 별도 스레드에서 호출해야 한다.
         """
         if self._channel_id is None:
+            logger.warning("[listener] channel_id가 None — 리스너 시작하지 않음")
             return
 
         url = f"{_DISCORD_API}/channels/{self._channel_id}/messages"
         last_id = after_message_id
+        logger.info("[listener] Discord 명령 리스너 시작 (channel=%s, after=%s)", self._channel_id, last_id)
+        poll_count = 0
 
         while not (stop_event and stop_event.is_set()):
             try:
@@ -259,23 +278,64 @@ class DiscordNotifier:
                     if last_id:
                         params["after"] = last_id
                     resp = client.get(url, headers=self._headers, params=params)
-                    if resp.is_success:
-                        messages = resp.json()
-                        user_msgs = [
-                            m for m in messages
-                            if not m.get("author", {}).get("bot", False)
-                        ]
-                        user_msgs.sort(key=lambda m: int(m["id"]))
-                        for msg in user_msgs:
-                            callback(msg["content"].strip())
-                        if messages:
-                            last_id = max(m["id"] for m in messages)
+
+                    if not resp.is_success:
+                        logger.warning(
+                            "[listener] Discord API 오류 (status=%d, body=%s)",
+                            resp.status_code, resp.text[:200],
+                        )
+                        # 429 Rate Limit: retry_after 만큼 대기
+                        if resp.status_code == 429:
+                            try:
+                                retry_after = resp.json().get("retry_after", 1)
+                                time.sleep(float(retry_after))
+                            except Exception:
+                                time.sleep(_POLL_INTERVAL)
+                        else:
+                            time.sleep(_POLL_INTERVAL)
+                        continue
+
+                    messages = resp.json()
+                    user_msgs = [
+                        m for m in messages
+                        if not m.get("author", {}).get("bot", False)
+                    ]
+                    user_msgs.sort(key=lambda m: int(m["id"]))
+
+                    skipping = skip_check and skip_check()
+
+                    for msg in user_msgs:
+                        content = msg["content"].strip()
+                        logger.info("[listener] 사용자 메시지 수신: %r (skip=%s)", content[:100], skipping)
+                        try:
+                            # urgent_callback은 skip 상태와 무관하게 항상 호출 (중단 등)
+                            if urgent_callback and urgent_callback(content):
+                                logger.info("[listener] urgent_callback 처리 완료: %r", content[:100])
+                                continue  # urgent가 처리함 — 일반 callback 건너뜀
+                            if not skipping:
+                                callback(content)
+                        except Exception as e:
+                            # callback/urgent_callback 예외가 리스너 스레드를 죽이지 않도록 보호
+                            logger.error("[listener] 콜백 예외 (무시): %s", e, exc_info=True)
+
+                    if messages:
+                        last_id = str(max(int(m["id"]) for m in messages))
+
             except httpx.TimeoutException as e:
-                logger.debug("Discord 명령 폴링 타임아웃 (무시): %s", e)
+                logger.debug("[listener] 폴링 타임아웃 (무시): %s", e)
             except httpx.HTTPError as e:
-                logger.warning("Discord 명령 폴링 오류: %s", e)
+                logger.warning("[listener] HTTP 오류: %s", e)
+            except Exception as e:
+                # JSON 파싱 오류, KeyError 등 예상치 못한 예외로 스레드가 죽는 것을 방지
+                logger.error("[listener] 예상치 못한 예외 (리스너 계속 실행): %s", e, exc_info=True)
+
+            poll_count += 1
+            if poll_count % 60 == 0:
+                logger.info("[listener] heartbeat — %d회 폴링 완료 (last_id=%s)", poll_count, last_id)
 
             time.sleep(_POLL_INTERVAL)
+
+        logger.info("[listener] Discord 명령 리스너 종료 (stop_event set)")
 
     # ── 팩토리 ─────────────────────────────────────────────────────────────────
 
