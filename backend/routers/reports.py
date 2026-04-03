@@ -68,7 +68,7 @@ _BRIEF_SYSTEM = """\
 
 class ExecutionBriefRequest(BaseModel):
     since: str | None = None        # ISO 8601 datetime (마지막 회의 시각)
-    reports_dir: str = "data/reports"
+    reports_dir: str = "agent-data/reports"
 
 
 @router.post("/execution-brief")
@@ -94,7 +94,7 @@ async def generate_execution_brief(body: ExecutionBriefRequest) -> dict[str, Any
     # 보고서 데이터를 텍스트로 직렬화
     lines = []
     for r in reports:
-        lines.append(
+        entry = (
             f"task_id: {r.task_id}\n"
             f"title: {r.title}\n"
             f"status: {r.status}\n"
@@ -106,6 +106,14 @@ async def generate_execution_brief(body: ExecutionBriefRequest) -> dict[str, Any
             f"time_elapsed_seconds: {r.time_elapsed_seconds}\n"
             f"failure_reasons: {r.failure_reasons}\n"
         )
+        if r.orchestrator_attempts:
+            entry += (
+                f"orchestrator_attempts: {r.orchestrator_attempts}\n"
+                f"orchestrator_model: {r.orchestrator_model}\n"
+                f"coding_agent_model: {r.coding_agent_model}\n"
+                f"orchestrator_summary: {r.orchestrator_summary}\n"
+            )
+        lines.append(entry)
     report_text = "\n---\n".join(lines)
 
     client = create_client(
@@ -137,7 +145,7 @@ def get_project_structure(path: str = "PROJECT_STRUCTURE.md") -> dict[str, Any]:
 class WeeklyReportRequest(BaseModel):
     year: int | None = None   # None이면 현재 주
     week: int | None = None
-    reports_dir: str = "data/reports"
+    reports_dir: str = "agent-data/reports"
 
 
 def _make_llm_fn():

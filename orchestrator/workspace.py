@@ -203,13 +203,13 @@ class WorkspaceManager:
             logger.debug("src/__init__.py 생성 (Python 패키지 인식용)")
 
     def _copy_context_docs(self) -> None:
-        """data/context/ 디렉토리의 문서를 workspace/context/ 에 복사한다.
+        """agent-data/context/ 디렉토리의 문서를 workspace/context/ 에 복사한다.
 
         tasks.yaml 생성에 쓰인 원본 스펙·요구사항 문서를 에이전트가 참조할 수 있도록 한다.
         에이전트는 프롬프트에 직접 주입되는 게 아니라 파일로 제공되므로,
         필요한 시점에 read_file로 on-demand 참조 → 컨텍스트 낭비 없음.
         """
-        context_dir = self.repo_path / "data" / "context"
+        context_dir = self.repo_path / "agent-data" / "context"
         if not context_dir.exists():
             return
         dest_dir = self.path / "context"

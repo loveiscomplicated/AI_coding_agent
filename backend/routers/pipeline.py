@@ -49,13 +49,13 @@ def _emit(job_id: str, event: dict) -> None:
 # ── 요청/응답 스키마 ──────────────────────────────────────────────────────────
 
 class RunRequest(BaseModel):
-    tasks_path: str = "data/tasks.yaml"
+    tasks_path: str = "agent-data/tasks.yaml"
     repo_path: str = "."
     base_branch: str = "main"
     task_id: str | None = None
     no_pr: bool = False
     verbose: bool = False
-    reports_dir: str | None = None      # None → run_pipeline 기본값 (repo_path/data/reports)
+    reports_dir: str | None = None      # None → run_pipeline 기본값 (repo_path/agent-data/reports)
     max_workers: int = 1                # 병렬 에이전트 수 (1=순차)
     discord_channel_id: str | None = None  # 프로젝트 Discord 채널 ID (없으면 자동 생성)
     max_orchestrator_retries: int = 2   # 오케스트레이터 자동 재시도 최대 횟수

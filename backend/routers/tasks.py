@@ -154,7 +154,7 @@ def get_draft_status(job_id: str) -> dict:
 
 
 @router.get("/tasks")
-def list_tasks(tasks_path: str = "data/tasks.yaml") -> dict:
+def list_tasks(tasks_path: str = "agent-data/tasks.yaml") -> dict:
     """tasks.yaml에서 태스크 목록을 반환한다."""
     path = Path(tasks_path)
     if not path.exists():
@@ -167,7 +167,7 @@ def list_tasks(tasks_path: str = "data/tasks.yaml") -> dict:
 
 
 @router.get("/tasks/{task_id}")
-def get_task(task_id: str, tasks_path: str = "data/tasks.yaml") -> dict:
+def get_task(task_id: str, tasks_path: str = "agent-data/tasks.yaml") -> dict:
     """특정 ID의 태스크를 반환한다."""
     path = Path(tasks_path)
     if not path.exists():
@@ -185,7 +185,7 @@ def get_task(task_id: str, tasks_path: str = "data/tasks.yaml") -> dict:
 class PatchTaskRequest(BaseModel):
     description: str | None = None
     acceptance_criteria: list[str] | None = None
-    tasks_path: str = "data/tasks.yaml"
+    tasks_path: str = "agent-data/tasks.yaml"
 
 
 @router.patch("/tasks/{task_id}")
@@ -211,7 +211,7 @@ def patch_task(task_id: str, body: PatchTaskRequest) -> dict:
 
 class SaveTasksRequest(BaseModel):
     tasks: list[dict]
-    tasks_path: str = "data/tasks.yaml"
+    tasks_path: str = "agent-data/tasks.yaml"
 
 
 @router.post("/tasks")

@@ -29,7 +29,7 @@ class TaskReport:
     reviewer_feedback: str = ""
 
 
-def save_report(report: TaskReport, reports_dir: str = "data/reports") -> Path:
+def save_report(report: TaskReport, reports_dir: str = "agent-data/reports") -> Path:
     """
     TaskReport를 YAML 파일로 저장한다.
 
@@ -38,7 +38,7 @@ def save_report(report: TaskReport, reports_dir: str = "data/reports") -> Path:
 
     Args:
         report: 저장할 TaskReport 인스턴스
-        reports_dir: 저장할 디렉토리 경로 (기본값: "data/reports")
+        reports_dir: 저장할 디렉토리 경로 (기본값: "agent-data/reports")
 
     Returns:
         저장된 파일의 Path 객체
@@ -57,7 +57,7 @@ def save_report(report: TaskReport, reports_dir: str = "data/reports") -> Path:
 
 
 def load_reports(
-    reports_dir: str = "data/reports",
+    reports_dir: str = "agent-data/reports",
     since: Optional[datetime] = None,
 ) -> list:
     """
@@ -67,7 +67,7 @@ def load_reports(
     completed_at이 None인 항목은 since 필터링 시 제외된다.
 
     Args:
-        reports_dir: YAML 파일이 있는 디렉토리 경로 (기본값: "data/reports")
+        reports_dir: YAML 파일이 있는 디렉토리 경로 (기본값: "agent-data/reports")
         since: 이 시각 이후의 report만 반환 (None이면 전체 반환)
 
     Returns:

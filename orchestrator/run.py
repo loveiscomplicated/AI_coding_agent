@@ -236,7 +236,7 @@ def _extract_orch_summary(report_text: str, max_len: int = 200) -> str:
 
 _GITIGNORE_ENTRIES = [
     ".agent-workspace/",
-    "data/",
+    "agent-data/",
 ]
 
 def _ensure_gitignore(repo_path: Path) -> None:
@@ -294,7 +294,7 @@ def run_pipeline(
 
     # reports_dir 기본값: 대상 레포 안의 data/reports
     if reports_dir is None:
-        reports_dir = repo_path / "data" / "reports"
+        reports_dir = repo_path / "agent-data" / "reports"
 
     # 파이프라인 시작 전 PROJECT_STRUCTURE.md 초기 생성 (없거나 오래된 경우)
     try:
@@ -783,7 +783,7 @@ def _run_single_task(
     save_lock: threading.Lock,
     all_tasks: list[Task],
     tasks_path: Path,
-    reports_dir: Path = Path("data/reports"),
+    reports_dir: Path = Path("agent-data/reports"),
     on_progress=None,   # Callable[[dict], None] | None
 ) -> tuple[bool, str]:
     """
@@ -1334,8 +1334,8 @@ def main() -> int:
     git = GitWorkflow(repo_path, base_branch=args.base_branch)
     merge_agent = MergeAgent(llm=fast_llm, repo_path=repo_path)
 
-    # reports_dir: --reports-dir 명시 시 그 경로, 아니면 대상 레포 안의 data/reports
-    reports_dir = Path(args.reports_dir) if args.reports_dir != "data/reports" else repo_path / "data" / "reports"
+    # reports_dir: --reports-dir 명시 시 그 경로, 아니면 대상 레포 안의 agent-data/reports
+    reports_dir = Path(args.reports_dir) if args.reports_dir != "agent-data/reports" else repo_path / "agent-data" / "reports"
 
     save_lock = threading.Lock()  # tasks.yaml 쓰기 직렬화
     success_count = 0
@@ -1448,7 +1448,7 @@ def _parse_args() -> argparse.Namespace:
                         help="그룹 내 태스크 병렬 실행 수 (기본값: 1 = 순차)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="DEBUG 로그 출력")
-    parser.add_argument("--reports-dir", default="data/reports",
+    parser.add_argument("--reports-dir", default="agent-data/reports",
                         metavar="DIR",
                         help="Task Report 저장 디렉토리 (기본값: data/reports)")
     parser.add_argument("--provider", default="claude",

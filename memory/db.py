@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # 기본 DB 경로 — SessionManager가 재정의 가능
-DEFAULT_DB_PATH = Path("data/sessions.db")
+DEFAULT_DB_PATH = Path("agent-data/sessions.db")
 
 
 def _serialize(content: object) -> object:

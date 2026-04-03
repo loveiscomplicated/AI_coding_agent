@@ -160,8 +160,8 @@ venv/
 env/
 
 # Runtime data
-data/sessions.db
-data/*.db
+agent-data/sessions.db
+agent-data/*.db
 
 # macOS
 .DS_Store

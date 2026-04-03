@@ -27,7 +27,7 @@ from orchestrator.report import TaskReport
 
 logger = logging.getLogger(__name__)
 
-_MILESTONES_DIR = Path("data/reports/milestones")
+_MILESTONES_DIR = Path("agent-data/reports/milestones")
 
 _SYSTEM_PROMPT = """\
 당신은 소프트웨어 개발 파이프라인의 실행 결과를 분석하는 전문가입니다.

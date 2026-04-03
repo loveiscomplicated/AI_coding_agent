@@ -263,7 +263,7 @@ function ProjectBar({ config, onChange, onLoad, loading }: ProjectBarProps) {
           className="text-xs rounded border border-gray-300 dark:border-zinc-600 px-2 py-1 bg-white dark:bg-zinc-800 text-gray-700 dark:text-zinc-300 w-64"
           value={config.reportsDir}
           onChange={e => onChange({ ...config, reportsDir: e.target.value })}
-          placeholder="/path/to/project/data/reports"
+          placeholder="/path/to/project/agent-data/reports"
           title="reports_dir — 프로젝트의 Task Report 디렉토리"
           onKeyDown={e => { if (e.key === 'Enter') onLoad() }}
         />
@@ -286,7 +286,7 @@ function ProjectBar({ config, onChange, onLoad, loading }: ProjectBarProps) {
           className="text-xs rounded border border-gray-300 dark:border-zinc-600 px-2 py-1 bg-white dark:bg-zinc-800 text-gray-700 dark:text-zinc-300 w-48"
           value={config.tasksPath}
           onChange={e => onChange({ ...config, tasksPath: e.target.value })}
-          placeholder="data/tasks.yaml"
+          placeholder="agent-data/tasks.yaml"
           title="tasks_path — 프로젝트의 tasks.yaml 경로"
           onKeyDown={e => { if (e.key === 'Enter') onLoad() }}
         />
@@ -389,7 +389,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
       }
     }
     const recent = loadRecent()
-    return recent[0] ?? { reportsDir: 'data/reports', tasksPath: 'data/tasks.yaml' }
+    return recent[0] ?? { reportsDir: 'agent-data/reports', tasksPath: 'agent-data/tasks.yaml' }
   })
   const [summary, setSummary] = useState<Summary | null>(null)
   const [tasks, setTasks] = useState<DashboardTask[]>([])
@@ -1042,7 +1042,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
                 {contextDocs.length === 0 ? (
                   <p className="text-sm text-gray-400 dark:text-zinc-500">
                     컨텍스트 문서가 없습니다.
-                    <span className="block text-xs mt-0.5 font-mono">{repoPathForContext}/data/context/</span>
+                    <span className="block text-xs mt-0.5 font-mono">{repoPathForContext}/agent-data/context/</span>
                   </p>
                 ) : (
                   <div className="border border-gray-200 dark:border-zinc-700 rounded-xl overflow-hidden divide-y divide-gray-100 dark:divide-zinc-800">

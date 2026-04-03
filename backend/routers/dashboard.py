@@ -34,8 +34,8 @@ router = APIRouter()
 
 @router.get("/dashboard/summary")
 def get_dashboard_summary(
-    reports_dir: str = "data/reports",
-    tasks_path: str = "data/tasks.yaml",
+    reports_dir: str = "agent-data/reports",
+    tasks_path: str = "agent-data/tasks.yaml",
 ) -> dict[str, Any]:
     reports_path = Path(reports_dir)
     milestones_dir = reports_path / "milestones"
@@ -87,8 +87,8 @@ def get_dashboard_summary(
 
 @router.get("/dashboard/tasks")
 def get_dashboard_tasks(
-    reports_dir: str = "data/reports",
-    tasks_path: str = "data/tasks.yaml",
+    reports_dir: str = "agent-data/reports",
+    tasks_path: str = "agent-data/tasks.yaml",
 ) -> dict[str, Any]:
     tp = Path(tasks_path)
     if not tp.exists():
@@ -125,13 +125,13 @@ def get_dashboard_tasks(
 
 
 @router.get("/dashboard/milestones")
-def list_milestones(reports_dir: str = "data/reports") -> dict[str, Any]:
+def list_milestones(reports_dir: str = "agent-data/reports") -> dict[str, Any]:
     milestones_dir = Path(reports_dir) / "milestones"
     return {"milestones": load_milestone_reports(milestones_dir=milestones_dir)}
 
 
 @router.get("/dashboard/milestones/{filename}")
-def get_milestone(filename: str, reports_dir: str = "data/reports") -> dict[str, Any]:
+def get_milestone(filename: str, reports_dir: str = "agent-data/reports") -> dict[str, Any]:
     if "/" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="잘못된 파일명입니다.")
 

@@ -177,6 +177,8 @@ def generate_report(
     failure_reason: str,
     attempts: int,
     hints_tried: list[str],
+    orchestrator_model: str = "",
+    coding_agent_model: str = "",
 ) -> str:
     """
     최종 실패 보고서를 LLM으로 생성한다.
@@ -216,10 +218,19 @@ id: {task.id}
 """
     try:
         response = _report_llm.chat([Message(role="user", content=user_msg)])
-        return _extract_text(response) or "보고서 생성 실패"
+        report_body = _extract_text(response) or "보고서 생성 실패"
     except Exception as e:
         logger.error("오케스트레이터 보고서 생성 LLM 호출 실패: %s", e)
-        return f"# 보고서 생성 실패\n\n오류: {e}\n\n## 최종 실패 원인\n{failure_reason}"
+        report_body = f"# 보고서 생성 실패\n\n오류: {e}\n\n## 최종 실패 원인\n{failure_reason}"
+
+    model_section = (
+        f"\n\n---\n\n## 사용 모델\n\n"
+        f"| 역할 | 모델 |\n"
+        f"|------|------|\n"
+        f"| 중앙 오케스트레이터 | `{orchestrator_model or '(미지정)'}` |\n"
+        f"| 코딩 에이전트 | `{coding_agent_model or '(미지정)'}` |\n"
+    )
+    return report_body + model_section
 
 
 def save_report(report_text: str, task_id: str, reports_dir: Path) -> Path:

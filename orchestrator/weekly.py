@@ -22,7 +22,7 @@ from orchestrator.report import TaskReport, load_reports
 
 logger = logging.getLogger(__name__)
 
-_WEEKLY_DIR = Path("data/reports/weekly")
+_WEEKLY_DIR = Path("agent-data/reports/weekly")
 
 
 # ── 날짜 계산 ──────────────────────────────────────────────────────────────────
@@ -163,7 +163,7 @@ def generate_weekly_report(
     llm_fn: Callable[[str, str], str],
     year: int | None = None,
     week: int | None = None,
-    reports_dir: Path = Path("data/reports"),
+    reports_dir: Path = Path("agent-data/reports"),
     weekly_dir: Path = _WEEKLY_DIR,
 ) -> tuple[str, Path]:
     """

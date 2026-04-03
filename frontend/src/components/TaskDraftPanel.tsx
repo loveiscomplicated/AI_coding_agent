@@ -33,7 +33,7 @@ interface State {
   tasks: DraftTask[]
   errorMsg: string
   jobId: string
-  rootDir: string    // 프로젝트 루트 = repo_path; tasks.yaml은 항상 rootDir/data/tasks.yaml
+  rootDir: string    // 프로젝트 루트 = repo_path; tasks.yaml은 항상 rootDir/agent-data/tasks.yaml
   baseBranch: string // git base branch
   agentCount: number
 }
@@ -165,10 +165,10 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
     }
   }, [state, draftKey])
 
-  // tasks.yaml은 항상 rootDir/data/tasks.yaml
+  // tasks.yaml은 항상 rootDir/agent-data/tasks.yaml
   const tasksFilePath = state.rootDir === '.'
-    ? 'data/tasks.yaml'
-    : state.rootDir.replace(/\/+$/, '') + '/data/tasks.yaml'
+    ? 'agent-data/tasks.yaml'
+    : state.rootDir.replace(/\/+$/, '') + '/agent-data/tasks.yaml'
 
   // 마운트 시: 저장된 상태가 있으면 생성 스킵, 없으면 새로 시작
   useEffect(() => {
@@ -281,7 +281,7 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
         }),
       })
 
-      // 2. tasks.yaml 저장 (rootDir/data/tasks.yaml)
+      // 2. tasks.yaml 저장 (rootDir/agent-data/tasks.yaml)
       const saveRes = await fetch(`${API_BASE}/api/tasks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -407,7 +407,7 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
           )}
         </div>
         <div className="flex items-center gap-2">
-          {/* 프로젝트 루트 (= repo_path, tasks는 rootDir/data/tasks.yaml 고정) */}
+          {/* 프로젝트 루트 (= repo_path, tasks는 rootDir/agent-data/tasks.yaml 고정) */}
           <div className="flex items-center gap-1">
             <span className="text-xs text-gray-400 dark:text-zinc-500 shrink-0">프로젝트 루트</span>
             <div className="flex flex-col">
@@ -416,7 +416,7 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
                 value={state.rootDir === '.' ? '' : state.rootDir}
                 onChange={e => dispatch({ type: 'SET_ROOT', path: e.target.value || '.' })}
                 placeholder="/path/to/project"
-                title="프로젝트 루트 디렉토리 (tasks.yaml은 여기/data/tasks.yaml에 저장됩니다)"
+                title="프로젝트 루트 디렉토리 (tasks.yaml은 여기/agent-data/tasks.yaml에 저장됩니다)"
               />
               <span className="text-[10px] text-gray-400 dark:text-zinc-600 px-0.5 mt-0.5 truncate w-52">
                 → {tasksFilePath}

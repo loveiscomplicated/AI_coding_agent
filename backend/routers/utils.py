@@ -35,9 +35,9 @@ class SaveContextDocRequest(BaseModel):
 @router.get("/utils/context-docs")
 def list_context_docs(repo_path: str = ".") -> dict:
     """
-    {repo_path}/data/context/ 안의 파일 목록을 반환한다.
+    {repo_path}/agent-data/context/ 안의 파일 목록을 반환한다.
     """
-    context_dir = Path(repo_path).expanduser().resolve() / "data" / "context"
+    context_dir = Path(repo_path).expanduser().resolve() / "agent-data" / "context"
     if not context_dir.exists():
         return {"docs": []}
     docs = sorted(
@@ -50,9 +50,9 @@ def list_context_docs(repo_path: str = ".") -> dict:
 @router.get("/utils/context-docs/{filename}")
 def get_context_doc(filename: str, repo_path: str = ".") -> dict:
     """
-    {repo_path}/data/context/{filename}의 내용을 반환한다.
+    {repo_path}/agent-data/context/{filename}의 내용을 반환한다.
     """
-    path = Path(repo_path).expanduser().resolve() / "data" / "context" / filename
+    path = Path(repo_path).expanduser().resolve() / "agent-data" / "context" / filename
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail=f"문서 '{filename}'를 찾을 수 없습니다.")
     return {"filename": filename, "content": path.read_text(encoding="utf-8")}
@@ -61,10 +61,10 @@ def get_context_doc(filename: str, repo_path: str = ".") -> dict:
 @router.post("/utils/save-context-doc")
 def save_context_doc(body: SaveContextDocRequest) -> dict:
     """
-    content를 {repo_path}/data/context/{filename}에 저장한다.
+    content를 {repo_path}/agent-data/context/{filename}에 저장한다.
     디렉토리가 없으면 자동 생성한다.
     """
-    dest = Path(body.repo_path).expanduser().resolve() / "data" / "context" / body.filename
+    dest = Path(body.repo_path).expanduser().resolve() / "agent-data" / "context" / body.filename
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(body.content, encoding="utf-8")
     return {"saved": str(dest)}

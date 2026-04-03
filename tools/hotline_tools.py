@@ -201,7 +201,7 @@ def _load_orchestrator_context() -> str:
 
     # data/context/*.md
     if rp:
-        ctx_dir = rp / "data" / "context"
+        ctx_dir = rp / "agent-data" / "context"
         if ctx_dir.is_dir():
             for md_file in sorted(ctx_dir.glob("*.md")):
                 try:
@@ -389,7 +389,7 @@ def _append_decision(question: str, answer: str, method: str) -> None:
         repo = _repo_path
     if repo is None:
         return
-    decisions_path = repo / "data" / "context" / "decisions.md"
+    decisions_path = repo / "agent-data" / "context" / "decisions.md"
     decisions_path.parent.mkdir(parents=True, exist_ok=True)
 
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M")

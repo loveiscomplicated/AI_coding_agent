@@ -22,7 +22,7 @@ from orchestrator.task import Task, TaskStatus
 
 logger = logging.getLogger(__name__)
 
-_REPORTS_DIR = Path("data/reports")
+_REPORTS_DIR = Path("agent-data/reports")
 
 
 @dataclass
@@ -43,9 +43,14 @@ class TaskReport:
     reviewer_feedback: str = ""
     pr_number: int | None = None
     branch: str = ""
+    # 오케스트레이터 개입 정보 (개입이 없으면 기본값 유지)
+    orchestrator_attempts: int = 0
+    orchestrator_model: str = ""
+    coding_agent_model: str = ""
+    orchestrator_summary: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "task_id": self.task_id,
             "title": self.title,
             "status": self.status,
@@ -67,11 +72,20 @@ class TaskReport:
                 "branch": self.branch,
             },
         }
+        if self.orchestrator_attempts:
+            d["orchestrator"] = {
+                "attempts": self.orchestrator_attempts,
+                "orchestrator_model": self.orchestrator_model,
+                "coding_agent_model": self.coding_agent_model,
+                "summary": self.orchestrator_summary,
+            }
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TaskReport":
         m = data.get("metrics", {})
         p = data.get("pipeline_result", {})
+        o = data.get("orchestrator", {})
         return cls(
             task_id=data["task_id"],
             title=data.get("title", ""),
@@ -89,6 +103,10 @@ class TaskReport:
             reviewer_feedback=p.get("reviewer_feedback", ""),
             pr_number=p.get("pr_number"),
             branch=p.get("branch", ""),
+            orchestrator_attempts=o.get("attempts", 0),
+            orchestrator_model=o.get("orchestrator_model", ""),
+            coding_agent_model=o.get("coding_agent_model", ""),
+            orchestrator_summary=o.get("summary", ""),
         )
 
 
@@ -97,6 +115,10 @@ def build_report(
     result: PipelineResult,
     elapsed_seconds: float = 0.0,
     pr_url: str = "",
+    orchestrator_attempts: int = 0,
+    orchestrator_model: str = "",
+    coding_agent_model: str = "",
+    orchestrator_summary: str = "",
 ) -> TaskReport:
     """PipelineResult → TaskReport 변환."""
     test_count = 0
@@ -142,6 +164,10 @@ def build_report(
         reviewer_feedback=reviewer_feedback,
         pr_number=pr_number,
         branch=task.branch_name,
+        orchestrator_attempts=orchestrator_attempts,
+        orchestrator_model=orchestrator_model,
+        coding_agent_model=coding_agent_model,
+        orchestrator_summary=orchestrator_summary,
     )
 
 
