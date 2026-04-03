@@ -2,9 +2,9 @@
 orchestrator/run.py — 파이프라인 CLI 진입점
 
 사용법:
-    python -m orchestrator.run --tasks data/tasks.yaml --repo .
-    python -m orchestrator.run --tasks data/tasks.yaml --repo . --yes
-    python -m orchestrator.run --tasks data/tasks.yaml --repo . --id task-001
+    python -m orchestrator.run --tasks agent-data/tasks.yaml --repo .
+    python -m orchestrator.run --tasks agent-data/tasks.yaml --repo . --yes
+    python -m orchestrator.run --tasks agent-data/tasks.yaml --repo . --id task-001
 
 실행 흐름:
   1. tasks.yaml 로드 → depends_on 기반 실행 그룹 계산
@@ -292,7 +292,7 @@ def run_pipeline(
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    # reports_dir 기본값: 대상 레포 안의 data/reports
+    # reports_dir 기본값: 대상 레포 안의 agent-data/reports
     if reports_dir is None:
         reports_dir = repo_path / "agent-data" / "reports"
 
@@ -1450,7 +1450,7 @@ def _parse_args() -> argparse.Namespace:
                         help="DEBUG 로그 출력")
     parser.add_argument("--reports-dir", default="agent-data/reports",
                         metavar="DIR",
-                        help="Task Report 저장 디렉토리 (기본값: data/reports)")
+                        help="Task Report 저장 디렉토리 (기본값: agent-data/reports)")
     parser.add_argument("--provider", default="claude",
                         choices=["claude", "openai", "ollama"],
                         help="LLM 프로바이더 (기본값: claude)")

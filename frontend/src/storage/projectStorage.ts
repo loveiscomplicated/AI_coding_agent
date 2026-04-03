@@ -9,14 +9,14 @@ export interface Project {
   discordChannelId?: string // 프로젝트 전용 Discord 채널 ID (자동 생성)
 }
 
-/** rootDir/data/tasks.yaml */
+/** rootDir/agent-data/tasks.yaml */
 export function projectTasksPath(p: Pick<Project, 'rootDir'>): string {
-  return p.rootDir.replace(/\/+$/, '') + '/data/tasks.yaml'
+  return p.rootDir.replace(/\/+$/, '') + '/agent-data/tasks.yaml'
 }
 
-/** rootDir/data/reports */
+/** rootDir/agent-data/reports */
 export function projectReportsDir(p: Pick<Project, 'rootDir'>): string {
-  return p.rootDir.replace(/\/+$/, '') + '/data/reports'
+  return p.rootDir.replace(/\/+$/, '') + '/agent-data/reports'
 }
 
 export function loadProjects(): Project[] {

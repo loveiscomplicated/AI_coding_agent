@@ -4,7 +4,7 @@ orchestrator/weekly.py — Weekly Report 생성기
 ISO 주차 기준으로 해당 주의 Task Report들을 집계하여
 Sonnet이 마크다운 주간 보고서를 생성한다.
 
-저장 위치: data/reports/weekly/YYYY-WNN.md
+저장 위치: agent-data/reports/weekly/YYYY-WNN.md
 
 사용 예시:
     from orchestrator.weekly import generate_weekly_report

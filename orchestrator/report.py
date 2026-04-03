@@ -4,7 +4,7 @@ orchestrator/report.py — Task Report 저장/로드
 파이프라인 완료 후 실행 결과를 구조화된 YAML로 저장한다.
 이 데이터가 Weekly Report, execution_brief, 시스템 자기 개선 루프의 기반이 된다.
 
-저장 위치: data/reports/task-{id}.yaml
+저장 위치: agent-data/reports/task-{id}.yaml
 """
 
 from __future__ import annotations

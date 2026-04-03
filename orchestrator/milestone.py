@@ -4,7 +4,7 @@ orchestrator/milestone.py — 마일스톤 보고서 생성
 파이프라인 1회 실행(run.py) 완료 시 전체 실행 결과를 Sonnet이 요약한다.
 Task Report 데이터를 기반으로 마크다운 보고서를 생성한다.
 
-저장 위치: data/reports/milestones/YYYY-MM-DD-HHMMSS.md
+저장 위치: agent-data/reports/milestones/YYYY-MM-DD-HHMMSS.md
 
 사용 예시:
     from orchestrator.milestone import generate_milestone_report

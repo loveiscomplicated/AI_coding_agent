@@ -67,7 +67,7 @@ class SessionManager:
     세션 생명주기 전체를 담당합니다.
 
     Args:
-        db_path: SQLite 파일 경로. 기본값 data/sessions.db.
+        db_path: SQLite 파일 경로. 기본값 agent-data/sessions.db.
     """
 
     def __init__(self, db_path: Path = DEFAULT_DB_PATH):

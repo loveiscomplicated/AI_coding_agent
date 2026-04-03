@@ -167,7 +167,7 @@ def _load_orchestrator_context() -> str:
     포함 항목:
     - PROJECT_STRUCTURE.md (코드베이스 전체 구조 요약)
     - tasks.yaml 전체 내용
-    - data/context/*.md 파일들
+    - agent-data/context/*.md 파일들
 
     반환값은 LLM 프롬프트에 직접 삽입되는 문자열이다.
     특정 파일 내용이 필요하면 오케스트레이터가 read_file 도구를 호출한다.
@@ -199,7 +199,7 @@ def _load_orchestrator_context() -> str:
         except Exception as e:
             logger.warning("[hotline] tasks.yaml 로드 실패: %s", e)
 
-    # data/context/*.md
+    # agent-data/context/*.md
     if rp:
         ctx_dir = rp / "agent-data" / "context"
         if ctx_dir.is_dir():
@@ -378,7 +378,7 @@ def _build_hotline_tools(provider: str) -> list[dict]:
 
 def _append_decision(question: str, answer: str, method: str) -> None:
     """
-    data/context/decisions.md에 결정 사항을 기록한다.
+    agent-data/context/decisions.md에 결정 사항을 기록한다.
 
     Args:
         question: 에이전트가 물어본 원래 질문

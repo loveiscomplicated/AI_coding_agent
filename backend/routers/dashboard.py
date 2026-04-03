@@ -12,7 +12,7 @@ backend/routers/dashboard.py — 대시보드 데이터 API
 
 모든 엔드포인트는 ?reports_dir=&tasks_path= 쿼리 파라미터로
 프로젝트별 경로를 지정할 수 있다.
-기본값: reports_dir=data/reports, tasks_path=data/tasks.yaml
+기본값: reports_dir=agent-data/reports, tasks_path=agent-data/tasks.yaml
 """
 
 from __future__ import annotations

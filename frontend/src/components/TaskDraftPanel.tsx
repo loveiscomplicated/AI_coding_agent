@@ -270,7 +270,7 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
     setShowModelModal(false)
     dispatch({ type: 'SAVING' })
     try {
-      // 1. 컨텍스트 문서를 data/context/spec.md에 저장
+      // 1. 컨텍스트 문서를 agent-data/context/spec.md에 저장
       await fetch(`${API_BASE}/api/utils/save-context-doc`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
