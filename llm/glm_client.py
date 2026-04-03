@@ -68,12 +68,13 @@ def _to_openai_messages(messages: list[Message]) -> list[dict]:
                 for b in msg.content
                 if b.get("type") == "tool_use"
             ]
-            entry: dict = {
-                "role": "assistant",
-                "content": "\n".join(text_parts) or "",
-            }
+            text_content = "\n".join(text_parts) or None
+            entry: dict = {"role": "assistant"}
             if tool_calls:
+                # GLM은 tool_calls와 content 공존을 허용하지 않음 → content 생략
                 entry["tool_calls"] = tool_calls
+            else:
+                entry["content"] = text_content or ""
             result.append(entry)
 
         elif msg.role == "user":
@@ -150,12 +151,12 @@ class GlmClient(BaseLLMClient):
                 time.sleep(delay)
                 delay *= 2
             except APIStatusError as e:
-                # 1213: 프롬프트 내용 문제 — 재시도해도 동일하게 실패하므로 즉시 raise
+                # 1213/1214: 메시지 구조 문제 — 재시도해도 동일하게 실패하므로 즉시 raise
                 error_body = getattr(e, "body", {}) or {}
                 glm_code = str((error_body.get("error") or {}).get("code", ""))
-                if glm_code == "1213":
+                if glm_code in ("1213", "1214"):
                     raise
-                # 400 오류 중 일시적 서버 문제(code 1214 등)는 재시도
+                # 그 외 400 오류 중 일시적 서버 문제는 재시도
                 if e.status_code == 400 and attempt < _MAX_RETRIES:
                     logger.warning(
                         "GLM 400 오류 (시도 %d/%d) — %.0f초 후 재시도: %s",
