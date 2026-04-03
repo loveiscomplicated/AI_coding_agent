@@ -14,11 +14,79 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from llm import BaseLLMClient, LLMConfig, Message, create_client
 
 from orchestrator.task import Task
+
+
+# ── 실패 유형 분류 (LLM 미호출) ──────────────────────────────────────────────
+
+
+class FailureType(Enum):
+    ENV_ERROR = "env_error"
+    UNSUPPORTED_LANGUAGE = "unsupported_language"
+    DEPENDENCY_MISSING = "dependency_missing"
+    MAX_ITER_EXCEEDED = "max_iter_exceeded"
+    LOGIC_ERROR = "logic_error"
+
+
+def classify_failure(failure_reason: str, test_stdout: str = "") -> FailureType:
+    """LLM 호출 없이 문자열 패턴으로 실패 유형을 분류한다."""
+    combined = f"{failure_reason}\n{test_stdout}".lower()
+
+    if "[unsupported_language]" in combined:
+        return FailureType.UNSUPPORTED_LANGUAGE
+    if "[dependency_missing]" in combined:
+        return FailureType.DEPENDENCY_MISSING
+    if "internalerror" in combined:
+        return FailureType.ENV_ERROR
+    if any(p in combined for p in ["importerror", "modulenotfounderror", "no module named"]):
+        return FailureType.ENV_ERROR
+    if "[max_iter]" in combined:
+        return FailureType.MAX_ITER_EXCEEDED
+    return FailureType.LOGIC_ERROR
+
+
+def classify_and_analyze(
+    task: Task,
+    failure_reason: str,
+    attempt: int,
+    test_stdout: str = "",
+    previous_hints: list[str] | None = None,
+) -> AnalysisResult:
+    """
+    실패 유형을 먼저 분류하고, LOGIC_ERROR만 LLM analyze()로 넘긴다.
+
+    ENV_ERROR / UNSUPPORTED_LANGUAGE / DEPENDENCY_MISSING → 즉시 GIVE_UP
+    MAX_ITER_EXCEEDED → 첫 재시도는 RETRY(고정 힌트), 이후 GIVE_UP
+    LOGIC_ERROR → 기존 analyze() 호출
+    """
+    ft = classify_failure(failure_reason, test_stdout)
+    logger.info("[%s] 실패 유형 분류: %s (시도 %d)", task.id, ft.value, attempt)
+
+    if ft in (FailureType.ENV_ERROR, FailureType.UNSUPPORTED_LANGUAGE, FailureType.DEPENDENCY_MISSING):
+        reason = f"[{ft.value}] 재시도 불가 — {failure_reason[:200]}"
+        logger.warning("[%s] 즉시 GIVE_UP: %s", task.id, reason[:120])
+        return AnalysisResult(should_retry=False, hint=reason, raw=f"[fast-path] {ft.value}")
+
+    if ft == FailureType.MAX_ITER_EXCEEDED:
+        if attempt >= 2:  # 이미 1회 이상 재시도했으면 포기
+            reason = "MAX_ITER 2회 이상 반복 — 태스크 스펙 재검토 필요"
+            logger.warning("[%s] MAX_ITER GIVE_UP (시도 %d)", task.id, attempt)
+            return AnalysisResult(should_retry=False, hint=reason, raw="[fast-path] max_iter_exceeded")
+        hint = (
+            "이전 시도에서 파일을 생성하지 못했습니다. "
+            "반드시 write_file을 호출하여 코드를 작성하세요. "
+            "탐색을 최소화하고 즉시 구현을 시작하세요."
+        )
+        logger.info("[%s] MAX_ITER RETRY (고정 힌트, 시도 %d)", task.id, attempt)
+        return AnalysisResult(should_retry=True, hint=hint, raw="[fast-path] max_iter_retry")
+
+    # LOGIC_ERROR → 기존 LLM 분석
+    return analyze(task, failure_reason, attempt, previous_hints=previous_hints)
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +184,12 @@ def _extract_text(response) -> str:
     return ""
 
 
-def analyze(task: Task, failure_reason: str, attempt: int) -> AnalysisResult:
+def analyze(
+    task: Task,
+    failure_reason: str,
+    attempt: int,
+    previous_hints: list[str] | None = None,
+) -> AnalysisResult:
     """
     LLM에게 실패 원인을 분석시키고 RETRY/GIVE_UP 결정을 받는다.
 
@@ -124,12 +197,23 @@ def analyze(task: Task, failure_reason: str, attempt: int) -> AnalysisResult:
         task     : 실패한 태스크 (task.last_error 포함)
         failure_reason : PipelineResult.failure_reason
         attempt  : 오케스트레이터 재시도 횟수 (1-based)
+        previous_hints : 이전 시도에서 제공한 힌트 목록 (중복 방지용)
     """
     if _analyze_llm is None:
         logger.error("intervention.set_llm()이 호출되지 않았습니다.")
         return AnalysisResult(should_retry=False, hint="오케스트레이터 LLM 미초기화", raw="")
 
     last_error_snippet = (task.last_error or "")[:2000]
+
+    hints_section = ""
+    if previous_hints:
+        hints_list = "\n".join(f"  - 시도 {i+1}: {h[:300]}" for i, h in enumerate(previous_hints))
+        hints_section = (
+            f"\n## 이전 시도에서 제공한 힌트 (이미 적용했으나 실패)\n"
+            f"{hints_list}\n"
+            f"위 힌트들은 이미 적용했으나 실패했다. 같은 방향을 다시 제안하지 마라.\n"
+        )
+
     user_msg = f"""## 태스크
 id: {task.id}
 제목: {task.title}
@@ -143,7 +227,7 @@ id: {task.id}
 
 ## 마지막 오류 로그
 {last_error_snippet if last_error_snippet else "(없음)"}
-"""
+{hints_section}"""
     try:
         response = _analyze_llm.chat([Message(role="user", content=user_msg)])
         raw = _extract_text(response)
