@@ -162,6 +162,8 @@ env/
 # Runtime data
 data/sessions.db
 data/*.db
+data/reports/
+data/context/
 agent-data/sessions.db
 agent-data/*.db
 
