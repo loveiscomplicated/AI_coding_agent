@@ -200,6 +200,7 @@ class DiscordNotifier:
                         user_msgs = [
                             m for m in messages
                             if not m.get("author", {}).get("bot", False)
+                            and m.get("content", "").strip()  # 빈 메시지(첨부파일·스티커 전용) 제외
                         ]
                         user_msgs.sort(key=lambda m: int(m["id"]))
                         if user_msgs:

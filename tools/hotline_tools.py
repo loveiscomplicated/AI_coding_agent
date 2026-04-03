@@ -64,6 +64,18 @@ _POLL_CHUNK = 60  # 폴링 단위 (초)
 _CONFIRM_KEYWORDS = {"확정", "결정", "confirm", "done", "완료"}
 _SKIP_KEYWORDS   = {"알아서 해", "알아서해", "skip", "건너뛰기", "패스", "pass"}
 
+
+def _is_confirm(msg: str) -> bool:
+    """확정 키워드가 포함된 메시지인지 확인한다. 변형('확정!', '확정확정' 등)도 인식한다."""
+    lower = msg.strip().lower()
+    return any(kw in lower for kw in _CONFIRM_KEYWORDS)
+
+
+def _is_skip(msg: str) -> bool:
+    """건너뜀 키워드가 포함된 메시지인지 확인한다."""
+    lower = msg.strip().lower()
+    return any(kw in lower for kw in _SKIP_KEYWORDS)
+
 # 파이프라인 시작 시 run.py가 주입하는 DiscordNotifier (없으면 stdin 폴백)
 _notifier = None
 _notifier_lock = threading.Lock()
@@ -76,15 +88,36 @@ _repo_path_lock = threading.Lock()
 _tasks_path: Path | None = None
 _tasks_path_lock = threading.Lock()
 
+# 현재 활성 workspace context 디렉토리들 (pipeline.py가 주입) — decisions.md 동기화용
+# {task_id: workspace_context_dir} 형태
+_workspace_context_dirs: dict[str, Path] = {}
+_workspace_context_lock = threading.Lock()
+
+
+def register_workspace_context_dir(task_id: str, context_dir: str | Path) -> None:
+    """pipeline.py가 workspace 생성 후 호출. decisions.md 동기화 대상으로 등록한다."""
+    with _workspace_context_lock:
+        _workspace_context_dirs[task_id] = Path(context_dir)
+
+
+def unregister_workspace_context_dir(task_id: str) -> None:
+    """pipeline.py가 workspace 정리 후 호출."""
+    with _workspace_context_lock:
+        _workspace_context_dirs.pop(task_id, None)
+
 _CONVERSATION_SYSTEM = """\
 당신은 AI 코딩 에이전트 파이프라인의 중앙 오케스트레이터입니다.
 하위 에이전트가 구현 중 모호한 사항을 발견해 사용자에게 질문했습니다.
 
-사용자가 결정을 내릴 수 있도록 대화 파트너로 참여하세요.
-- 사용자의 생각을 명확히 하는 데 도움을 주세요.
-- 선택지의 트레이드오프를 설명하세요.
-- 결정이 섰다고 판단되면 "확정을 입력하면 에이전트에게 전달하겠습니다." 라고 안내하세요.
-- 짧고 핵심적으로 답하세요. 장황하게 설명하지 마세요.
+## 핵심 임무
+에이전트의 질문에 대한 답변을 사용자와 함께 확정하고, 에이전트에게 전달한다.
+
+## 행동 원칙
+1. **먼저 컨텍스트를 탐색하라**: tasks.yaml, PROJECT_STRUCTURE.md 에 이미 답이 있으면 먼저 요약해 제시하라. 사용자에게 물어보기 전에 알고 있는 정보를 공유하라.
+2. **사용자 답변을 즉시 수용하라**: 사용자가 명확히 답했으면 같은 질문을 다시 하지 마라. 그 답변을 바탕으로 정리하고 "확정을 입력해 주세요"로 안내하라.
+3. **반복 금지**: 동일한 선택지나 질문을 두 번 이상 반복하지 마라. 사용자가 이미 답한 내용은 기정사실로 취급하라.
+4. **짧고 직접적으로**: 불필요한 배경 설명 없이 핵심만 전달하라.
+5. **확정 안내**: 결정이 섰다고 판단되면 반드시 `확정을 입력해 주세요`라고 안내하라.
 """
 
 _SUMMARIZE_SYSTEM = """\
@@ -374,6 +407,22 @@ def _append_decision(question: str, answer: str, method: str) -> None:
         f.write(entry)
     logger.info("[decisions] 결정 사항 기록 완료: %s", decisions_path)
 
+    # 활성 workspace context 디렉토리에도 동기화 (stale 방지)
+    with _workspace_context_lock:
+        ws_dirs = list(_workspace_context_dirs.values())
+    for ws_ctx in ws_dirs:
+        try:
+            ws_ctx.mkdir(parents=True, exist_ok=True)
+            ws_decisions = ws_ctx / "decisions.md"
+            ws_needs_header = not ws_decisions.exists() or ws_decisions.stat().st_size == 0
+            with open(ws_decisions, "a", encoding="utf-8") as f:
+                if ws_needs_header:
+                    f.write("# 에이전트 결정 사항\n\n에이전트가 구현 중 내린 결정들을 자동으로 기록합니다.\n")
+                f.write(entry)
+            logger.debug("[decisions] workspace 동기화 완료: %s", ws_decisions)
+        except Exception as e:
+            logger.warning("[decisions] workspace 동기화 실패 (%s): %s", ws_ctx, e)
+
 
 def ask_user(question: str) -> str:
     """
@@ -429,7 +478,12 @@ def _ask_via_discord(notifier, question: str) -> str:
         # 사용자 메시지 올 때까지 무한 대기
         user_msg = _poll_forever(notifier, last_bot_message_id)
 
-        if user_msg.strip().lower() in _SKIP_KEYWORDS:
+        # 빈 메시지 방어 (notifier 필터링 후에도 혹시 남는 경우 대비)
+        if not user_msg.strip():
+            logger.debug("[ask_user] 빈 메시지 수신 — 무시하고 계속 대기")
+            continue
+
+        if _is_skip(user_msg):
             logger.info("[ask_user] skip 수신 — 에이전트 자율 판단으로 진행")
             try:
                 notifier.send("⏭ 입력 확인! 에이전트가 알아서 진행합니다.")
@@ -439,7 +493,7 @@ def _ask_via_discord(notifier, question: str) -> str:
             _append_decision(question, skip_answer, "에이전트 자율 판단")
             return skip_answer
 
-        if user_msg.strip().lower() in _CONFIRM_KEYWORDS:
+        if _is_confirm(user_msg):
             try:
                 notifier.send("✅ 확정 입력 확인! 대화 내용 정리 중이에요…")
             except Exception:
@@ -515,9 +569,14 @@ def _orchestrator_reply(question: str, conversation: list[dict]) -> str:
         return "(오케스트레이터 LLM 미초기화)"
 
     # ── 초기 user 메시지 구성 ────────────────────────────────────────────────
+    # 컨텍스트 초과 방지: 최근 6턴(3왕복)만 히스토리에 포함
+    _HISTORY_LIMIT = 6
+    trimmed = conversation[:-1]
+    if len(trimmed) > _HISTORY_LIMIT:
+        trimmed = trimmed[-_HISTORY_LIMIT:]
     history_lines = [
         f"{'사용자' if m['role'] == 'user' else '봇'}: {m['content']}"
-        for m in conversation[:-1]
+        for m in trimmed
     ]
     last_user_msg = conversation[-1]["content"] if conversation else ""
     project_ctx = _load_orchestrator_context()
@@ -627,12 +686,12 @@ def _ask_via_stdin(question: str) -> str:
         if not user_input:
             continue
 
-        if user_input.lower() in _SKIP_KEYWORDS:
+        if _is_skip(user_input):
             skip_answer = "사용자가 답변을 건너뛰었습니다. 컨텍스트 문서와 일반적인 관례를 바탕으로 최선의 판단으로 진행하세요."
             _append_decision(question, skip_answer, "에이전트 자율 판단")
             return skip_answer
 
-        if user_input.lower() in _CONFIRM_KEYWORDS:
+        if _is_confirm(user_input):
             answer = _synthesize_answer(question, conversation)
             _append_decision(question, answer, "사용자 확정")
             print(f"\n[에이전트에 전달할 답변]\n{answer}\n")
