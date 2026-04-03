@@ -114,6 +114,8 @@ class ReactLoop:
         on_iteration: Callable[[dict], None] | None = None,  # 매 ReAct 반복 완료 후 훅
         max_tool_result_chars: int = 4000,  # 도구 결과 최대 문자 수 (초과 시 잘림)
         history_window: int = 6,  # 보존할 최근 turn 쌍 수 (0=무제한)
+        write_deadline: int | None = None,  # 이 반복 수 내 write 도구 미호출 시 WRITE_LOOP 종료
+        stop_check: Callable[[], bool] | None = None,  # True 반환 시 LLM 호출 전 즉시 중단
     ):
         self.llm: BaseLLMClient = llm
         self.max_iterations = max_iterations
@@ -125,6 +127,8 @@ class ReactLoop:
         self.on_iteration = on_iteration
         self.max_tool_result_chars = max_tool_result_chars
         self.history_window = history_window
+        self.write_deadline = write_deadline
+        self.stop_check = stop_check
         self.TOOLS_SCHEMA = self.get_tools_schema()
 
     # ── 공개 인터페이스 ────────────────────────────────────────────────────────
@@ -156,6 +160,18 @@ class ReactLoop:
         _nudge_attempted = False  # 코드블록 감지 → 도구 사용 유도를 이미 시도했는지
 
         for i in range(self.max_iterations):
+            # ── 중단 체크: LLM 호출 전 ────────────────────────────────────────
+            if self.stop_check and self.stop_check():
+                logger.info("stop_check 트리거 — 루프 즉시 종료 (반복 %d)", i + 1)
+                return LoopResult(
+                    answer="[ABORTED] 사용자 즉시 중단 요청",
+                    stop_reason=StopReason.ABORTED,
+                    iterations=iterations,
+                    messages=messages,
+                    total_input_tokens=total_input_tokens,
+                    total_output_tokens=total_output_tokens,
+                )
+
             t0 = time.perf_counter()
             logger.debug("루프 반복 %d 시작", i + 1)
 
@@ -345,6 +361,29 @@ class ReactLoop:
             logger.debug(
                 "반복 %d 완료 — %.1fms, 도구 %d개", i + 1, elapsed, len(tool_calls)
             )
+
+            # write_deadline: N회 반복 후에도 쓰기 도구가 한 번도 호출되지 않으면 조기 종료
+            if (
+                self.write_deadline is not None
+                and not _write_tool_used
+                and (i + 1) >= self.write_deadline
+            ):
+                logger.warning(
+                    "write_deadline(%d회) 도달 — 쓰기 도구 미호출 (탐색 루프 감지), 조기 종료",
+                    self.write_deadline,
+                )
+                return LoopResult(
+                    answer=(
+                        f"{self.write_deadline}회 탐색했지만 write_file/edit_file을 "
+                        "호출하지 않았습니다. 테스트 파일이 태스크 스펙을 반영하지 않거나 "
+                        "구현 방향을 특정할 수 없는 상태입니다."
+                    ),
+                    stop_reason=StopReason.WRITE_LOOP,
+                    iterations=iterations,
+                    messages=messages,
+                    total_input_tokens=total_input_tokens,
+                    total_output_tokens=total_output_tokens,
+                )
 
             if hard_stop:
                 return LoopResult(

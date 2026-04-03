@@ -64,8 +64,9 @@ TEST_WRITER = RoleConfig(
     name="test_writer",
     system_prompt=_load_prompt("test_writer.md"),
     # 테스트 파일 생성만 허용 (edit_file/append 불필요)
-    # ask_user: 수락 기준이 불명확할 때 사용자에게 질문
-    allowed_tools=tuple(READ_TOOLS + ["write_file", "ask_user"]),
+    # ask_user 제거: 수락 기준이 없어도 태스크 설명에서 추론해야 함.
+    # 도구가 스키마에 있으면 LLM이 프롬프트 지시를 무시하고 호출하는 문제 방지.
+    allowed_tools=tuple(READ_TOOLS + ["write_file"]),
 )
 
 IMPLEMENTER = RoleConfig(

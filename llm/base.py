@@ -29,6 +29,8 @@ class StopReason(str, Enum):
     MAX_ITER = "max_iterations"  # 반복 한도 초과
     TOOL_ERROR = "tool_error"  # 도구 오류로 강제 종료
     LLM_ERROR = "llm_error"  # LLM 호출 실패
+    WRITE_LOOP = "write_loop"  # write_deadline 내 쓰기 도구 미호출 → 탐색 루프 감지
+    ABORTED = "aborted"  # 사용자 즉시 중단 요청
 
 
 @dataclass
