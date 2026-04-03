@@ -36,6 +36,8 @@ from tools.hotline_tools import (
     set_repo_path as _set_hotline_repo_path,
     set_tasks_path as _set_hotline_tasks_path,
     set_llm as _set_hotline_llm,
+    set_pause_controller as _set_hotline_pause_controller,
+    is_hotline_active as _is_hotline_active,
     create_hotline_llms,
 )
 from llm import LLMConfig, Message, BaseLLMClient, create_client
@@ -141,6 +143,9 @@ class PauseController:
     Discord 명령 리스너 스레드가 상태를 변경하고,
     파이프라인 루프가 각 태스크 완료 후 wait_if_paused()를 호출한다.
 
+    추가로, attach_notifier()로 Discord notifier를 연결하면 is_stopped 호출 시
+    메인 스레드에서 직접 Discord를 폴링하여 리스너 스레드 장애에도 "중단" 감지가 가능하다.
+
     명령어:
         멈춰 / pause  → 다음 태스크 전 일시정지
         계속 / resume → 일시정지 해제 후 재개
@@ -152,6 +157,7 @@ class PauseController:
     _STOP_KEYWORDS   = {"중단", "stop", "종료", "abort"}
 
     _PAUSE_RESUME_POLL = 30   # wait_if_paused 타임아웃 단위(초) — 루프로 재확인
+    _DISCORD_POLL_INTERVAL = 2  # 직접 Discord 폴링 최소 간격(초) — API 부하 제어
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -159,6 +165,69 @@ class PauseController:
         self._stopped = False
         self._resume_event = threading.Event()
         self._resume_event.set()  # 초기엔 정지 안 됨
+        # 직접 Discord 폴링용
+        self._notifier = None
+        self._discord_cursor: str | None = None
+        self._last_poll_time: float = 0.0
+
+    # ── Discord 직접 폴링 (리스너 스레드 백업) ────────────────────────────────
+
+    def attach_notifier(self, notifier, after_message_id: str | None = None) -> None:
+        """Discord notifier를 연결하여 is_stopped 호출 시 직접 폴링을 활성화한다."""
+        self._notifier = notifier
+        self._discord_cursor = after_message_id
+
+    def _poll_discord_for_stop(self) -> bool:
+        """
+        Discord REST API를 직접 호출하여 "중단" 메시지가 있는지 확인한다.
+        리스너 스레드와 독립적으로 메인 스레드에서 호출된다.
+        API 부하 방지를 위해 최소 _DISCORD_POLL_INTERVAL초 간격으로만 실제 요청한다.
+        """
+        if self._notifier is None:
+            return False
+
+        now = time.monotonic()
+        if now - self._last_poll_time < self._DISCORD_POLL_INTERVAL:
+            return False
+        self._last_poll_time = now
+
+        try:
+            import httpx
+            url = f"https://discord.com/api/v10/channels/{self._notifier.channel_id}/messages"
+            params: dict = {"limit": 10}
+            if self._discord_cursor:
+                params["after"] = self._discord_cursor
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.get(url, headers=self._notifier._headers, params=params)
+                if not resp.is_success:
+                    return False
+                messages = resp.json()
+                if not messages:
+                    return False
+                # 커서 전진 (모든 메시지, 봇 포함)
+                self._discord_cursor = str(max(int(m["id"]) for m in messages))
+                # 사용자 메시지만 추출
+                user_msgs = [
+                    m for m in messages
+                    if not m.get("author", {}).get("bot", False)
+                ]
+                for msg in user_msgs:
+                    content = msg.get("content", "").strip().lower()
+                    if any(kw in content for kw in self._STOP_KEYWORDS):
+                        logger.warning("[PauseController] Discord 직접 폴링으로 중단 감지: %r", content)
+                        with self._lock:
+                            self._stopped = True
+                            self._resume_event.set()
+                        # Discord에 확인 메시지 전송
+                        try:
+                            self._notifier.send("🛑 파이프라인 중단 요청 수신 (직접 폴링). 현재 태스크 완료 후 종료합니다.")
+                        except Exception:
+                            pass
+                        return True
+        except Exception as e:
+            # 폴링 실패는 무시 — 다음 호출에서 재시도
+            logger.warning("[PauseController] Discord 직접 폴링 오류 (무시): %s", e)
+        return False
 
     # ── 상태 변경 (리스너 스레드 호출) ────────────────────────────────────────
 
@@ -171,22 +240,22 @@ class PauseController:
         """
         lower = text.lower().strip()
         with self._lock:
-            if lower in self._PAUSE_KEYWORDS:
+            if any(kw in lower for kw in self._STOP_KEYWORDS):
+                self._stopped = True
+                self._resume_event.set()  # 대기 중인 wait_if_paused 해제
+                logger.info("PauseController: 중단 요청")
+                return "stopped"
+            if any(kw in lower for kw in self._PAUSE_KEYWORDS):
                 self._paused = True
                 self._resume_event.clear()
                 logger.info("PauseController: 일시정지 요청")
                 return "paused"
-            if lower in self._RESUME_KEYWORDS:
+            if any(kw in lower for kw in self._RESUME_KEYWORDS):
                 if self._paused:
                     self._paused = False
                     self._resume_event.set()
                     logger.info("PauseController: 재개 요청")
                     return "resumed"
-            if lower in self._STOP_KEYWORDS:
-                self._stopped = True
-                self._resume_event.set()  # 대기 중인 wait_if_paused 해제
-                logger.info("PauseController: 중단 요청")
-                return "stopped"
         return None
 
     # ── 파이프라인 루프에서 호출 ───────────────────────────────────────────────
@@ -194,7 +263,10 @@ class PauseController:
     @property
     def is_stopped(self) -> bool:
         with self._lock:
-            return self._stopped
+            if self._stopped:
+                return True
+        # 리스너 스레드 백업: 메인 스레드에서 직접 Discord 폴링
+        return self._poll_discord_for_stop()
 
     @property
     def is_paused(self) -> bool:
@@ -213,7 +285,7 @@ class PauseController:
         """
         while True:
             signaled = self._resume_event.wait(timeout=self._PAUSE_RESUME_POLL)
-            if signaled or self._stopped:
+            if signaled or self.is_stopped:
                 break
             # 타임아웃: 아직 일시정지 중이면 계속 대기, 재개됐으면 탈출
             if not self._paused:
@@ -339,6 +411,15 @@ def run_pipeline(
     if not pending:
         return {"success": 0, "fail": 0, "tasks": [t.to_dict() for t in all_tasks]}
 
+    # depends_on 정리 — 존재하지 않는 ID(삭제된 태스크) 참조 제거
+    for t in pending:
+        before = t.depends_on
+        t.depends_on = [d for d in before if d in all_task_ids]
+        removed = set(before) - set(t.depends_on)
+        for r in removed:
+            logger.warning("태스크 '%s'의 depends_on에서 없는 ID '%s' 자동 제거", t.id, r)
+            emit({"type": "warn", "message": f"태스크 '{t.id}'의 depends_on에서 삭제된 ID '{r}' 제거"})
+
     # 의존성 기반 실행 그룹 계산
     # all_valid_ids: 완료된 태스크 ID도 포함해야 depends_on 검증을 통과할 수 있다
     groups = resolve_execution_groups(pending, all_valid_ids=all_task_ids)
@@ -383,10 +464,13 @@ def run_pipeline(
 
     # ── 일시정지 컨트롤러 + Discord 명령 리스너 스레드 ──────────────────────────
     pause_ctrl = pause_controller if pause_controller is not None else PauseController()
+    _set_hotline_pause_controller(pause_ctrl)
     _listener_stop = threading.Event()
 
     def _on_discord_command(text: str) -> None:
+        logger.info("[discord_cmd] 일반 콜백 수신: %r", text[:100])
         result_cmd = pause_ctrl.handle_command(text)
+        logger.info("[discord_cmd] handle_command 결과: %s", result_cmd)
         if result_cmd == "paused":
             _notify(notifier, "⏸ 파이프라인 일시정지 예약됨. 현재 태스크 완료 후 대기합니다.\n재개하려면 '계속', 완전 중단은 '중단'을 입력하세요.")
             emit({"type": "step", "step": "paused",
@@ -399,20 +483,71 @@ def run_pipeline(
             emit({"type": "step", "step": "stopped",
                   "message": "중단 요청 — 현재 태스크 완료 후 종료"})
 
+    def _on_urgent_command(text: str) -> bool:
+        """핫라인 대화 중에도 중단 명령은 즉시 처리한다. 처리했으면 True 반환.
+        일시정지/재개는 핫라인 대화 맥락에서 오탐 가능성이 높아 여기서는 처리하지 않는다."""
+        lower = text.strip().lower()
+        if not any(kw in lower for kw in PauseController._STOP_KEYWORDS):
+            return False
+        logger.info("[urgent] 중단 키워드 감지: %r → handle_command 호출", text)
+        result_cmd = pause_ctrl.handle_command(text)
+        logger.info("[urgent] handle_command 결과: %s", result_cmd)
+        if result_cmd == "stopped":
+            _notify(notifier, "🛑 파이프라인 중단 요청 수신. 현재 태스크 완료 후 종료합니다.")
+            emit({"type": "step", "step": "stopped",
+                  "message": "중단 요청 — 현재 태스크 완료 후 종료"})
+            return True
+        return False
+
     if notifier:
         # 파이프라인 시작 전 최신 메시지 ID를 기준점으로 사용
         _baseline_id = notifier.get_latest_message_id()
+        # 메인 스레드 직접 폴링 (리스너 스레드 백업) — is_stopped 호출 시 자동 폴링
+        pause_ctrl.attach_notifier(notifier, after_message_id=_baseline_id)
+        logger.info("[PauseController] Discord 직접 폴링 활성화 (channel=%s, baseline=%s)", notifier.channel_id, _baseline_id)
         _listener_thread = threading.Thread(
             target=notifier.listen_for_commands,
             kwargs={
                 "callback": _on_discord_command,
                 "after_message_id": _baseline_id,
                 "stop_event": _listener_stop,
+                "skip_check": _is_hotline_active,
+                "urgent_callback": _on_urgent_command,
             },
             daemon=True,
             name="discord-command-listener",
         )
         _listener_thread.start()
+        logger.info("[listener] Discord 명령 리스너 스레드 시작 (baseline_id=%s)", _baseline_id)
+    else:
+        _listener_thread = None
+
+    def _check_listener_alive() -> None:
+        """리스너 스레드가 죽었으면 경고 로그를 남기고 재시작을 시도한다."""
+        nonlocal _listener_thread
+        if _listener_thread is None or not notifier:
+            return
+        if not _listener_thread.is_alive():
+            logger.error("⚠️ Discord 명령 리스너 스레드가 죽었습니다! 재시작 시도…")
+            _notify(notifier, "⚠️ 내부 오류: Discord 명령 리스너가 중단되었습니다. 재시작합니다.\n'중단' 명령이 작동하지 않았을 수 있습니다.")
+            try:
+                new_baseline = notifier.get_latest_message_id()
+                _listener_thread = threading.Thread(
+                    target=notifier.listen_for_commands,
+                    kwargs={
+                        "callback": _on_discord_command,
+                        "after_message_id": new_baseline,
+                        "stop_event": _listener_stop,
+                        "skip_check": _is_hotline_active,
+                        "urgent_callback": _on_urgent_command,
+                    },
+                    daemon=True,
+                    name="discord-command-listener-respawn",
+                )
+                _listener_thread.start()
+                logger.info("Discord 명령 리스너 스레드 재시작 성공 (baseline_id=%s)", new_baseline)
+            except Exception as e:
+                logger.error("Discord 명령 리스너 스레드 재시작 실패: %s", e, exc_info=True)
 
     success_count = 0
     fail_count = 0
@@ -430,7 +565,17 @@ def run_pipeline(
         hints_tried: list[str] = []
 
         for orch_attempt in range(max_orchestrator_retries + 1):
+            # 리스너 스레드 생존 확인 + 중단 여부 확인
+            _check_listener_alive()
+            if pause_ctrl.is_stopped:
+                logger.info("[%s] 중단 요청 — 오케스트레이터 루프 종료", task.id)
+                return
             with WorkspaceManager(task, repo_path, keep_on_failure=True) as ws:
+                # 선행 태스크 산출물 주입 (depends_on 연결된 완료 태스크)
+                if task.depends_on:
+                    dep_tasks = [t for t in all_tasks if t.id in task.depends_on]
+                    ws.inject_dependency_context(dep_tasks)
+
                 if orch_attempt > 0:
                     emit({"type": "step", "task_id": task.id, "step": "orch_retry",
                           "message": f"오케스트레이터 재시도 {orch_attempt}/{max_orchestrator_retries}…"})
@@ -510,6 +655,10 @@ def run_pipeline(
                 is_last_attempt = (orch_attempt >= max_orchestrator_retries)
 
                 if not is_last_attempt:
+                    # ── 오케스트레이터 개입 전 중단 체크 ─────────────────────
+                    if pause_ctrl.is_stopped:
+                        logger.info("[%s] 중단 요청 — 오케스트레이터 분석 생략", task.id)
+                        return
                     # ── 오케스트레이터 개입: 분석 후 재시도 결정 ─────────────
                     reason_snippet = failure_reason.replace("[MAX_ITER] ", "")[:200]
                     logger.warning(
@@ -526,6 +675,11 @@ def run_pipeline(
                           "failure_reason": failure_reason, "is_max_iter": is_max_iter})
 
                     analysis = orch_analyze(task, failure_reason, orch_attempt + 1)
+
+                    # orch_analyze 완료 후 중단 체크 (분석 중 중단 명령 수신 가능)
+                    if pause_ctrl.is_stopped:
+                        logger.info("[%s] 중단 요청 — 오케스트레이터 재시도 취소", task.id)
+                        return
 
                     if analysis.should_retry:
                         hints_tried.append(analysis.hint)
@@ -647,6 +801,9 @@ def run_pipeline(
 
     try:
         for group in groups:
+            # ── 리스너 스레드 생존 확인 ────────────────────────────────────────
+            _check_listener_alive()
+
             # ── 그룹 시작 전 일시정지/중단 체크 ─────────────────────────────────
             if pause_ctrl.is_paused:
                 first_id = group[0].id if group else "?"
@@ -758,9 +915,11 @@ def run_pipeline(
         _notify(notifier, "\n".join(lines))
     else:
         emit({"type": "pipeline_done", "success": success_count, "fail": fail_count})
+        # 파이프라인 메트릭 집계
+        metrics_summary = _build_pipeline_metrics_summary(all_tasks, reports_dir)
         _notify(
             notifier,
-            f"🏁 파이프라인 완료 — 성공: {success_count}  실패: {fail_count}",
+            f"🏁 파이프라인 완료 — 성공: {success_count}  실패: {fail_count}\n{metrics_summary}",
         )
 
     return {
@@ -809,6 +968,11 @@ def _run_single_task(
     emit({"type": "task_start", "task_id": task.id, "title": task.title})
 
     with WorkspaceManager(task, repo_path, keep_on_failure=True) as ws:
+        # 선행 태스크 산출물 주입
+        if task.depends_on:
+            dep_tasks = [t for t in all_tasks if t.id in task.depends_on]
+            ws.inject_dependency_context(dep_tasks)
+
         print(_info(f"[{task.id}] TestWriter → Implementer → Docker → Reviewer ..."))
 
         def _progress(event: dict, _tid=task.id) -> None:
@@ -1128,6 +1292,49 @@ def _notify(notifier: DiscordNotifier | None, content: str) -> str | None:
         return None
 
 
+def _build_pipeline_metrics_summary(
+    all_tasks: list[Task],
+    reports_dir: Path,
+) -> str:
+    """완료된 태스크의 리포트에서 핵심 메트릭을 집계해 Discord 요약 문자열을 반환한다."""
+    reports = load_reports(reports_dir=reports_dir)
+    if not reports:
+        return ""
+
+    # 이번 파이프라인 태스크 ID만 필터
+    task_ids = {t.id for t in all_tasks}
+    reports = [r for r in reports if r.task_id in task_ids]
+    if not reports:
+        return ""
+
+    total = len(reports)
+    first_try_pass = sum(1 for r in reports if r.test_red_to_green_first_try)
+    quality_gate_hits = sum(1 for r in reports if r.quality_gate_rejections > 0)
+    dep_injected = sum(1 for r in reports if r.dep_files_injected > 0)
+    avg_impl_retries = (
+        sum(r.impl_retries for r in reports) / total if total else 0
+    )
+
+    # 실패 단계 분포
+    failed_reports = [r for r in reports if r.status == "FAILED" and r.failed_stage]
+    stage_counts: dict[str, int] = {}
+    for r in failed_reports:
+        stage_counts[r.failed_stage] = stage_counts.get(r.failed_stage, 0) + 1
+
+    lines = [
+        "\n**📊 파이프라인 메트릭**",
+        f"- 첫 시도 통과율 (Red→Green): {first_try_pass}/{total} ({first_try_pass*100//total if total else 0}%)",
+        f"- 평균 구현 재시도: {avg_impl_retries:.1f}회",
+        f"- 품질 게이트 reject: {quality_gate_hits}건",
+        f"- 의존성 주입 활용: {dep_injected}건",
+    ]
+    if stage_counts:
+        stage_str = ", ".join(f"{k}: {v}" for k, v in sorted(stage_counts.items()))
+        lines.append(f"- 실패 단계 분포: {stage_str}")
+
+    return "\n".join(lines)
+
+
 def _notify_failure(
     notifier: DiscordNotifier | None,
     task: Task,
@@ -1204,7 +1411,7 @@ def _ask_continue(
             _notify(notifier, "🛑 파이프라인을 종료합니다.")
             return False
 
-        reply = notifier.wait_for_reply(
+        reply, message_id = notifier.wait_for_reply(
             after_message_id=message_id,
             timeout=_POLL_CHUNK,
             stop_check=_stop_check,
