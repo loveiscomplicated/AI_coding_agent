@@ -46,6 +46,7 @@ from orchestrator.merge_agent import MergeAgent
 from orchestrator.milestone import generate_milestone_report
 from orchestrator.intervention import (
     analyze as orch_analyze,
+    classify_and_analyze as orch_classify_and_analyze,
     generate_report as orch_report,
     save_report as orch_save_report,
     set_llm as _set_intervention_llm,
@@ -583,7 +584,8 @@ def run_pipeline(
                 def _progress(event: dict, _tid=task.id) -> None:
                     emit({**event, "task_id": _tid})
 
-                result = pipeline.run(task, ws, on_progress=_progress, pause_ctrl=pause_ctrl)
+                result = pipeline.run(task, ws, on_progress=_progress, pause_ctrl=pause_ctrl,
+                                     all_tasks=all_tasks, repo_path=repo_path)
                 elapsed = time.monotonic() - start_time
 
                 # ── 성공 ────────────────────────────────────────────────────────
@@ -674,7 +676,12 @@ def run_pipeline(
                           "max_attempts": max_orchestrator_retries + 1,
                           "failure_reason": failure_reason, "is_max_iter": is_max_iter})
 
-                    analysis = orch_analyze(task, failure_reason, orch_attempt + 1)
+                    test_stdout = result.test_result.stdout if result.test_result else ""
+                    analysis = orch_classify_and_analyze(
+                        task, failure_reason, orch_attempt + 1,
+                        test_stdout=test_stdout,
+                        previous_hints=hints_tried,
+                    )
 
                     # orch_analyze 완료 후 중단 체크 (분석 중 중단 명령 수신 가능)
                     if pause_ctrl.is_stopped:
@@ -978,7 +985,8 @@ def _run_single_task(
         def _progress(event: dict, _tid=task.id) -> None:
             emit({**event, "task_id": _tid})
 
-        result = pipeline.run(task, ws, on_progress=_progress)
+        result = pipeline.run(task, ws, on_progress=_progress,
+                             all_tasks=all_tasks, repo_path=repo_path)
         elapsed = time.monotonic() - start_time
 
         pr_url = ""

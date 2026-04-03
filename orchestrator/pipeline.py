@@ -27,7 +27,9 @@ TDDPipeline 은 단일 Task 를 받아 다음 순서로 실행한다:
 from __future__ import annotations
 
 import ast
+import glob
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -148,6 +150,8 @@ class TDDPipeline:
         workspace: WorkspaceManager,
         on_progress=None,
         pause_ctrl=None,
+        all_tasks: list[Task] | None = None,
+        repo_path: str | None = None,
     ) -> PipelineResult:
         """
         태스크 전체 파이프라인을 실행한다.
@@ -159,6 +163,10 @@ class TDDPipeline:
         pause_ctrl : PauseController | None
             중단 요청 감지용. is_stopped 가 True 이면 다음 LLM 응답 직후에
             _StopRequested 를 raise 해 파이프라인을 즉시 종료한다.
+        all_tasks : list[Task] | None
+            전체 태스크 목록 (선행 태스크 산출물 존재 확인용). None이면 pre-check 건너뜀.
+        repo_path : str | None
+            대상 레포 루트 경로 (선행 태스크 파일 존재 확인용). None이면 pre-check 건너뜀.
         """
         _p = on_progress or (lambda e: None)
 
@@ -171,22 +179,73 @@ class TDDPipeline:
 
         logger.info("[%s] 파이프라인 시작", task.id)
 
+        # ── 선행 태스크 산출물 존재 확인 (pre-check) ──────────────────────────
+        if all_tasks and repo_path and task.depends_on:
+            missing = self._check_dependency_files(task, all_tasks, repo_path)
+            if missing:
+                failure_msg = (
+                    f"[DEPENDENCY_MISSING] 선행 태스크의 산출물이 존재하지 않습니다:\n"
+                    + "\n".join(f"  - {m}" for m in missing)
+                    + "\n선행 태스크가 성공적으로 완료되고 머지되었는지 확인하세요."
+                )
+                logger.warning("[%s] %s", task.id, failure_msg)
+                _p({"type": "step", "step": "dependency_check_failed",
+                    "message": failure_msg})
+                return PipelineResult.failed(task, failure_msg)
+
+        # 선행 태스크 산출물 정보를 description에 추가 (원본 미수정)
+        enriched_desc = self._enrich_description(task, all_tasks)
+
         # hotline decisions.md가 ask_user 확정 후 workspace에도 동기화되도록 등록
         register_workspace_context_dir(task.id, workspace.tests_dir.parent / "context")
         try:
-            return self._run_pipeline(task, workspace, _p, _agent_p, pause_ctrl=pause_ctrl)
+            return self._run_pipeline(task, workspace, _p, _agent_p, pause_ctrl=pause_ctrl,
+                                      enriched_desc=enriched_desc)
         finally:
             unregister_workspace_context_dir(task.id)
 
-    def _run_pipeline(self, task, workspace, _p, _agent_p, pause_ctrl=None) -> "PipelineResult":
+    @staticmethod
+    def _enrich_description(task: Task, all_tasks: list[Task] | None) -> str:
+        """선행 태스크의 target_files 정보를 description에 추가한다. 원본은 수정하지 않음."""
+        if not all_tasks or not task.depends_on:
+            return task.description
+        dep_lines = []
+        for dep_id in task.depends_on:
+            dep = next((t for t in all_tasks if t.id == dep_id), None)
+            if dep and dep.target_files:
+                files = ", ".join(dep.target_files)
+                dep_lines.append(f"- {dep_id} ({dep.title}): {files}")
+        if not dep_lines:
+            return task.description
+        return (
+            task.description
+            + "\n\n## 선행 태스크 산출물 (workspace에 이미 존재하는 파일)\n"
+            + "\n".join(dep_lines)
+        )
+
+    def _check_dependency_files(self, task: Task, all_tasks: list[Task], base_path: str) -> list[str]:
+        """선행 태스크의 target_files가 존재하는지 확인. 없는 파일 경로 리스트 반환."""
+        missing = []
+        for dep_id in (task.depends_on or []):
+            dep_task = next((t for t in all_tasks if t.id == dep_id), None)
+            if dep_task is None:
+                continue
+            for filepath in (dep_task.target_files or []):
+                full_path = os.path.join(base_path, filepath)
+                if not os.path.exists(full_path):
+                    missing.append(f"{dep_id}:{filepath}")
+        return missing
+
+    def _run_pipeline(self, task, workspace, _p, _agent_p, pause_ctrl=None, enriched_desc=None) -> "PipelineResult":
         """run()의 실제 파이프라인 로직. workspace 등록/해제는 run()이 담당한다."""
         try:
-            return self.__run_pipeline_inner(task, workspace, _p, _agent_p, pause_ctrl=pause_ctrl)
+            return self.__run_pipeline_inner(task, workspace, _p, _agent_p, pause_ctrl=pause_ctrl,
+                                             enriched_desc=enriched_desc)
         except _StopRequested:
             logger.info("[%s] 즉시 중단 요청 — 파이프라인 종료", task.id)
             return PipelineResult.failed(task, "[ABORTED] 사용자 즉시 중단 요청")
 
-    def __run_pipeline_inner(self, task, workspace, _p, _agent_p, pause_ctrl=None) -> "PipelineResult":
+    def __run_pipeline_inner(self, task, workspace, _p, _agent_p, pause_ctrl=None, enriched_desc=None) -> "PipelineResult":
         """_run_pipeline() 의 실제 구현. _StopRequested 는 _run_pipeline() 이 잡는다."""
         metrics = PipelineMetrics()
 
@@ -201,9 +260,13 @@ class TDDPipeline:
             )
 
         # ── Step 1: 테스트 작성 ───────────────────────────────────────────────
+        # TestWriter 실행 전 기존 테스트 파일 스냅샷 (새로 생성된 파일만 DockerTestRunner에 전달하기 위함)
+        _ws_path = str(workspace.path)
+        _test_files_before = set(glob.glob(os.path.join(_ws_path, "**", "test_*.py"), recursive=True))
+
         task.status = TaskStatus.WRITING_TESTS
         _p({"type": "step", "step": "test_writing", "message": "TestWriter: 테스트 작성 중…"})
-        test_scoped = self._run_test_writer(task, workspace, on_progress=_agent_p, pause_ctrl=pause_ctrl)
+        test_scoped = self._run_test_writer(task, workspace, on_progress=_agent_p, pause_ctrl=pause_ctrl, enriched_desc=enriched_desc)
         if not test_scoped.succeeded:
             prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
             metrics.failed_stage = "test_writing"
@@ -214,7 +277,7 @@ class TDDPipeline:
             # 모델이 write_file을 호출하지 않고 종료한 경우 — 즉시 1회 재시도
             logger.warning("[%s] TestWriter 파일 미생성 — 재시도", task.id)
             _p({"type": "step", "step": "test_writing_retry", "message": "TestWriter: 파일 미생성 — 재시도 중…"})
-            test_scoped = self._run_test_writer(task, workspace, retry=True, on_progress=_agent_p, pause_ctrl=pause_ctrl)
+            test_scoped = self._run_test_writer(task, workspace, retry=True, on_progress=_agent_p, pause_ctrl=pause_ctrl, enriched_desc=enriched_desc)
             if not test_scoped.succeeded:
                 prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
                 metrics.failed_stage = "test_writing"
@@ -248,6 +311,7 @@ class TDDPipeline:
                 missing_criteria=missing_criteria,
                 on_progress=_agent_p,
                 pause_ctrl=pause_ctrl,
+                enriched_desc=enriched_desc,
             )
             if not test_scoped.succeeded:
                 prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
@@ -262,6 +326,15 @@ class TDDPipeline:
             _p({"type": "step", "step": "quality_gate_ok",
                 "message": f"품질 게이트 통과 — {', '.join(test_files)}"})
             logger.info("[%s] 품질 게이트 통과 후 테스트 파일: %s", task.id, test_files)
+
+        # TestWriter가 새로 생성한 테스트 파일만 DockerTestRunner에 전달
+        _test_files_after = set(glob.glob(os.path.join(_ws_path, "**", "test_*.py"), recursive=True))
+        _new_test_files = sorted(_test_files_after - _test_files_before)
+        if _new_test_files:
+            _new_test_relative = [os.path.relpath(f, _ws_path) for f in _new_test_files]
+            logger.info("[%s] TestWriter 신규 테스트 파일: %s", task.id, _new_test_relative)
+        else:
+            _new_test_relative = None  # 전체 실행 (기존 동작)
 
         # ── 단계 사이 중단 체크 ───────────────────────────────────────────────
         if pause_ctrl is not None and pause_ctrl.is_stopped:
@@ -295,6 +368,7 @@ class TDDPipeline:
                 impl_scoped = self._run_implementer(
                     task, workspace, reviewer_feedback=reviewer_feedback,
                     on_progress=_agent_p, pause_ctrl=pause_ctrl,
+                    enriched_desc=enriched_desc,
                 )
                 if not impl_scoped.succeeded:
                     if _is_write_loop(impl_scoped) and attempt < self.max_retries - 1:
@@ -317,7 +391,10 @@ class TDDPipeline:
 
                 task.status = TaskStatus.RUNNING_TESTS
                 _p({"type": "step", "step": "docker_running", "message": "Docker 테스트 실행 중…"})
-                docker_result = self.test_runner.run(workspace.path, task.target_files, task.test_framework)
+                docker_result = self.test_runner.run(
+                    workspace.path, task.target_files, task.test_framework,
+                    language=task.language, test_files=_new_test_relative,
+                )
                 logger.info(
                     "[%s] 테스트 실행 (시도 %d/%d): %s",
                     task.id, attempt + 1, self.max_retries, docker_result.summary,
@@ -409,6 +486,7 @@ class TDDPipeline:
         missing_criteria: list[str] | None = None,
         on_progress=None,
         pause_ctrl=None,
+        enriched_desc: str | None = None,
     ) -> ScopedResult:
         stop_check = (lambda: pause_ctrl.is_stopped) if pause_ctrl else None
         loop = ScopedReactLoop(
@@ -424,6 +502,7 @@ class TDDPipeline:
             retry=retry,
             static_issues=static_issues,
             missing_criteria=missing_criteria,
+            description_override=enriched_desc,
         )
         logger.debug(
             "[%s] TestWriter 시작 (retry=%s, static_issues=%d, missing=%d)",
@@ -440,6 +519,7 @@ class TDDPipeline:
         reviewer_feedback: str = "",
         on_progress=None,
         pause_ctrl=None,
+        enriched_desc: str | None = None,
     ) -> ScopedResult:
         stop_check = (lambda: pause_ctrl.is_stopped) if pause_ctrl else None
         loop = ScopedReactLoop(
@@ -451,7 +531,8 @@ class TDDPipeline:
             write_deadline=self.implementer_write_deadline,
             stop_check=stop_check,
         )
-        prompt = _build_implementer_prompt(task, workspace, reviewer_feedback=reviewer_feedback)
+        prompt = _build_implementer_prompt(task, workspace, reviewer_feedback=reviewer_feedback,
+                                           description_override=enriched_desc)
         logger.debug(
             "[%s] Implementer 시작 (retry=%d, reviewer_feedback=%s)",
             task.id, task.retry_count, bool(reviewer_feedback),
@@ -596,6 +677,7 @@ def _build_test_writer_prompt(
     retry: bool = False,
     static_issues: list[str] | None = None,
     missing_criteria: list[str] | None = None,
+    description_override: str | None = None,
 ) -> str:
     structure_hint = ""
     if (workspace.path / "PROJECT_STRUCTURE.md").exists():
@@ -639,11 +721,13 @@ def _build_test_writer_prompt(
             "ask_user를 호출하지 마세요.)"
         )
 
+    desc = description_override if description_override is not None else task.description
+
     return f"""## 태스크
 
 **{task.title}**
 
-{task.description}
+{desc}
 
 ## 수락 기준
 
@@ -664,16 +748,19 @@ def _build_implementer_prompt(
     task: Task,
     workspace: WorkspaceManager,
     reviewer_feedback: str = "",
+    description_override: str | None = None,
 ) -> str:
     structure_hint = ""
     if (workspace.path / "PROJECT_STRUCTURE.md").exists():
         structure_hint = "\n`PROJECT_STRUCTURE.md` 로 전체 코드베이스 구조를 먼저 파악하고, 재사용 가능한 모듈이 있는지 확인하세요.\n"
 
+    desc = description_override if description_override is not None else task.description
+
     base = f"""## 태스크
 
 **{task.title}**
 
-{task.description}
+{desc}
 
 ## 수락 기준
 
