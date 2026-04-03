@@ -59,9 +59,25 @@ _DRAFT_SYSTEM_PROMPT = """\
   task-002: MapService 인터페이스 (MapService.kt, RouteStep.kt) — depends_on: [task-001]
   task-003: 테스트 스텁 구현 (FakeMapService.kt, MapServiceTest.kt) — depends_on: [task-002]
 
+[language 필드 (필수)]
+각 태스크에 `language` 필드를 반드시 포함한다.
+- context_doc에서 프로젝트의 주요 프로그래밍 언어를 파악한다.
+- 값: "python", "kotlin", "javascript", "go" 등 소문자
+- 현재 TDD 파이프라인은 Python(pytest)만 지원한다.
+  Python이 아닌 언어의 태스크는 task_type을 "frontend"로 설정하여 파이프라인에서 제외한다.
+
+[수락 기준 자체 검증]
+생성한 각 태스크의 acceptance_criteria를 검증한다:
+- 수락 기준 간 모순이 없는지 확인한다.
+  예: "파라미터 없는 메서드" vs "파라미터로 간격 설정 지원"은 모순이다.
+- 모순 발견 시 하나를 선택하고 나머지는 별도 태스크로 분리한다.
+
+[외부 의존성 제한]
+하나의 태스크가 import해야 하는 '아직 존재하지 않는 모듈'이 2개를 초과하면 분할한다.
+
 [출력 형식]
 다음 JSON만 출력하세요. 마크다운 코드블록, 설명 텍스트 없이 순수 JSON만:
-{"tasks": [{"id": "task-001", "title": "...", "description": "...", "acceptance_criteria": ["..."], "target_files": ["..."], "depends_on": [], "task_type": "backend"}]}
+{"tasks": [{"id": "task-001", "title": "...", "description": "...", "acceptance_criteria": ["..."], "target_files": ["..."], "depends_on": [], "task_type": "backend", "language": "python"}]}
 """
 
 router = APIRouter()

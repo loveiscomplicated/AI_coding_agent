@@ -55,6 +55,7 @@ class Task:
     # ── 선택 필드 ─────────────────────────────────────────────────────────────
     depends_on: list[str] = field(default_factory=list)  # 선행 태스크 ID 목록
     task_type: str = "backend"  # "backend" | "frontend" — frontend는 멀티 에이전트 파이프라인 제외
+    language: str = "python"    # 태스크 구현 언어 (DockerTestRunner 실행 환경 결정)
 
     # ── 런타임 상태 (YAML 저장/복원 가능) ────────────────────────────────────
     status: TaskStatus = TaskStatus.PENDING
@@ -92,6 +93,7 @@ class Task:
             "test_framework": self.test_framework,
             "depends_on": self.depends_on,
             "task_type": self.task_type,
+            "language": self.language,
             "status": self.status.value,
             "retry_count": self.retry_count,
             "last_error": self.last_error,
@@ -110,6 +112,7 @@ class Task:
             test_framework=data.get("test_framework", "pytest"),
             depends_on=data.get("depends_on", []),
             task_type=data.get("task_type", "backend"),
+            language=data.get("language", "python"),
             status=TaskStatus(data.get("status", TaskStatus.PENDING.value)),
             retry_count=data.get("retry_count", 0),
             last_error=data.get("last_error", ""),
