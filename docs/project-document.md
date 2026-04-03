@@ -1,6 +1,6 @@
 # Multi-Agent Development System
 
-> 프로젝트 문서 v1.6 | 2026-04-01 — Phase 3 운영 안정화 완료 + 모델 무관 설계 반영
+> 프로젝트 문서 v1.7 | 2026-04-03 — Discord 핫라인 안정화 + 방어적 폴링 + data/ → agent-data/ 마이그레이션
 
 ---
 
@@ -83,7 +83,7 @@ AI 에이전트 팀을 활용한 소프트웨어 개발 파이프라인 구축. 
 ### 2.5.1 전체 데이터 흐름
 
 ```
-data/tasks.yaml (수동 정의 또는 Sonnet 자동 생성 후 승인)
+agent-data/tasks.yaml (수동 정의 또는 Sonnet 자동 생성 후 승인)
     │
     ▼ orchestrator/run.py (또는 백엔드 API)
 [Task 목록] ──► 의존성 그룹 계산 ──► 진행
@@ -132,10 +132,10 @@ AI_coding_agent/
 │       ├── implementer.md
 │       └── reviewer.md
 ├── core/
-│   └── loop.py                # ReactLoop (ReAct 루프 엔진, 모델 무관)
+│   └── loop.py                # ReactLoop (ReAct 루프 엔진, 모델 무관, stop_check/write_deadline 지원)
 ├── llm/
 │   ├── __init__.py            # create_client() 팩토리, 프로바이더 등록
-│   ├── base.py                # BaseLLMClient, LLMConfig, LLMResponse, Message
+│   ├── base.py                # BaseLLMClient, LLMConfig, LLMResponse, Message, StopReason (ABORTED 포함)
 │   ├── claude_client.py       # Anthropic API 클라이언트
 │   ├── openai_client.py       # OpenAI Chat Completions 클라이언트
 │   ├── glm_client.py          # GLM/Zai API 클라이언트 (OpenAI 호환)
@@ -143,6 +143,7 @@ AI_coding_agent/
 ├── orchestrator/
 │   ├── task.py                # Task 데이터 모델 + TaskStatus enum + YAML 로드/저장
 │   ├── pipeline.py            # TDDPipeline 상태 머신
+│   ├── task_redesign.py       # 태스크 재설계 유틸리티 (실험적)
 │   ├── workspace.py           # WorkspaceManager (tmp 생성/정리)
 │   ├── git_workflow.py        # GitWorkflow (git worktree 기반)
 │   ├── merge_agent.py         # MergeAgent (LLM 기반 머지 충돌 자동 해결)
@@ -151,7 +152,7 @@ AI_coding_agent/
 │   ├── intervention.py        # 오케스트레이터 개입 (analyze/generate_report/save_report)
 │   ├── weekly.py              # 주간 보고서 생성
 │   ├── milestone.py           # 마일스톤 보고서 생성
-│   └── run.py                 # CLI/API 공용 진입점 (run_pipeline, PauseController)
+│   └── run.py                 # CLI/API 공용 진입점 (run_pipeline, PauseController — 직접 Discord 폴링 포함)
 ├── metrics/
 │   └── collector.py           # TaskReport 저장/로드/집계 (에이전트가 생성한 독립 모듈)
 ├── reports/
@@ -160,7 +161,7 @@ AI_coding_agent/
 ├── structure/
 │   └── updater.py             # Python AST → PROJECT_STRUCTURE.md 자동 생성
 ├── hotline/
-│   └── notifier.py            # DiscordNotifier (send/wait_for_reply/listen_for_commands)
+│   └── notifier.py            # DiscordNotifier (httpx 기반, send/wait_for_reply/listen_for_commands, 429 rate limit, urgent_callback)
 ├── tools/
 │   ├── registry.py            # 도구 등록 및 스키마 빌더
 │   ├── file_tools.py          # read_file, write_file, edit_file 등
@@ -190,11 +191,14 @@ AI_coding_agent/
 │       │   ├── DashboardPage.tsx
 │       │   ├── ProjectListPage.tsx
 │       │   ├── PipelineModelModal.tsx  # 모델/프로바이더 선택 모달
+│       │   ├── SettingsModal.tsx       # 프로바이더/모델 설정 모달
 │       │   └── ...
 │       └── hooks/
 │           ├── useAnthropicStream.ts
 │           └── useMeeting.ts
-└── data/
+├── scripts/
+│   └── test_discord_read.py   # Discord 메시지 읽기 진단 스크립트
+└── agent-data/
     └── tasks.yaml             # 태스크 정의 파일
 ```
 
@@ -447,10 +451,13 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
     ├── POST /api/execution-brief  — Task Report 요약 생성
     └── GET  /api/project-structure — PROJECT_STRUCTURE.md 내용 반환
   Step 5: Discord 핫라인 (알림 + 질의응답 양방향) ✅
-    ├── hotline/notifier.py  — DiscordNotifier (send + wait_for_reply + listen_for_commands)
+    ├── hotline/notifier.py  — DiscordNotifier (httpx 기반, send + wait_for_reply + listen_for_commands)
+    │     429 rate limit 자동 재시도 (retry_after 파싱), urgent_callback, catch-all 예외 처리
     ├── tools/hotline_tools.py  — ask_user 도구 (에이전트 → 사용자 질의, LLM 대화 파트너)
-    ├── orchestrator/run.py  — 파이프라인 알림 + PauseController (Discord 명령으로 일시정지/재개/중단)
+    ├── orchestrator/run.py  — 파이프라인 알림 + PauseController
+    │     직접 Discord 폴링 (리스너 스레드 백업), stop_check → ReactLoop/ScopedReactLoop 연동
     ├── backend/routers/discord_router.py  — GET /api/discord/status, POST /api/discord/test
+    ├── scripts/test_discord_read.py  — Discord 메시지 읽기 진단 스크립트
     └── tests/test_notifier.py
   Step 6: 보고서 체계 (Weekly Report) ✅
     ├── orchestrator/weekly.py  — ISO 주차 집계 + LLM 마크다운 생성
@@ -482,7 +489,7 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
 7단계 - 보고서 및 모니터링 ✅ 완료 (2026-03-31)
   ├── Milestone Report 자동 생성 ✅
   │     orchestrator/milestone.py — 파이프라인 완료 시 LLM이 마크다운 요약 생성
-  │     data/reports/milestones/ 에 타임스탬프 파일로 저장
+  │     agent-data/reports/milestones/ 에 타임스탬프 파일로 저장
   ├── 대시보드 백엔드 API ✅
   │     backend/routers/dashboard.py
   │     GET /api/dashboard/summary   — 메트릭 집계 (성공률, 재시도, 소요 시간 등)
@@ -550,3 +557,7 @@ Phase 3 추가 구현 ✅ 완료 (2026-03-31)
 | 태스크 타입 분기 | frontend 태스크 파이프라인 제외 구현됨 (task_type="frontend") | ✅ 완료 |
 | 핫라인 확장 | 버튼 인터랙션, /run 명령어, PR 요약, 스크린샷 피드백 | 필요 시 |
 | 오케스트레이터 → 사용자 질문 | ask_user 도구로 에이전트가 Discord/stdin 경유 질의 가능 | ✅ 완료 |
+| Discord Message Content Intent | **필수**: Developer Portal → Bot → Privileged Gateway Intents에서 활성화. 미활성 시 REST API가 content를 빈 문자열로 반환하여 모든 명령이 무시됨 | ✅ 확인 완료 |
+| ReactLoop stop_check | ✅ 매 LLM 호출 전 콜백 체크 → 즉시 ABORTED 반환. PauseController.is_stopped와 연동 | 완료 |
+| PauseController 직접 폴링 | ✅ 리스너 스레드 백업으로 직접 Discord API 폴링 (attach_notifier + _poll_discord_for_stop) | 완료 |
+| 429 Rate Limit 처리 | ✅ listen_for_commands/wait_for_reply에서 retry_after 파싱 후 자동 대기 | 완료 |
