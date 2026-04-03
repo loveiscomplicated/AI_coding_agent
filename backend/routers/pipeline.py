@@ -10,12 +10,15 @@ GET  /api/pipeline/jobs             실행 중 / 완료된 잡 목록
 from __future__ import annotations
 
 import json
+import logging
 import queue as _queue
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -102,20 +105,20 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
         _emit(job_id, event)
 
     def _worker() -> None:
-        # Discord 채널 확보 — 백그라운드에서 실행하여 run 응답을 즉시 반환
-        resolved_channel_id: str | None = preset_channel_id
-        if not resolved_channel_id and DISCORD_BOT_TOKEN and DISCORD_GUILD_ID:
-            try:
-                notifier = DiscordNotifier.from_env()
-                if notifier:
-                    project_name = Path(body.repo_path).name or "project"
-                    resolved_channel_id = notifier.create_channel(project_name)
-                    with _lock:
-                        _jobs[job_id]["discord_channel_id"] = resolved_channel_id
-            except Exception as exc:
-                logger.warning("Discord 채널 생성 실패 (무시): %s", exc)
-
         try:
+            # Discord 채널 확보 — 백그라운드에서 실행하여 run 응답을 즉시 반환
+            resolved_channel_id: str | None = preset_channel_id
+            if not resolved_channel_id and DISCORD_BOT_TOKEN and DISCORD_GUILD_ID:
+                try:
+                    notifier = DiscordNotifier.from_env()
+                    if notifier:
+                        project_name = Path(body.repo_path).name or "project"
+                        resolved_channel_id = notifier.create_channel(project_name)
+                        with _lock:
+                            _jobs[job_id]["discord_channel_id"] = resolved_channel_id
+                except Exception as exc:
+                    logger.warning("Discord 채널 생성 실패 (무시): %s", exc)
+
             result = run_pipeline(
                 tasks_path=Path(body.tasks_path),
                 repo_path=Path(body.repo_path).resolve(),
@@ -144,10 +147,11 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
                 _jobs[job_id]["status"] = "error"
                 _jobs[job_id]["error"] = str(e)
             _emit(job_id, {"type": "error", "message": str(e)})
+            logger.exception("파이프라인 워커 예외: %s", e)
         finally:
             with _lock:
                 _jobs[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
-            # SSE 구독자에게 스트림 종료를 알림
+            # SSE 구독자에게 스트림 종료를 알림 (크래시 여부와 무관하게 항상 실행)
             q.put(None)
 
     threading.Thread(target=_worker, daemon=True).start()

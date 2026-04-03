@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.config import LLM_PROVIDER, LLM_MODEL_FAST, LLM_MODEL_CAPABLE
+from tools.hotline_tools import get_conv_model, set_conv_model
 
 router = APIRouter()
 
@@ -24,6 +25,34 @@ def get_config() -> dict:
         "model_fast": LLM_MODEL_FAST,
         "model_capable": LLM_MODEL_CAPABLE,
     }
+
+
+class LLMSettingsRequest(BaseModel):
+    hotline_conv_model: str
+    hotline_conv_provider: str
+
+
+@router.get("/config/llm")
+def get_llm_settings() -> dict:
+    """런타임 LLM 설정을 반환한다."""
+    info = get_conv_model()
+    return {
+        "hotline_conv_model": info["model"] or LLM_MODEL_CAPABLE,
+        "hotline_conv_provider": info["provider"] or LLM_PROVIDER,
+    }
+
+
+@router.patch("/config/llm")
+def update_llm_settings(body: LLMSettingsRequest) -> dict:
+    """Discord 대화용 LLM 모델을 런타임에 변경한다."""
+    model = body.hotline_conv_model.strip()
+    provider = body.hotline_conv_provider.strip()
+    if not model:
+        raise HTTPException(status_code=422, detail="모델명이 비어 있습니다.")
+    if not provider:
+        raise HTTPException(status_code=422, detail="provider가 비어 있습니다.")
+    set_conv_model(model, provider)
+    return {"hotline_conv_model": model, "hotline_conv_provider": provider}
 
 
 class SaveContextDocRequest(BaseModel):
