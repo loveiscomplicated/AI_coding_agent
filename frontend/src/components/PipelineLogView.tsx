@@ -149,11 +149,13 @@ function logEntryText(e: LogEntry): { text: string; color: string } {
 
 interface Props {
   jobId: string
-  /** 파이프라인 종료(end 이벤트) 후 "결과 확인" 버튼 클릭 시 호출 */
+  /** SSE end 이벤트 수신 직후 호출 — 사이드바 배지 제거용 (navigate 없음) */
+  onEnded?: () => void
+  /** "결과 확인" 버튼 클릭 시 호출 — 뷰 이탈(navigate)까지 처리 */
   onDone: () => void
 }
 
-export function PipelineLogView({ jobId, onDone }: Props) {
+export function PipelineLogView({ jobId, onEnded, onDone }: Props) {
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [ended, setEnded] = useState(false)
   const [disconnected, setDisconnected] = useState(false)
@@ -192,11 +194,12 @@ export function PipelineLogView({ jobId, onDone }: Props) {
               ? localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(next))
               : localStorage.removeItem(ACTIVE_JOB_KEY)
           } catch { localStorage.removeItem(ACTIVE_JOB_KEY) }
+          onEnded?.()
           es.close()
         }
         if (event.type === 'paused') setPaused(true)
         if (event.type === 'resumed') setPaused(false)
-        if (event.type === 'pipeline_aborted') { setPaused(false); setEnded(true) }
+        if (event.type === 'pipeline_aborted') { setPaused(false); setEnded(true); onEnded?.() }
       } catch { /* 파싱 오류 무시 */ }
     }
 

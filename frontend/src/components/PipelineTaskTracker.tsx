@@ -402,9 +402,11 @@ function summarizeInput(preview: string | undefined): string {
 
 interface Props {
   jobId: string
+  /** SSE end/pipeline_aborted 이벤트 수신 직후 호출 — 사이드바 배지 제거용 */
+  onEnded?: () => void
 }
 
-export function PipelineTaskTracker({ jobId }: Props) {
+export function PipelineTaskTracker({ jobId, onEnded }: Props) {
   const [tasks, setTasks] = useState<Map<string, TaskState>>(new Map())
   const [summary, setSummary] = useState<PipelineSummary>({ total: 0, success: 0, fail: 0, ended: false })
   const [taskOrder, setTaskOrder] = useState<string[]>([])
@@ -433,6 +435,7 @@ export function PipelineTaskTracker({ jobId }: Props) {
         }
         if (event.type === 'end' || event.type === 'pipeline_aborted') {
           setSummary(s => ({ ...s, ended: true }))
+          onEnded?.()
           es.close()
           return
         }

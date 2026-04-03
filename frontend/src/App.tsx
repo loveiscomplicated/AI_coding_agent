@@ -16,7 +16,7 @@ const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000') 
 
 type PipelineTab = 'tracker' | 'log'
 
-function PipelineView({ jobId, onDone }: { jobId: string; onDone: () => void }) {
+function PipelineView({ jobId, onEnded, onDone }: { jobId: string; onEnded: () => void; onDone: () => void }) {
   const [tab, setTab] = useState<PipelineTab>('tracker')
   return (
     <div className="flex flex-col h-full">
@@ -45,8 +45,8 @@ function PipelineView({ jobId, onDone }: { jobId: string; onDone: () => void }) 
       </div>
       <div className="flex-1 min-h-0">
         {tab === 'tracker'
-          ? <PipelineTaskTracker key={jobId} jobId={jobId} />
-          : <PipelineLogView key={jobId} jobId={jobId} onDone={onDone} />
+          ? <PipelineTaskTracker key={jobId} jobId={jobId} onEnded={onEnded} />
+          : <PipelineLogView key={jobId} jobId={jobId} onEnded={onEnded} onDone={onDone} />
         }
       </div>
     </div>
@@ -497,14 +497,23 @@ export default function App() {
         {viewingJobId && !showDashboard && !showListPage && !activeId ? (
           <PipelineView
             jobId={viewingJobId}
-            onDone={() => {
+            onEnded={() => {
+              // 파이프라인 종료 시 사이드바 배지만 제거 — 뷰는 유지
               setRunningJobIds(prev => {
                 const next = prev.filter(id => id !== viewingJobId)
-                if (next.length > 0) {
-                  localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(next))
-                } else {
-                  localStorage.removeItem(ACTIVE_JOB_KEY)
-                }
+                next.length > 0
+                  ? localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(next))
+                  : localStorage.removeItem(ACTIVE_JOB_KEY)
+                return next
+              })
+            }}
+            onDone={() => {
+              // "결과 확인 →" 버튼 클릭 시 배지 제거 + 뷰 이탈
+              setRunningJobIds(prev => {
+                const next = prev.filter(id => id !== viewingJobId)
+                next.length > 0
+                  ? localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(next))
+                  : localStorage.removeItem(ACTIVE_JOB_KEY)
                 return next
               })
               setViewingJobId(null)
