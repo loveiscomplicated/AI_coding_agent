@@ -32,6 +32,13 @@ logger = logging.getLogger(__name__)
 # 경로 검증이 필요한 쓰기 도구 (input 의 "path" 키를 검사)
 _PATH_ARG_WRITE_TOOLS = frozenset(WRITE_TOOLS)
 
+# 상대 경로를 workspace_dir 기준으로 정규화해야 하는 읽기 도구
+# (절대 경로면 그대로, 상대 경로면 workspace_dir / path 로 변환)
+_PATH_ARG_READ_TOOLS = frozenset([
+    "read_file", "read_file_lines", "list_directory",
+    "search_in_file", "get_outline", "get_function_src", "get_imports",
+])
+
 
 @dataclass
 class ScopedResult:
@@ -109,7 +116,7 @@ class ScopedReactLoop(ReactLoop):
             logger.warning(msg)
             return ToolResult(tool_use_id=tc.id, content=msg, is_error=True)
 
-        # 2. workspace 경로 검사 + 상대 경로 정규화 (쓰기 도구만)
+        # 2. workspace 경로 검사 + 상대 경로 정규화
         if tc.name in _PATH_ARG_WRITE_TOOLS:
             path_str = tc.input.get("path", "")
             if path_str:
@@ -124,6 +131,14 @@ class ScopedReactLoop(ReactLoop):
                 if not p.is_absolute():
                     absolute_path = str((self._workspace_dir / path_str).resolve())
                     tc = ToolCall(id=tc.id, name=tc.name, input={**tc.input, "path": absolute_path})
+
+        elif tc.name in _PATH_ARG_READ_TOOLS:
+            # 읽기 도구: 상대 경로를 workspace_dir 기준으로 정규화
+            # (절대 경로는 그대로 — 에이전트가 명시적으로 지정한 경우)
+            path_str = tc.input.get("path", "")
+            if path_str and not Path(path_str).is_absolute():
+                absolute_path = str((self._workspace_dir / path_str).resolve())
+                tc = ToolCall(id=tc.id, name=tc.name, input={**tc.input, "path": absolute_path})
 
         return super()._execute_tool(tc)
 
