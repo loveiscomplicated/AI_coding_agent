@@ -417,6 +417,9 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
   const [editDraft, setEditDraft] = useState<{ description: string; criteria: string[] }>({ description: '', criteria: [] })
   const [savingTask, setSavingTask] = useState(false)
   const [rerunningTaskId, setRerunningTaskId] = useState<string | null>(null)
+  const [redesigningTaskId, setRedesigningTaskId] = useState<string | null>(null)
+  const [redesignResult, setRedesignResult] = useState<{ taskId: string; action: string; explanation: string; tasks: Record<string, unknown>[] } | null>(null)
+  const [applyingRedesign, setApplyingRedesign] = useState(false)
 
   const loadData = async (cfg: ProjectConfig) => {
     setLoading(true)
@@ -614,6 +617,76 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
       alert(e instanceof Error ? e.message : '재실행 실패')
     } finally {
       setRerunningTaskId(null)
+    }
+  }
+
+  async function redesignTask(taskId: string) {
+    if (!project) return
+    setRedesigningTaskId(taskId)
+    setRedesignResult(null)
+    try {
+      const res = await fetch(`${API_BASE}/api/tasks/${taskId}/redesign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tasks_path: projectTasksPath(project),
+          repo_path: project.rootDir,
+        }),
+      })
+      if (!res.ok) throw new Error('재설계 시작 실패')
+      const { job_id } = await res.json()
+
+      // 폴링
+      for (let i = 0; i < 120; i++) {
+        await new Promise(r => setTimeout(r, 2000))
+        const poll = await fetch(`${API_BASE}/api/tasks/redesign/${job_id}`)
+        const data = await poll.json()
+        if (data.status === 'done') {
+          setRedesignResult({ taskId, action: data.action, explanation: data.explanation, tasks: data.tasks })
+          return
+        }
+        if (data.status === 'error') {
+          alert(`재설계 실패: ${data.error}`)
+          return
+        }
+      }
+      alert('재설계 시간 초과')
+    } catch (e) {
+      alert(e instanceof Error ? e.message : '재설계 실패')
+    } finally {
+      setRedesigningTaskId(null)
+    }
+  }
+
+  async function applyRedesign() {
+    if (!redesignResult || !project) return
+    setApplyingRedesign(true)
+    try {
+      const tasksPath = projectTasksPath(project)
+      const res = await fetch(`${API_BASE}/api/tasks?tasks_path=${encodeURIComponent(tasksPath)}`)
+      if (!res.ok) throw new Error('태스크 목록 로드 실패')
+      const { tasks: currentTasks } = await res.json()
+
+      // 원래 태스크를 재설계된 태스크들로 교체
+      const newTasks = currentTasks.flatMap((t: Record<string, unknown>) =>
+        t.id === redesignResult.taskId
+          ? redesignResult.tasks.map(rt => ({ ...rt, status: 'pending', retry_count: 0, last_error: '', failure_reason: '', pr_url: '' }))
+          : [t]
+      )
+
+      const saveRes = await fetch(`${API_BASE}/api/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tasks: newTasks, tasks_path: tasksPath }),
+      })
+      if (!saveRes.ok) throw new Error('태스크 저장 실패')
+
+      setRedesignResult(null)
+      await loadData(config)
+    } catch (e) {
+      alert(e instanceof Error ? e.message : '적용 실패')
+    } finally {
+      setApplyingRedesign(false)
     }
   }
 
@@ -1009,7 +1082,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
                                 )}
                                 {/* 실패 태스크 액션 */}
                                 {task.status === 'failed' && (
-                                  <div className="flex gap-2 pt-2 border-t border-gray-200 dark:border-zinc-700">
+                                  <div className="flex flex-wrap gap-2 pt-2 border-t border-gray-200 dark:border-zinc-700">
                                     <button
                                       onClick={() => {
                                         setEditDraft({ description: task.description ?? '', criteria: [...(task.acceptance_criteria ?? [])] })
@@ -1017,6 +1090,13 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
                                       }}
                                       className="rounded px-3 py-1 bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300 hover:bg-gray-300 dark:hover:bg-zinc-600 transition-colors"
                                     >✏️ 수정</button>
+                                    {project && (
+                                      <button
+                                        onClick={() => redesignTask(task.id)}
+                                        disabled={redesigningTaskId === task.id}
+                                        className="rounded px-3 py-1 bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 transition-colors"
+                                      >{redesigningTaskId === task.id ? 'AI 분석 중…' : '🤖 AI 재설계'}</button>
+                                    )}
                                     {project && (
                                       <button
                                         onClick={() => rerunTask(task.id)}
@@ -1175,6 +1255,61 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
           onConfirm={resumePipeline}
           onCancel={() => setShowResumeModal(false)}
         />
+      )}
+
+      {/* AI 재설계 결과 모달 */}
+      {redesignResult && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-2xl w-full max-w-2xl mx-4 max-h-[80vh] flex flex-col">
+            <div className="px-6 py-4 border-b border-gray-200 dark:border-zinc-700 flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-semibold text-gray-900 dark:text-zinc-100">
+                  🤖 AI 재설계 제안
+                </h2>
+                <p className="text-xs text-gray-500 dark:text-zinc-400 mt-0.5">
+                  {redesignResult.action === 'split' ? `태스크 ${redesignResult.tasks.length}개로 분할` : '태스크 단순화'} 제안
+                </p>
+              </div>
+              <button
+                onClick={() => setRedesignResult(null)}
+                className="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 text-xl leading-none"
+              >✕</button>
+            </div>
+            <div className="overflow-y-auto flex-1 px-6 py-4 space-y-4">
+              <div className="bg-purple-50 dark:bg-purple-900/20 rounded-lg px-4 py-3 text-sm text-purple-900 dark:text-purple-200">
+                {redesignResult.explanation}
+              </div>
+              {redesignResult.tasks.map((t, i) => (
+                <div key={i} className="border border-gray-200 dark:border-zinc-700 rounded-lg p-4 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-mono text-gray-500 dark:text-zinc-400">{String(t.id)}</span>
+                    <span className="text-sm font-semibold text-gray-900 dark:text-zinc-100">{String(t.title)}</span>
+                  </div>
+                  <p className="text-xs text-gray-600 dark:text-zinc-300 leading-relaxed">{String(t.description)}</p>
+                  {Array.isArray(t.acceptance_criteria) && (
+                    <ul className="text-xs text-gray-500 dark:text-zinc-400 space-y-0.5 list-disc list-inside">
+                      {(t.acceptance_criteria as string[]).map((c, j) => <li key={j}>{c}</li>)}
+                    </ul>
+                  )}
+                  {Array.isArray(t.depends_on) && (t.depends_on as string[]).length > 0 && (
+                    <p className="text-xs text-gray-400 dark:text-zinc-500">depends_on: {(t.depends_on as string[]).join(', ')}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-200 dark:border-zinc-700 flex gap-2 justify-end">
+              <button
+                onClick={() => setRedesignResult(null)}
+                className="rounded-lg px-4 py-2 text-sm bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300 hover:bg-gray-300 dark:hover:bg-zinc-600 transition-colors"
+              >취소</button>
+              <button
+                onClick={applyRedesign}
+                disabled={applyingRedesign}
+                className="rounded-lg px-4 py-2 text-sm bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 transition-colors"
+              >{applyingRedesign ? '적용 중…' : '✓ 적용 및 pending으로 초기화'}</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
