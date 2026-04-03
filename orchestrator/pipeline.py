@@ -38,11 +38,21 @@ from docker.runner import DockerTestRunner, RunResult, _detect_runtime
 from llm.base import Message, StopReason
 from orchestrator.task import Task, TaskStatus
 from orchestrator.workspace import WorkspaceManager
+from tools.hotline_tools import register_workspace_context_dir, unregister_workspace_context_dir
 
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 2
 MAX_REVIEW_RETRIES = 1   # Reviewer CHANGES_REQUESTED → Implementer 재시도 최대 횟수
+
+
+class _StopRequested(BaseException):
+    """
+    사용자 즉시 중단 요청 시 on_iteration 훅에서 raise되는 sentinel.
+
+    BaseException 을 상속하여 `except Exception` 블록에 잡히지 않고
+    ScopedReactLoop → TDDPipeline.run() 까지 깔끔하게 전파된다.
+    """
 
 
 # ── 결과 데이터 클래스 ────────────────────────────────────────────────────────
@@ -120,6 +130,7 @@ class TDDPipeline:
         task: Task,
         workspace: WorkspaceManager,
         on_progress=None,
+        pause_ctrl=None,
     ) -> PipelineResult:
         """
         태스크 전체 파이프라인을 실행한다.
@@ -128,11 +139,38 @@ class TDDPipeline:
         on_progress : Callable[[dict], None] | None
             단계별 진행 상황을 전달받을 콜백. run.py 의 emit 을 래핑해서 넣는다.
             None 이면 아무것도 하지 않는다.
+        pause_ctrl : PauseController | None
+            중단 요청 감지용. is_stopped 가 True 이면 다음 LLM 응답 직후에
+            _StopRequested 를 raise 해 파이프라인을 즉시 종료한다.
         """
         _p = on_progress or (lambda e: None)
-        _agent_p = lambda e: _p({**e, "task_id": task.id}) if "task_id" not in e else _p(e)
+
+        def _agent_p(e: dict) -> None:
+            # 중단 요청이 있으면 on_iteration 콜백에서 _StopRequested 를 raise
+            if pause_ctrl is not None and pause_ctrl.is_stopped:
+                raise _StopRequested("사용자 즉시 중단 요청")
+            merged = {**e, "task_id": task.id} if "task_id" not in e else e
+            _p(merged)
+
         logger.info("[%s] 파이프라인 시작", task.id)
 
+        # hotline decisions.md가 ask_user 확정 후 workspace에도 동기화되도록 등록
+        register_workspace_context_dir(task.id, workspace.tests_dir.parent / "context")
+        try:
+            return self._run_pipeline(task, workspace, _p, _agent_p)
+        finally:
+            unregister_workspace_context_dir(task.id)
+
+    def _run_pipeline(self, task, workspace, _p, _agent_p) -> "PipelineResult":
+        """run()의 실제 파이프라인 로직. workspace 등록/해제는 run()이 담당한다."""
+        try:
+            return self.__run_pipeline_inner(task, workspace, _p, _agent_p)
+        except _StopRequested:
+            logger.info("[%s] 즉시 중단 요청 — 파이프라인 종료", task.id)
+            return PipelineResult.failed(task, "[ABORTED] 사용자 즉시 중단 요청")
+
+    def __run_pipeline_inner(self, task, workspace, _p, _agent_p) -> "PipelineResult":
+        """_run_pipeline() 의 실제 구현. _StopRequested 는 _run_pipeline() 이 잡는다."""
         # ── Step 1: 테스트 작성 ───────────────────────────────────────────────
         task.status = TaskStatus.WRITING_TESTS
         _p({"type": "step", "step": "test_writing", "message": "TestWriter: 테스트 작성 중…"})

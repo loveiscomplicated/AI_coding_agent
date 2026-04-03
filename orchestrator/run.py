@@ -397,7 +397,7 @@ def run_pipeline(
                 def _progress(event: dict, _tid=task.id) -> None:
                     emit({**event, "task_id": _tid})
 
-                result = pipeline.run(task, ws, on_progress=_progress)
+                result = pipeline.run(task, ws, on_progress=_progress, pause_ctrl=pause_ctrl)
                 elapsed = time.monotonic() - start_time
 
                 # ── 성공 ────────────────────────────────────────────────────────
@@ -445,7 +445,20 @@ def run_pipeline(
 
                 # ── 실패 ────────────────────────────────────────────────────────
                 failure_reason = result.failure_reason or "알 수 없음"
+                is_aborted = failure_reason.startswith("[ABORTED]")
                 is_max_iter = failure_reason.startswith("[MAX_ITER]")
+
+                # 즉시 중단 요청 — 오케스트레이터 재시도 없이 바로 태스크 실패 처리
+                if is_aborted:
+                    logger.info("[%s] 즉시 중단으로 태스크 종료", task.id)
+                    with _save_lock:
+                        fail_count += 1
+                    failed_ids.add(task.id)
+                    emit({"type": "task_aborted", "task_id": task.id, "title": task.title,
+                          "elapsed": round(elapsed, 1)})
+                    with _save_lock:
+                        save_tasks(all_tasks, tasks_path)
+                    return
 
                 if is_max_iter:
                     logger.warning(
@@ -629,6 +642,8 @@ def run_pipeline(
                             t.failure_reason = str(exc)
             else:
                 for task in runnable:
+                    if pause_ctrl.is_stopped:
+                        break
                     run_one(task)
 
             # 이 그룹에서 실패한 태스크 ID를 failed_ids에 추가
