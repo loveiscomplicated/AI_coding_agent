@@ -78,6 +78,12 @@ class ScopedReactLoop(ReactLoop):
         self._role = role
         self._workspace_dir = Path(workspace_dir).resolve()
 
+        # 읽기 전용 도구 연속 호출 감지 (탐색 루프 방지)
+        self._consecutive_readonly = 0
+        self._readonly_tool_names = frozenset({"read_file", "list_directory", "search_files"})
+        self._write_tool_names = frozenset({"write_file", "edit_file"})
+        self._readonly_warn_threshold = 5  # TODO: RoleConfig에서 설정 가능하게 확장
+
         # 허용 도구만 포함한 스키마로 교체
         self.TOOLS_SCHEMA = self._build_scoped_schema()
 
@@ -142,7 +148,33 @@ class ScopedReactLoop(ReactLoop):
                 absolute_path = str((self._workspace_dir / path_str).resolve())
                 tc = ToolCall(id=tc.id, name=tc.name, input={**tc.input, "path": absolute_path})
 
-        return super()._execute_tool(tc)
+        result = super()._execute_tool(tc)
+
+        # ── 읽기 전용 도구 연속 호출 카운터 업데이트 ──────────────────────────
+        if tc.name in self._write_tool_names:
+            self._consecutive_readonly = 0
+        elif tc.name in self._readonly_tool_names:
+            self._consecutive_readonly += 1
+        # 그 외 도구(ask_user 등): 카운터 변경 없음
+
+        # 임계값 도달 시 경고를 tool result에 주입 (LLM이 user 메시지로 수신)
+        if self._consecutive_readonly >= self._readonly_warn_threshold:
+            warning = (
+                f"\n\n⚠️ [SYSTEM WARNING] 읽기 전용 도구를 {self._consecutive_readonly}회 연속 호출했습니다. "
+                f"탐색을 멈추고 반드시 write_file 또는 edit_file을 호출하여 코드를 작성하세요. "
+                f"필요한 정보가 부족해도 현재 가진 정보로 최선의 코드를 작성하세요."
+            )
+            logger.warning(
+                "[readonly_guard] 읽기 전용 도구 %d회 연속 — 경고 주입",
+                self._consecutive_readonly,
+            )
+            result = ToolResult(
+                tool_use_id=result.tool_use_id,
+                content=result.content + warning,
+                is_error=result.is_error,
+            )
+
+        return result
 
     # ── 내부 헬퍼 ─────────────────────────────────────────────────────────────
 
