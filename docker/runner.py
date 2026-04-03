@@ -2,11 +2,11 @@
 docker/runner.py — Docker 기반 격리 테스트 러너
 
 workspace 디렉토리를 읽기 전용으로 컨테이너에 마운트하고
-pytest를 실행한 뒤 결과를 RunResult로 반환한다.
+지정된 테스트 프레임워크로 테스트를 실행한 뒤 결과를 RunResult로 반환한다.
 
 사용 예:
     runner = DockerTestRunner()
-    result = runner.run(Path("/tmp/agent_workspaces/task-001"))
+    result = runner.run(Path("/tmp/agent_workspaces/task-001"), test_framework="pytest")
     if result.passed:
         print("테스트 통과!")
     else:
@@ -69,17 +69,25 @@ class DockerTestRunner:
         if result.returncode != 0:
             raise RuntimeError(f"이미지 빌드 실패:\n{result.stderr}")
 
-    def run(self, workspace_dir: Path, target_files: list[str] | None = None) -> RunResult:
+    def run(
+        self,
+        workspace_dir: Path,
+        target_files: list[str] | None = None,
+        test_framework: str | None = None,
+    ) -> RunResult:
         """
         workspace_dir 를 마운트해 테스트를 실행하고 RunResult 를 반환한다.
 
-        target_files 의 확장자에서 런타임을 자동 감지한다:
+        test_framework 가 명시되면 그대로 사용하고,
+        없으면 target_files 확장자에서 런타임을 자동 감지한다:
           .js/.ts/… → "node"  (프레임워크 없는 JS 테스트)
           .py/기타   → "python" (프레임워크 없는 Python 테스트)
 
         Args:
-            workspace_dir:  테스트가 포함된 로컬 디렉토리 (절대 경로)
-            target_files:   task.target_files (런타임 감지에 사용)
+            workspace_dir:   테스트가 포함된 로컬 디렉토리 (절대 경로)
+            target_files:    task.target_files (런타임 감지에 사용)
+            test_framework:  테스트 프레임워크 (예: "pytest", "jest", "gradle test")
+                             지정 시 자동 감지를 무시하고 이 값을 사용한다.
 
         Returns:
             RunResult — 이미지 미빌드 시 passed=False, returncode=-1
@@ -106,7 +114,7 @@ class DockerTestRunner:
                     summary=f"Docker 이미지 빌드 실패: {e}",
                 )
 
-        runtime = _detect_runtime(target_files or [])
+        runtime = test_framework if test_framework else _detect_runtime(target_files or [])
 
         try:
             result = subprocess.run(
@@ -136,6 +144,11 @@ class DockerTestRunner:
         passed = result.returncode == 0
         summary = _parse_summary(stdout)
         failed_tests = _parse_failed_tests(stdout)
+
+        # summary가 "OK:"로 시작하면 테스트는 실제로 통과한 것.
+        # LLM 생성 테스트가 sys.exit(passed_count) 같은 잘못된 exit code를 쓸 때 보정.
+        if not passed and re.match(r"^OK:", summary):
+            passed = True
 
         return RunResult(
             passed=passed,

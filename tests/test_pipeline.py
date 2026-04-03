@@ -57,7 +57,7 @@ def workspace(tmp_path, task):
     ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
     ws.create()
     # 테스트 파일이 있는 것처럼 만들어 줌
-    (ws.tests_dir / "test_auth.py").write_text("def test_login(): pass\n")
+    (ws.tests_dir / "test_auth.py").write_text("def test_login():\n    assert True\n")
     return ws
 
 
@@ -197,8 +197,8 @@ class TestTDDPipelineHappyPath:
         assert task.status == TaskStatus.COMMITTING
 
     @patch("orchestrator.pipeline.ScopedReactLoop")
-    def test_review_changes_requested_still_succeeds(self, MockLoop, task, workspace):
-        """CHANGES_REQUESTED 여도 파이프라인은 succeeded=True 반환."""
+    def test_review_changes_requested_returns_failed(self, MockLoop, task, workspace):
+        """CHANGES_REQUESTED 시 피드백 반영 재구현 후에도 실패하면 succeeded=False."""
         MockLoop.return_value.run.return_value = _ok_scoped(
             "VERDICT: CHANGES_REQUESTED\nSUMMARY: 개선 필요\nDETAILS:\n수정 사항 있음"
         )
@@ -208,8 +208,9 @@ class TestTDDPipelineHappyPath:
         pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
         result = pipeline.run(task, workspace)
 
-        assert result.succeeded is True
+        assert result.succeeded is False
         assert result.review.verdict == "CHANGES_REQUESTED"
+        assert "CHANGES_REQUESTED" in result.failure_reason
 
     @patch("orchestrator.pipeline.ScopedReactLoop")
     def test_result_contains_file_lists(self, MockLoop, task, workspace):
@@ -262,7 +263,7 @@ class TestTDDPipelineFailurePaths:
 
     @patch("orchestrator.pipeline.ScopedReactLoop")
     def test_fails_when_implementer_fails(self, MockLoop, task, workspace):
-        # 호출 순서: TestWriter 성공, Implementer 실패
+        # 호출 순서: TestWriter 성공, (품질 게이트 통과), Implementer 실패
         MockLoop.return_value.run.side_effect = [
             _ok_scoped("테스트 작성 완료"),  # TestWriter
             _fail_scoped("구현 불가"),       # Implementer
@@ -273,7 +274,7 @@ class TestTDDPipelineFailurePaths:
         result = pipeline.run(task, workspace)
 
         assert result.succeeded is False
-        assert "Implementer" in result.failure_reason
+        assert "Implementer" in result.failure_reason or "실패" in result.failure_reason
         mock_runner.run.assert_not_called()
 
     @patch("orchestrator.pipeline.ScopedReactLoop")

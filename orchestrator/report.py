@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from orchestrator.pipeline import PipelineResult
+from orchestrator.pipeline import PipelineMetrics, PipelineResult
 from orchestrator.task import Task, TaskStatus
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,14 @@ class TaskReport:
     orchestrator_model: str = ""
     coding_agent_model: str = ""
     orchestrator_summary: str = ""
+    # 파이프라인 세부 메트릭 (변경 1·2 효과 측정용)
+    quality_gate_rejections: int = 0
+    quality_gate_reasons: list[str] = field(default_factory=list)
+    test_red_to_green_first_try: bool = False
+    impl_retries: int = 0
+    review_retries: int = 0
+    dep_files_injected: int = 0
+    failed_stage: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -64,6 +72,13 @@ class TaskReport:
                 "reviewer_verdict": self.reviewer_verdict,
                 "time_elapsed_seconds": self.time_elapsed_seconds,
                 "failure_reasons": self.failure_reasons,
+                "quality_gate_rejections": self.quality_gate_rejections,
+                "quality_gate_reasons": self.quality_gate_reasons,
+                "test_red_to_green_first_try": self.test_red_to_green_first_try,
+                "impl_retries": self.impl_retries,
+                "review_retries": self.review_retries,
+                "dep_files_injected": self.dep_files_injected,
+                "failed_stage": self.failed_stage,
             },
             "pipeline_result": {
                 "test_output_summary": self.test_output_summary,
@@ -99,6 +114,13 @@ class TaskReport:
             reviewer_verdict=m.get("reviewer_verdict", ""),
             time_elapsed_seconds=m.get("time_elapsed_seconds", 0.0),
             failure_reasons=m.get("failure_reasons", []),
+            quality_gate_rejections=m.get("quality_gate_rejections", 0),
+            quality_gate_reasons=m.get("quality_gate_reasons", []),
+            test_red_to_green_first_try=m.get("test_red_to_green_first_try", False),
+            impl_retries=m.get("impl_retries", 0),
+            review_retries=m.get("review_retries", 0),
+            dep_files_injected=m.get("dep_files_injected", 0),
+            failed_stage=m.get("failed_stage", ""),
             test_output_summary=p.get("test_output_summary", ""),
             reviewer_feedback=p.get("reviewer_feedback", ""),
             pr_number=p.get("pr_number"),
@@ -149,6 +171,7 @@ def build_report(
         except (ValueError, IndexError):
             pass
 
+    m = result.metrics
     return TaskReport(
         task_id=task.id,
         title=task.title,
@@ -168,6 +191,13 @@ def build_report(
         orchestrator_model=orchestrator_model,
         coding_agent_model=coding_agent_model,
         orchestrator_summary=orchestrator_summary,
+        quality_gate_rejections=m.quality_gate_rejections,
+        quality_gate_reasons=m.quality_gate_reasons,
+        test_red_to_green_first_try=m.test_red_to_green_first_try,
+        impl_retries=m.impl_retries,
+        review_retries=m.review_retries,
+        dep_files_injected=m.dep_files_injected,
+        failed_stage=m.failed_stage,
     )
 
 
