@@ -221,6 +221,44 @@ class PauseController:
         return self._stopped
 
 
+# ── 유틸 ─────────────────────────────────────────────────────────────────────
+
+def _extract_orch_summary(report_text: str, max_len: int = 200) -> str:
+    """orchestrator_report 마크다운에서 첫 번째 의미 있는 단락을 한 줄 요약으로 추출한다."""
+    for line in report_text.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and not stripped.startswith("---"):
+            return stripped[:max_len]
+    return ""
+
+
+# ── .gitignore 자동 등록 ──────────────────────────────────────────────────────
+
+_GITIGNORE_ENTRIES = [
+    ".agent-workspace/",
+    "data/",
+]
+
+def _ensure_gitignore(repo_path: Path) -> None:
+    """
+    대상 레포의 .gitignore 에 에이전트 전용 경로가 없으면 추가한다.
+    이미 있으면 건드리지 않는다.
+    """
+    gitignore = repo_path / ".gitignore"
+    try:
+        existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+        existing_lines = {line.strip() for line in existing.splitlines()}
+        missing = [e for e in _GITIGNORE_ENTRIES if e not in existing_lines]
+        if not missing:
+            return
+        block = "\n# AI coding agent (자동 추가)\n" + "\n".join(missing) + "\n"
+        with open(gitignore, "a", encoding="utf-8") as f:
+            f.write(block)
+        logger.info(".gitignore 에 추가: %s", missing)
+    except Exception as e:
+        logger.warning(".gitignore 자동 등록 실패 (건너뜀): %s", e)
+
+
 # ── 파이프라인 실행 (CLI + API 공용) ──────────────────────────────────────────
 
 def run_pipeline(
@@ -265,6 +303,9 @@ def run_pipeline(
         logger.info("PROJECT_STRUCTURE.md 초기 생성 완료")
     except Exception as _e:
         logger.warning("PROJECT_STRUCTURE.md 초기 생성 실패 (건너뜀): %s", _e)
+
+    # .gitignore 에 에이전트 전용 경로 등록 (없으면 추가, 있으면 no-op)
+    _ensure_gitignore(repo_path)
 
     # 태스크 로드 (전체 — 의존성 검증에 전체 ID가 필요)
     all_tasks = load_tasks(tasks_path)
@@ -542,22 +583,25 @@ def run_pipeline(
                             f"오케스트레이터 {orch_attempt + 1}회 시도 후 최종 실패\n"
                             f"보고서 생성 중…")
 
-                    report_text = orch_report(
-                        task, failure_reason, orch_attempt + 1, hints_tried
+                    orch_report_text = orch_report(
+                        task, failure_reason, orch_attempt + 1, hints_tried,
+                        orchestrator_model=model_capable,
+                        coding_agent_model=model_fast,
                     )
-                    report_path = orch_save_report(report_text, task.id, reports_dir)
+                    report_path = orch_save_report(orch_report_text, task.id, reports_dir)
                     logger.warning(
                         "[%s] 오케스트레이터 보고서 저장 완료: %s", task.id, report_path,
                     )
                     _notify(notifier,
                             f"📋 [{task.id}] **오케스트레이터 실패 보고서**\n"
                             f"파일: {report_path.name}\n\n"
-                            f"{report_text[:800]}"
-                            f"{'…(이하 생략)' if len(report_text) > 800 else ''}")
+                            f"{orch_report_text[:800]}"
+                            f"{'…(이하 생략)' if len(orch_report_text) > 800 else ''}")
                     emit({"type": "orchestrator_report", "task_id": task.id,
                           "title": task.title, "total_attempts": orch_attempt + 1,
-                          "report": report_text, "report_path": str(report_path)})
+                          "report": orch_report_text, "report_path": str(report_path)})
                 else:
+                    orch_report_text = ""
                     # 오케스트레이터 개입 없이 첫 시도에서 실패 (max_orchestrator_retries=0 등)
                     if is_max_iter:
                         _notify(notifier,
@@ -570,7 +614,13 @@ def run_pipeline(
                       "elapsed": round(elapsed, 1)})
                 _notify_failure(notifier, task, task.failure_reason, elapsed)
 
-                report = build_report(task, result, elapsed_seconds=elapsed, pr_url="")
+                report = build_report(
+                    task, result, elapsed_seconds=elapsed, pr_url="",
+                    orchestrator_attempts=orch_attempt + 1 if hints_tried else 0,
+                    orchestrator_model=model_capable if hints_tried else "",
+                    coding_agent_model=model_fast if hints_tried else "",
+                    orchestrator_summary=_extract_orch_summary(orch_report_text),
+                )
                 save_report(report, reports_dir=reports_dir)
                 with _save_lock:
                     save_tasks(all_tasks, tasks_path)
