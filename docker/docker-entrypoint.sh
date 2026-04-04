@@ -82,6 +82,36 @@ case "$TEST_FRAMEWORK" in
     exec ruby -Ilib -Itest test/**/*.rb 2>&1
     ;;
 
+  # ── Kotlin / Java / Gradle ───────────────────────────────────────────────────
+  gradle)
+    WS=$(_copy_workspace)
+    cd "$WS"
+    if [ -f gradlew ]; then
+        chmod +x gradlew
+        exec ./gradlew test --console=plain 2>&1
+    else
+        exec gradle test --console=plain 2>&1
+    fi
+    ;;
+
+  # ── C / make ─────────────────────────────────────────────────────────────────
+  c)
+    WS=$(_copy_workspace)
+    cd "$WS"
+    exec make test 2>&1
+    ;;
+
+  # ── C++ / cmake + ctest ───────────────────────────────────────────────────────
+  cpp)
+    WS=$(_copy_workspace)
+    cd "$WS"
+    mkdir -p _build
+    cd _build
+    cmake .. -DCMAKE_BUILD_TYPE=Debug 2>&1
+    cmake --build . 2>&1
+    exec ctest --output-on-failure 2>&1
+    ;;
+
   # ── Python / 프레임워크 없는 방식 ─────────────────────────────────────────────
   # tests/test_*.py 를 직접 python으로 실행한다.
   # 각 파일은 성공 시 exit 0, 실패 시 exit 1 을 반환하는 규약을 따른다.

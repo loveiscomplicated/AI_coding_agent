@@ -2,11 +2,19 @@
 docker/runner.py — Docker 기반 격리 테스트 러너
 
 workspace 디렉토리를 읽기 전용으로 컨테이너에 마운트하고
-지정된 테스트 프레임워크로 테스트를 실행한 뒤 결과를 RunResult로 반환한다.
+언어별 이미지에서 테스트를 실행한 뒤 결과를 RunResult로 반환한다.
+
+이미지 이름 규칙: agent-runner-{language}
+  agent-runner-python      python:3.12-slim 기반
+  agent-runner-go          golang:1.22-alpine 기반
+  agent-runner-kotlin      eclipse-temurin:21-jdk-alpine + Gradle 기반
+  agent-runner-javascript  node:20-alpine 기반
+  agent-runner-c           gcc:14-bookworm + make + check/cmocka 기반
+  agent-runner-cpp         gcc:14-bookworm + cmake + googletest 기반
 
 사용 예:
     runner = DockerTestRunner()
-    result = runner.run(Path("/tmp/agent_workspaces/task-001"), test_framework="pytest")
+    result = runner.run(Path("/tmp/agent_workspaces/task-001"), language="python")
     if result.passed:
         print("테스트 통과!")
     else:
@@ -20,54 +28,94 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from orchestrator.task import LANGUAGE_TEST_FRAMEWORK_MAP
 
-IMAGE_NAME = "ai-coding-agent-test-runner"
+
 DOCKERFILE_DIR = Path(__file__).parent
+
+# ── 언어 → 이미지 이름 ────────────────────────────────────────────────────────
+
+_LANGUAGE_IMAGE: dict[str, str] = {
+    "python":     "agent-runner-python",
+    "javascript": "agent-runner-javascript",
+    "typescript": "agent-runner-javascript",
+    "go":         "agent-runner-go",
+    "kotlin":     "agent-runner-kotlin",
+    "java":       "agent-runner-kotlin",
+    "ruby":       "agent-runner-python",   # python 이미지에 rspec 포함 예정 시 분리
+    "c":          "agent-runner-c",
+    "cpp":        "agent-runner-cpp",
+}
+
+# ── 언어 → Dockerfile 파일명 ──────────────────────────────────────────────────
+
+_LANGUAGE_DOCKERFILE: dict[str, str] = {
+    "python":     "Dockerfile.python",
+    "javascript": "Dockerfile.javascript",
+    "typescript": "Dockerfile.javascript",
+    "go":         "Dockerfile.go",
+    "kotlin":     "Dockerfile.kotlin",
+    "java":       "Dockerfile.kotlin",
+    "ruby":       "Dockerfile.python",
+    "c":          "Dockerfile.c",
+    "cpp":        "Dockerfile.cpp",
+}
 
 
 @dataclass
 class RunResult:
     passed: bool
     returncode: int
-    stdout: str                          # pytest 전체 출력
+    stdout: str                          # 테스트 전체 출력
     summary: str                         # "5 passed, 2 failed in 0.12s" 마지막 줄
     failed_tests: list[str] = field(default_factory=list)  # 실패한 테스트 이름
 
 
 class DockerTestRunner:
     """
-    Docker 컨테이너 안에서 pytest를 실행한다.
+    언어별 Docker 컨테이너 안에서 테스트를 실행한다.
 
     - workspace_dir 를 /workspace 로 읽기 전용 마운트
     - 컨테이너는 실행 후 자동 삭제 (--rm)
-    - Docker 데몬 미실행이나 이미지 미빌드 시 명확한 오류 반환
+    - 네트워크 차단 (--network none) 및 리소스 제한 유지
+    - 언어별 이미지(agent-runner-{language})를 자동 선택
+    - 이미지가 없으면 Dockerfile.{language}로 자동 빌드
     """
 
-    def __init__(self, image: str = IMAGE_NAME, timeout: int = 120):
-        self.image = image
+    def __init__(self, timeout: int = 120):
         self.timeout = timeout
 
     # ── 공개 인터페이스 ───────────────────────────────────────────────────────
 
-    def build_image(self) -> None:
+    def build_image(self, language: str) -> None:
         """
-        Dockerfile.test 로 이미지를 빌드한다.
+        언어에 해당하는 이미지를 Dockerfile.{language}로 빌드한다.
         이미 존재하면 캐시를 활용해 빠르게 완료된다.
         """
+        image = _LANGUAGE_IMAGE.get(language)
+        dockerfile = _LANGUAGE_DOCKERFILE.get(language)
+        if not image or not dockerfile:
+            raise RuntimeError(
+                f"지원하지 않는 언어: {language!r}\n"
+                f"지원 목록: {sorted(_LANGUAGE_IMAGE.keys())}"
+            )
+
         _check_docker_available()
         project_root = DOCKERFILE_DIR.parent
         result = subprocess.run(
             [
                 "docker", "build",
-                "-f", str(DOCKERFILE_DIR / "Dockerfile.test"),
-                "-t", self.image,
+                "-f", str(DOCKERFILE_DIR / dockerfile),
+                "-t", image,
                 str(project_root),
             ],
             capture_output=True,
             text=True,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"이미지 빌드 실패:\n{result.stderr}")
+            raise RuntimeError(
+                f"[{language}] 이미지 빌드 실패 ({dockerfile}):\n{result.stderr}"
+            )
 
     def run(
         self,
@@ -78,33 +126,42 @@ class DockerTestRunner:
         test_files: list[str] | None = None,
     ) -> RunResult:
         """
-        workspace_dir 를 마운트해 테스트를 실행하고 RunResult 를 반환한다.
+        language에 해당하는 Docker 이미지를 선택해 테스트를 실행한다.
 
-        test_framework 가 명시되면 그대로 사용하고,
-        없으면 target_files 확장자에서 런타임을 자동 감지한다:
-          .js/.ts/… → "node"  (프레임워크 없는 JS 테스트)
-          .py/기타   → "python" (프레임워크 없는 Python 테스트)
+        TEST_FRAMEWORK 결정 우선순위:
+          1. test_framework 인자 (명시적 지정)
+          2. LANGUAGE_TEST_FRAMEWORK_MAP[language]
+          3. target_files 확장자 자동 감지 (_detect_runtime)
 
         Args:
-            workspace_dir:   테스트가 포함된 로컬 디렉토리 (절대 경로)
-            target_files:    task.target_files (런타임 감지에 사용)
-            test_framework:  테스트 프레임워크 (예: "pytest", "jest", "gradle test")
-                             지정 시 자동 감지를 무시하고 이 값을 사용한다.
+            workspace_dir:  테스트가 포함된 로컬 디렉토리 (절대 경로)
+            target_files:   task.target_files (런타임 감지 fallback에 사용)
+            test_framework: 테스트 프레임워크 명시적 지정 (없으면 자동 결정)
+            language:       태스크 구현 언어 — 이미지 선택에 사용
+            test_files:     특정 테스트 파일만 실행 (TEST_FILES 환경변수로 전달)
 
         Returns:
-            RunResult — 이미지 미빌드 시 passed=False, returncode=-1
+            RunResult — 이미지 미빌드/언어 미지원 시 passed=False, returncode=-1
         """
-        # 미지원 언어는 Docker 실행 없이 즉시 반환
-        if language != "python":
+        image = _LANGUAGE_IMAGE.get(language)
+        if not image:
             return RunResult(
                 passed=False,
                 returncode=-1,
                 stdout="",
-                summary=f"[UNSUPPORTED_LANGUAGE] {language} 테스트 러너가 구현되지 않았습니다.",
+                summary=(
+                    f"[UNSUPPORTED_LANGUAGE] '{language}'에 대한 이미지가 없습니다. "
+                    f"지원 언어: {sorted(_LANGUAGE_IMAGE.keys())}"
+                ),
                 failed_tests=["unsupported_language"],
             )
 
-        _check_docker_available()
+        try:
+            _check_docker_available()
+        except RuntimeError as e:
+            return RunResult(
+                passed=False, returncode=-1, stdout="", summary=str(e),
+            )
 
         workspace_dir = workspace_dir.resolve()
         if not workspace_dir.exists():
@@ -115,9 +172,9 @@ class DockerTestRunner:
                 summary=f"workspace 디렉토리 없음: {workspace_dir}",
             )
 
-        if not self._image_exists():
+        if not self._image_exists(image):
             try:
-                self.build_image()
+                self.build_image(language)
             except RuntimeError as e:
                 return RunResult(
                     passed=False,
@@ -126,7 +183,11 @@ class DockerTestRunner:
                     summary=f"Docker 이미지 빌드 실패: {e}",
                 )
 
-        runtime = test_framework if test_framework else _detect_runtime(target_files or [])
+        runtime = (
+            test_framework
+            or LANGUAGE_TEST_FRAMEWORK_MAP.get(language)
+            or _detect_runtime(target_files or [])
+        )
 
         # Docker 실행 커맨드 조립
         docker_cmd = [
@@ -135,13 +196,12 @@ class DockerTestRunner:
             "--memory", "512m",             # 메모리 제한
             "--cpus", "1",
             "-v", f"{workspace_dir}:/workspace:ro",
-            "-e", "PYTHONPATH=/workspace/src:/workspace",  # src/ 모듈 직접 import 허용
+            "-e", "PYTHONPATH=/workspace/src:/workspace",
             "-e", f"TEST_FRAMEWORK={runtime}",
         ]
-        # 특정 테스트 파일만 실행
         if test_files:
             docker_cmd += ["-e", f"TEST_FILES={' '.join(test_files)}"]
-        docker_cmd.append(self.image)
+        docker_cmd.append(image)
 
         try:
             result = subprocess.run(
@@ -163,16 +223,14 @@ class DockerTestRunner:
         summary = _parse_summary(stdout)
         failed_tests = _parse_failed_tests(stdout)
 
-        # 테스트가 실제로 전부 통과했는데 exit code만 비정상인 경우 보정.
+        # 실제로 전부 통과했는데 exit code만 비정상인 경우 보정.
         # 원인 예시: LLM 생성 테스트의 잘못된 sys.exit(), pytest INTERNALERROR/SystemExit
         if not passed and summary:
             if re.match(r"^OK:", summary):
-                # 출력 규약 형식: "OK: 4 passed, 0 failed"
                 passed = True
             elif (re.search(r"\d+ passed", summary)
                   and not re.search(r"[1-9]\d* failed", summary)
                   and not re.search(r"[1-9]\d* error", summary)):
-                # pytest 형식: "4 passed in 0.12s" (failed/error 없음)
                 passed = True
 
         return RunResult(
@@ -185,9 +243,9 @@ class DockerTestRunner:
 
     # ── 내부 헬퍼 ─────────────────────────────────────────────────────────────
 
-    def _image_exists(self) -> bool:
+    def _image_exists(self, image: str) -> bool:
         result = subprocess.run(
-            ["docker", "image", "inspect", self.image],
+            ["docker", "image", "inspect", image],
             capture_output=True,
             text=True,
         )
@@ -235,6 +293,7 @@ def _parse_summary(stdout: str) -> str:
     jest:     "Tests: 2 failed, 3 passed, 5 total"
     go test:  "FAIL\tmodule/pkg\t0.123s" / "ok\tmodule/pkg\t0.123s"
     rspec:    "5 examples, 2 failures"
+    ctest:    "N% tests passed, M tests failed out of N"
     """
     lines = stdout.splitlines()
 
@@ -246,6 +305,11 @@ def _parse_summary(stdout: str) -> str:
     # jest / vitest: "Tests:  N failed, N passed, N total"
     for line in lines:
         if re.match(r"\s*Tests:\s+", line):
+            return line.strip()
+
+    # ctest: "N% tests passed, M tests failed out of N"
+    for line in reversed(lines):
+        if re.search(r"tests? passed", line) and re.search(r"out of \d+", line):
             return line.strip()
 
     # go test: "ok" 또는 "FAIL" 로 시작하는 결과 줄
@@ -279,6 +343,7 @@ def _parse_failed_tests(stdout: str) -> list[str]:
     jest:     "  ✕ test name (5ms)"
     go test:  "--- FAIL: TestFuncName (0.00s)"
     rspec:    "  1) ClassName#method description"
+    ctest:    "N - TestName (Failed)"
     """
     failed: list[str] = []
     in_convention_block = False
@@ -311,4 +376,9 @@ def _parse_failed_tests(stdout: str) -> list[str]:
         m = re.match(r"^\s+\d+\)\s+(.+)$", line)
         if m:
             failed.append(m.group(1).strip())
+            continue
+        # ctest: "N - TestName (Failed)"
+        m = re.match(r"^\s*\d+\s+-\s+(\S+)\s+\(Failed\)", line)
+        if m:
+            failed.append(m.group(1))
     return failed

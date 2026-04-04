@@ -1,0 +1,17 @@
+FROM eclipse-temurin:21-jdk-alpine
+
+WORKDIR /workspace
+
+# Gradle 설치 (kotlinc는 Gradle Kotlin plugin이 자동 관리)
+RUN apk add --no-cache curl unzip bash && \
+    GRADLE_VERSION=8.7 && \
+    curl -L "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+         -o /tmp/gradle.zip && \
+    unzip -q /tmp/gradle.zip -d /opt && \
+    rm /tmp/gradle.zip && \
+    ln -sf /opt/gradle-${GRADLE_VERSION}/bin/gradle /usr/local/bin/gradle
+
+COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
