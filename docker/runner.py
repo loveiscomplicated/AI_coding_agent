@@ -163,10 +163,17 @@ class DockerTestRunner:
         summary = _parse_summary(stdout)
         failed_tests = _parse_failed_tests(stdout)
 
-        # summary가 "OK:"로 시작하면 테스트는 실제로 통과한 것.
-        # LLM 생성 테스트가 sys.exit(passed_count) 같은 잘못된 exit code를 쓸 때 보정.
-        if not passed and re.match(r"^OK:", summary):
-            passed = True
+        # 테스트가 실제로 전부 통과했는데 exit code만 비정상인 경우 보정.
+        # 원인 예시: LLM 생성 테스트의 잘못된 sys.exit(), pytest INTERNALERROR/SystemExit
+        if not passed and summary:
+            if re.match(r"^OK:", summary):
+                # 출력 규약 형식: "OK: 4 passed, 0 failed"
+                passed = True
+            elif (re.search(r"\d+ passed", summary)
+                  and not re.search(r"[1-9]\d* failed", summary)
+                  and not re.search(r"[1-9]\d* error", summary)):
+                # pytest 형식: "4 passed in 0.12s" (failed/error 없음)
+                passed = True
 
         return RunResult(
             passed=passed,
