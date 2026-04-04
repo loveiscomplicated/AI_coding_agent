@@ -31,6 +31,21 @@ from typing import Any
 import yaml
 
 
+# 언어 → 기본 테스트 프레임워크 매핑
+LANGUAGE_TEST_FRAMEWORK_MAP: dict[str, str] = {
+    "python":     "pytest",
+    "go":         "go",
+    "kotlin":     "gradle",
+    "javascript": "jest",
+    "typescript": "jest",
+    "ruby":       "rspec",
+    "java":       "gradle",
+    "rust":       "cargo",
+    "c":          "c",
+    "cpp":        "cpp",
+}
+
+
 class TaskStatus(Enum):
     PENDING        = "pending"
     WRITING_TESTS  = "writing_tests"

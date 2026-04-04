@@ -269,7 +269,7 @@ class WorkspaceManager:
                     if summary:
                         file_summaries.append(summary)
 
-            # Fallback: target_files 경로가 브랜치에 없는 경우 (언어 불일치 등)
+            # Fallback: target_files 경로가 브랜치에 없는 경우
             # 브랜치에서 실제 추가/수정된 소스 파일을 찾아서 주입
             if not copied_files:
                 actual_files = self._list_branch_added_files(branch, dep.target_files)
@@ -316,8 +316,7 @@ class WorkspaceManager:
     ) -> list[str]:
         """브랜치에서 실제로 추가/수정된 소스 파일 목록을 반환한다 (tests/ 제외).
 
-        target_files 경로가 브랜치에 존재하지 않을 때 fallback으로 사용.
-        예: target_files가 Kotlin 경로인데 실제 생성된 건 Python 파일인 경우.
+        target_files 경로가 브랜치에 존재하지 않을 때 일반 안전장치로 사용.
         """
         try:
             # 브랜치의 마지막 커밋에서 추가/수정된 파일 확인

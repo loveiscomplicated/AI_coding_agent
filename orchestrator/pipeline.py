@@ -38,7 +38,7 @@ from agents.roles import TEST_WRITER, IMPLEMENTER, REVIEWER
 from agents.scoped_loop import ScopedReactLoop, ScopedResult
 from docker.runner import DockerTestRunner, RunResult, _detect_runtime
 from llm.base import Message, StopReason
-from orchestrator.task import Task, TaskStatus
+from orchestrator.task import Task, TaskStatus, LANGUAGE_TEST_FRAMEWORK_MAP
 from orchestrator.workspace import WorkspaceManager
 from tools.hotline_tools import register_workspace_context_dir, unregister_workspace_context_dir
 
@@ -499,9 +499,10 @@ class TDDPipeline:
         enriched_desc: str | None = None,
     ) -> ScopedResult:
         stop_check = (lambda: pause_ctrl.is_stopped) if pause_ctrl else None
+        _framework = LANGUAGE_TEST_FRAMEWORK_MAP.get(task.language, task.test_framework)
         loop = ScopedReactLoop(
             llm=self.agent_llm,
-            role=TEST_WRITER,
+            role=TEST_WRITER.render(task.language, _framework),
             workspace_dir=workspace.path,
             max_iterations=self.max_iterations,
             on_progress=on_progress,
@@ -532,9 +533,10 @@ class TDDPipeline:
         enriched_desc: str | None = None,
     ) -> ScopedResult:
         stop_check = (lambda: pause_ctrl.is_stopped) if pause_ctrl else None
+        _framework = LANGUAGE_TEST_FRAMEWORK_MAP.get(task.language, task.test_framework)
         loop = ScopedReactLoop(
             llm=self.implementer_llm,
-            role=IMPLEMENTER,
+            role=IMPLEMENTER.render(task.language, _framework),
             workspace_dir=workspace.path,
             max_iterations=self.max_iterations,
             on_progress=on_progress,
@@ -558,9 +560,10 @@ class TDDPipeline:
         pause_ctrl=None,
     ) -> ScopedResult:
         stop_check = (lambda: pause_ctrl.is_stopped) if pause_ctrl else None
+        _framework = LANGUAGE_TEST_FRAMEWORK_MAP.get(task.language, task.test_framework)
         loop = ScopedReactLoop(
             llm=self.agent_llm,
-            role=REVIEWER,
+            role=REVIEWER.render(task.language, _framework),
             workspace_dir=workspace.path,
             max_iterations=self.reviewer_max_iterations,
             on_progress=on_progress,

@@ -63,7 +63,7 @@ workspace/
 - 각 `acceptance_criteria` 항목을 **최소 1개의 테스트**로 커버하세요.
 - 정상 케이스, 경계값, 에러 케이스를 모두 포함하세요.
 - **테스트 프레임워크는 태스크 프롬프트에 명시된 것을 따르세요.** 해당 프레임워크의 표준 파일명·디렉토리 구조·컨벤션을 그대로 사용하세요.
-- **Python 커스텀 테스트 파일(pytest 미사용)의 종료 규약**: 반드시 `sys.exit(0)`(전체 성공) 또는 `sys.exit(1)`(하나 이상 실패)로 종료하세요. `sys.exit(passed_count)` 같이 통과 수로 종료하면 비정상 종료로 처리됩니다. 권장 보일러플레이트:
+- **{language} 커스텀 테스트 파일({test_framework} 미사용)의 종료 규약**: 반드시 `sys.exit(0)`(전체 성공) 또는 `sys.exit(1)`(하나 이상 실패)로 종료하세요. `sys.exit(passed_count)` 같이 통과 수로 종료하면 비정상 종료로 처리됩니다. 권장 보일러플레이트:
 
   ```python
   import sys
@@ -90,7 +90,7 @@ workspace/
   ```
 
 - **런타임 설치가 필요한 언어**(Rust, Java, Swift, PHP 등 Docker 이미지에 없을 수 있는 경우)는 `setup.sh`를 workspace 루트에 함께 작성하세요. 이 파일은 테스트 실행 전에 자동으로 실행됩니다.
-- **표준 이미지에 없는 Python 패키지**(bs4/beautifulsoup4, lxml, selenium, numpy 등)도 `setup.sh`에 `pip install` 명령으로 추가하세요. pytest, pyyaml은 이미 설치되어 있습니다.
+- **표준 이미지에 없는 Python 패키지**(bs4/beautifulsoup4, lxml, selenium, numpy 등)도 `setup.sh`에 `pip install` 명령으로 추가하세요. {test_framework}, pyyaml은 이미 설치되어 있습니다.
 
   ```sh
   # setup.sh 예시 (Rust)
@@ -102,6 +102,8 @@ workspace/
   #!/bin/sh
   pip install beautifulsoup4 lxml
   ```
+
+{build_instructions}
 
 ## 완료 형식
 
