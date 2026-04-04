@@ -17,7 +17,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -26,6 +26,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from docker.runner import (
     DockerTestRunner,
     RunResult,
+    _LANGUAGE_DOCKERFILE,
+    _LANGUAGE_IMAGE,
     _parse_failed_tests,
     _parse_summary,
 )
@@ -113,6 +115,31 @@ class TestParseSummary:
         summary = _parse_summary(stdout)
         assert "1 failure" in summary
 
+    # ctest
+    def test_ctest_passed(self):
+        stdout = (
+            "Test project /tmp/ws/_build\n"
+            "    Start 1: TestCoordinate\n"
+            "1/2 Test #1: TestCoordinate ...............   Passed    0.01 sec\n"
+            "    Start 2: TestPlace\n"
+            "2/2 Test #2: TestPlace ...................   Passed    0.01 sec\n"
+            "\n"
+            "100% tests passed, 0 tests failed out of 2\n"
+        )
+        summary = _parse_summary(stdout)
+        assert "tests passed" in summary
+        assert "out of 2" in summary
+
+    def test_ctest_failed(self):
+        stdout = (
+            "1/2 Test #1: TestCoordinate ...............   Passed    0.01 sec\n"
+            "2/2 Test #2: TestPlace ...................***Failed    0.01 sec\n"
+            "\n"
+            "50% tests passed, 1 tests failed out of 2\n"
+        )
+        summary = _parse_summary(stdout)
+        assert "1 tests failed" in summary
+
     # 공통
     def test_falls_back_to_last_nonempty_line(self):
         stdout = "some unexpected output\nerror line"
@@ -198,6 +225,64 @@ class TestParseFailedTests:
         stdout = "4 examples, 0 failures\n"
         assert _parse_failed_tests(stdout) == []
 
+    # ctest
+    def test_ctest_failure(self):
+        stdout = (
+            "1/2 Test #1: TestCoordinate ...............   Passed    0.01 sec\n"
+            "2/2 Test #2: TestPlace ...................***Failed    0.01 sec\n"
+            "  2 - TestPlace (Failed)\n"
+        )
+        failed = _parse_failed_tests(stdout)
+        assert "TestPlace" in failed
+
+    def test_ctest_no_failures(self):
+        stdout = "100% tests passed, 0 tests failed out of 2\n"
+        assert _parse_failed_tests(stdout) == []
+
+
+# ── 언어 → 이미지 매핑 테이블 ──────────────────────────────────────────────────
+
+
+class TestLanguageImageMapping:
+    """_LANGUAGE_IMAGE / _LANGUAGE_DOCKERFILE 테이블 정합성 검증."""
+
+    def test_python_maps_to_agent_runner_python(self):
+        assert _LANGUAGE_IMAGE["python"] == "agent-runner-python"
+
+    def test_go_maps_to_agent_runner_go(self):
+        assert _LANGUAGE_IMAGE["go"] == "agent-runner-go"
+
+    def test_kotlin_maps_to_agent_runner_kotlin(self):
+        assert _LANGUAGE_IMAGE["kotlin"] == "agent-runner-kotlin"
+
+    def test_javascript_maps_to_agent_runner_javascript(self):
+        assert _LANGUAGE_IMAGE["javascript"] == "agent-runner-javascript"
+
+    def test_typescript_reuses_javascript_image(self):
+        assert _LANGUAGE_IMAGE["typescript"] == _LANGUAGE_IMAGE["javascript"]
+
+    def test_java_reuses_kotlin_image(self):
+        assert _LANGUAGE_IMAGE["java"] == _LANGUAGE_IMAGE["kotlin"]
+
+    def test_c_maps_to_agent_runner_c(self):
+        assert _LANGUAGE_IMAGE["c"] == "agent-runner-c"
+
+    def test_cpp_maps_to_agent_runner_cpp(self):
+        assert _LANGUAGE_IMAGE["cpp"] == "agent-runner-cpp"
+
+    def test_all_image_names_follow_agent_runner_prefix(self):
+        for lang, image in _LANGUAGE_IMAGE.items():
+            assert image.startswith("agent-runner-"), (
+                f"언어 '{lang}'의 이미지 '{image}'가 'agent-runner-' 접두사를 갖지 않음"
+            )
+
+    def test_every_image_has_matching_dockerfile(self):
+        """_LANGUAGE_IMAGE에 등록된 언어는 _LANGUAGE_DOCKERFILE에도 있어야 한다."""
+        for lang in _LANGUAGE_IMAGE:
+            assert lang in _LANGUAGE_DOCKERFILE, (
+                f"언어 '{lang}'에 대한 Dockerfile 매핑 없음"
+            )
+
 
 # ── DockerTestRunner (모킹) ───────────────────────────────────────────────────
 
@@ -206,14 +291,17 @@ class TestDockerTestRunnerMocked:
     """Docker 데몬 없이 subprocess를 모킹해 로직을 검증한다."""
 
     def _make_runner(self):
-        return DockerTestRunner(image="test-image", timeout=30)
+        return DockerTestRunner(timeout=30)
 
-    def _mock_docker_info_ok(self):
-        return MagicMock(returncode=0, stdout="Server Version: 28.0", stderr="")
+    def _mock_ok(self, stdout="", stderr=""):
+        return MagicMock(returncode=0, stdout=stdout, stderr=stderr)
+
+    def _mock_fail(self, stderr=""):
+        return MagicMock(returncode=1, stdout="", stderr=stderr)
 
     @patch("docker.runner.subprocess.run")
     def test_returns_failed_when_workspace_missing(self, mock_run, tmp_path):
-        mock_run.return_value = self._mock_docker_info_ok()
+        mock_run.return_value = self._mock_ok(stdout="Server Version: 28.0")
         runner = self._make_runner()
         result = runner.run(tmp_path / "nonexistent")
         assert result.passed is False
@@ -223,10 +311,10 @@ class TestDockerTestRunnerMocked:
     @patch("docker.runner.subprocess.run")
     def test_returns_failed_when_image_not_built(self, mock_run, tmp_path):
         mock_run.side_effect = [
-            MagicMock(returncode=0),                           # docker info (run)
-            MagicMock(returncode=1),                           # docker image inspect → 없음
-            MagicMock(returncode=0),                           # docker info (build_image 내부)
-            MagicMock(returncode=1, stderr="build failed"),    # docker build → 실패
+            self._mock_ok(),                              # docker info
+            self._mock_fail(),                            # docker image inspect → 없음
+            self._mock_ok(),                              # docker info (build_image 내부)
+            self._mock_fail(stderr="build failed"),       # docker build → 실패
         ]
         runner = self._make_runner()
         result = runner.run(tmp_path)
@@ -236,9 +324,9 @@ class TestDockerTestRunnerMocked:
     @patch("docker.runner.subprocess.run")
     def test_returns_passed_on_zero_returncode(self, mock_run, tmp_path):
         mock_run.side_effect = [
-            MagicMock(returncode=0),
-            MagicMock(returncode=0),
-            MagicMock(returncode=0, stdout="3 passed in 0.05s\n", stderr=""),
+            self._mock_ok(),
+            self._mock_ok(),
+            self._mock_ok(stdout="3 passed in 0.05s\n"),
         ]
         runner = self._make_runner()
         result = runner.run(tmp_path)
@@ -249,8 +337,8 @@ class TestDockerTestRunnerMocked:
     def test_returns_failed_on_nonzero_returncode(self, mock_run, tmp_path):
         stdout = "FAILED tests/test_foo.py::test_bar - AssertionError\n1 failed in 0.03s\n"
         mock_run.side_effect = [
-            MagicMock(returncode=0),
-            MagicMock(returncode=0),
+            self._mock_ok(),
+            self._mock_ok(),
             MagicMock(returncode=1, stdout=stdout, stderr=""),
         ]
         runner = self._make_runner()
@@ -261,8 +349,8 @@ class TestDockerTestRunnerMocked:
     @patch("docker.runner.subprocess.run")
     def test_handles_timeout(self, mock_run, tmp_path):
         mock_run.side_effect = [
-            MagicMock(returncode=0),
-            MagicMock(returncode=0),
+            self._mock_ok(),
+            self._mock_ok(),
             subprocess.TimeoutExpired(cmd="docker run", timeout=30),
         ]
         runner = self._make_runner()
@@ -271,21 +359,121 @@ class TestDockerTestRunnerMocked:
         assert "타임아웃" in result.summary
 
     @patch("docker.runner.subprocess.run")
-    def test_raises_when_docker_not_running(self, mock_run, tmp_path):
+    def test_returns_failed_when_docker_not_running(self, mock_run, tmp_path):
+        """Docker 데몬 미실행 시 passed=False RunResult를 반환한다."""
         mock_run.return_value = MagicMock(returncode=1, stderr="Cannot connect")
         runner = self._make_runner()
-        with pytest.raises(RuntimeError, match="Docker 데몬"):
-            runner.run(tmp_path)
+        result = runner.run(tmp_path)
+        assert result.passed is False
+        assert "Docker" in result.summary
 
     @patch("docker.runner.subprocess.run")
     def test_build_image_raises_on_failure(self, mock_run):
         mock_run.side_effect = [
-            MagicMock(returncode=0),
-            MagicMock(returncode=1, stderr="build failed"),
+            self._mock_ok(),                              # docker info
+            self._mock_fail(stderr="build failed"),       # docker build
         ]
         runner = self._make_runner()
         with pytest.raises(RuntimeError, match="빌드 실패"):
-            runner.build_image()
+            runner.build_image("python")
+
+    @patch("docker.runner.subprocess.run")
+    def test_unsupported_language_returns_error(self, mock_run, tmp_path):
+        """매핑 테이블에 없는 언어는 즉시 passed=False를 반환한다."""
+        runner = self._make_runner()
+        result = runner.run(tmp_path, language="brainfuck")
+        assert result.passed is False
+        assert "UNSUPPORTED_LANGUAGE" in result.summary
+        mock_run.assert_not_called()  # Docker 호출 없어야 함
+
+    @patch("docker.runner.subprocess.run")
+    def test_build_image_raises_on_unknown_language(self, mock_run):
+        runner = self._make_runner()
+        with pytest.raises(RuntimeError, match="지원하지 않는 언어"):
+            runner.build_image("cobol")
+
+
+# ── 언어별 올바른 이미지 선택 검증 ────────────────────────────────────────────
+
+
+class TestLanguageImageSelection:
+    """run() 호출 시 language에 따라 올바른 agent-runner-{lang} 이미지가 선택되는지 검증."""
+
+    def _mock_sequence(self, stdout="3 passed in 0.05s\n"):
+        return [
+            MagicMock(returncode=0),                                     # docker info
+            MagicMock(returncode=0),                                     # image inspect (exists)
+            MagicMock(returncode=0, stdout=stdout, stderr=""),           # docker run
+        ]
+
+    def _get_docker_run_cmd(self, mock_run):
+        """mock_run의 세 번째 호출(docker run) 커맨드 리스트를 반환한다."""
+        return mock_run.call_args_list[2][0][0]
+
+    @patch("docker.runner.subprocess.run")
+    def test_python_uses_agent_runner_python(self, mock_run, tmp_path):
+        mock_run.side_effect = self._mock_sequence()
+        DockerTestRunner(timeout=30).run(tmp_path, language="python")
+        cmd = self._get_docker_run_cmd(mock_run)
+        assert "agent-runner-python" in cmd
+
+    @patch("docker.runner.subprocess.run")
+    def test_kotlin_uses_agent_runner_kotlin(self, mock_run, tmp_path):
+        mock_run.side_effect = self._mock_sequence()
+        DockerTestRunner(timeout=30).run(tmp_path, language="kotlin")
+        cmd = self._get_docker_run_cmd(mock_run)
+        assert "agent-runner-kotlin" in cmd
+
+    @patch("docker.runner.subprocess.run")
+    def test_javascript_uses_agent_runner_javascript(self, mock_run, tmp_path):
+        mock_run.side_effect = self._mock_sequence()
+        DockerTestRunner(timeout=30).run(tmp_path, language="javascript")
+        cmd = self._get_docker_run_cmd(mock_run)
+        assert "agent-runner-javascript" in cmd
+
+    @patch("docker.runner.subprocess.run")
+    def test_typescript_uses_agent_runner_javascript(self, mock_run, tmp_path):
+        mock_run.side_effect = self._mock_sequence()
+        DockerTestRunner(timeout=30).run(tmp_path, language="typescript")
+        cmd = self._get_docker_run_cmd(mock_run)
+        assert "agent-runner-javascript" in cmd
+
+    @patch("docker.runner.subprocess.run")
+    def test_go_uses_agent_runner_go(self, mock_run, tmp_path):
+        mock_run.side_effect = self._mock_sequence()
+        DockerTestRunner(timeout=30).run(tmp_path, language="go")
+        cmd = self._get_docker_run_cmd(mock_run)
+        assert "agent-runner-go" in cmd
+
+    @patch("docker.runner.subprocess.run")
+    def test_c_uses_agent_runner_c(self, mock_run, tmp_path):
+        mock_run.side_effect = self._mock_sequence()
+        DockerTestRunner(timeout=30).run(tmp_path, language="c")
+        cmd = self._get_docker_run_cmd(mock_run)
+        assert "agent-runner-c" in cmd
+
+    @patch("docker.runner.subprocess.run")
+    def test_cpp_uses_agent_runner_cpp(self, mock_run, tmp_path):
+        mock_run.side_effect = self._mock_sequence()
+        DockerTestRunner(timeout=30).run(tmp_path, language="cpp")
+        cmd = self._get_docker_run_cmd(mock_run)
+        assert "agent-runner-cpp" in cmd
+
+    @patch("docker.runner.subprocess.run")
+    def test_isolation_options_preserved_for_all_languages(self, mock_run, tmp_path):
+        """--network none, --memory 512m, --cpus 1은 모든 언어에 동일하게 적용된다."""
+        for lang in ("python", "go", "kotlin", "javascript", "c", "cpp"):
+            mock_run.side_effect = [
+                MagicMock(returncode=0),
+                MagicMock(returncode=0),
+                MagicMock(returncode=0, stdout="ok\n", stderr=""),
+            ]
+            DockerTestRunner(timeout=30).run(tmp_path, language=lang)
+            cmd = self._get_docker_run_cmd(mock_run)
+            cmd_str = " ".join(cmd)
+            assert "--network none" in cmd_str, f"{lang}: --network none 없음"
+            assert "--memory 512m" in cmd_str, f"{lang}: --memory 512m 없음"
+            assert "--cpus 1" in cmd_str, f"{lang}: --cpus 1 없음"
 
 
 # ── test_framework 파라미터 전달 검증 ─────────────────────────────────────────
@@ -294,35 +482,45 @@ class TestDockerTestRunnerMocked:
 class TestTestFrameworkParameter:
     """test_framework 값이 Docker 명령의 -e TEST_FRAMEWORK=... 로 전달되는지 검증."""
 
-    def _run_with_framework(self, mock_run, tmp_path, framework: str):
+    def _run_with_framework(self, mock_run, tmp_path, framework: str, language: str = "python"):
         mock_run.side_effect = [
             MagicMock(returncode=0),                                          # docker info
             MagicMock(returncode=0),                                          # image inspect
             MagicMock(returncode=0, stdout="3 passed in 0.05s\n", stderr=""), # docker run
         ]
-        runner = DockerTestRunner(image="test-image", timeout=30)
-        runner.run(tmp_path, test_framework=framework)
-        # 세 번째 호출(docker run)의 args 반환
-        return mock_run.call_args_list[2][0][0]  # positional args[0] = command list
+        runner = DockerTestRunner(timeout=30)
+        runner.run(tmp_path, test_framework=framework, language=language)
+        return mock_run.call_args_list[2][0][0]  # docker run 커맨드 리스트
 
     @patch("docker.runner.subprocess.run")
     def test_default_framework_is_pytest(self, mock_run, tmp_path):
         cmd = self._run_with_framework(mock_run, tmp_path, "pytest")
-        assert "-e" in cmd
-        env_idx = cmd.index("-e", cmd.index("--rm"))
-        # TEST_FRAMEWORK=pytest 가 포함되어 있어야 함
-        env_args = " ".join(cmd)
-        assert "TEST_FRAMEWORK=pytest" in env_args
+        assert "TEST_FRAMEWORK=pytest" in " ".join(cmd)
 
     @patch("docker.runner.subprocess.run")
     def test_jest_framework_passed(self, mock_run, tmp_path):
-        cmd = self._run_with_framework(mock_run, tmp_path, "jest")
+        cmd = self._run_with_framework(mock_run, tmp_path, "jest", language="javascript")
         assert "TEST_FRAMEWORK=jest" in " ".join(cmd)
 
     @patch("docker.runner.subprocess.run")
     def test_go_framework_passed(self, mock_run, tmp_path):
-        cmd = self._run_with_framework(mock_run, tmp_path, "go")
+        cmd = self._run_with_framework(mock_run, tmp_path, "go", language="go")
         assert "TEST_FRAMEWORK=go" in " ".join(cmd)
+
+    @patch("docker.runner.subprocess.run")
+    def test_gradle_framework_passed(self, mock_run, tmp_path):
+        cmd = self._run_with_framework(mock_run, tmp_path, "gradle", language="kotlin")
+        assert "TEST_FRAMEWORK=gradle" in " ".join(cmd)
+
+    @patch("docker.runner.subprocess.run")
+    def test_c_framework_passed(self, mock_run, tmp_path):
+        cmd = self._run_with_framework(mock_run, tmp_path, "c", language="c")
+        assert "TEST_FRAMEWORK=c" in " ".join(cmd)
+
+    @patch("docker.runner.subprocess.run")
+    def test_cpp_framework_passed(self, mock_run, tmp_path):
+        cmd = self._run_with_framework(mock_run, tmp_path, "cpp", language="cpp")
+        assert "TEST_FRAMEWORK=cpp" in " ".join(cmd)
 
     @patch("docker.runner.subprocess.run")
     def test_arbitrary_command_passed(self, mock_run, tmp_path):
@@ -334,6 +532,18 @@ class TestTestFrameworkParameter:
     def test_rspec_framework_passed(self, mock_run, tmp_path):
         cmd = self._run_with_framework(mock_run, tmp_path, "rspec")
         assert "TEST_FRAMEWORK=rspec" in " ".join(cmd)
+
+    @patch("docker.runner.subprocess.run")
+    def test_language_map_used_when_framework_omitted(self, mock_run, tmp_path):
+        """test_framework 미지정 시 LANGUAGE_TEST_FRAMEWORK_MAP이 자동 적용된다."""
+        mock_run.side_effect = [
+            MagicMock(returncode=0),
+            MagicMock(returncode=0),
+            MagicMock(returncode=0, stdout="ok\n", stderr=""),
+        ]
+        DockerTestRunner(timeout=30).run(tmp_path, language="kotlin")
+        cmd = mock_run.call_args_list[2][0][0]
+        assert "TEST_FRAMEWORK=gradle" in " ".join(cmd)
 
 
 # ── RunResult 데이터클래스 ────────────────────────────────────────────────────

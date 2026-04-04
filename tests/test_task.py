@@ -18,7 +18,7 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from orchestrator.task import Task, TaskStatus, load_tasks, save_tasks
+from orchestrator.task import Task, TaskStatus, load_tasks, save_tasks, LANGUAGE_TEST_FRAMEWORK_MAP
 
 
 # ── 픽스처 ────────────────────────────────────────────────────────────────────
@@ -199,6 +199,22 @@ class TestLoadTasks:
 
 
 class TestSaveTasks:
+    def test_language_field_missing_falls_back_to_python(self, tmp_path):
+        """language 필드가 없는 기존 tasks.yaml은 'python'으로 폴백된다."""
+        path = tmp_path / "tasks.yaml"
+        # language 필드 없이 저장
+        path.write_text(
+            "tasks:\n"
+            "  - id: task-001\n"
+            "    title: 구형 태스크\n"
+            "    description: language 필드 없음\n"
+            "    acceptance_criteria:\n"
+            "      - 조건 하나\n",
+            encoding="utf-8",
+        )
+        tasks = load_tasks(path)
+        assert tasks[0].language == "python"
+
     def test_saves_and_reloads(self, tmp_path, minimal_task_dict):
         task = Task.from_dict(minimal_task_dict)
         task.status = TaskStatus.DONE
@@ -224,3 +240,77 @@ class TestSaveTasks:
         deep_path = tmp_path / "a" / "b" / "c" / "tasks.yaml"
         save_tasks([task], deep_path)
         assert deep_path.exists()
+
+
+# ── language 필드 ─────────────────────────────────────────────────────────────
+
+
+class TestLanguageField:
+    def test_default_language_is_python(self):
+        task = Task.from_dict({
+            "id": "x", "title": "t", "description": "d",
+            "acceptance_criteria": ["c"],
+        })
+        assert task.language == "python"
+
+    def test_language_field_preserved(self):
+        for lang in ("python", "kotlin", "javascript", "go", "ruby", "c", "cpp"):
+            task = Task.from_dict({
+                "id": "x", "title": "t", "description": "d",
+                "acceptance_criteria": ["c"],
+                "language": lang,
+            })
+            assert task.language == lang, f"language='{lang}' 보존 실패"
+
+    def test_language_round_trips_through_to_dict(self):
+        task = Task.from_dict({
+            "id": "x", "title": "t", "description": "d",
+            "acceptance_criteria": ["c"],
+            "language": "kotlin",
+        })
+        restored = Task.from_dict(task.to_dict())
+        assert restored.language == "kotlin"
+
+    def test_language_saved_and_loaded_from_yaml(self, tmp_path):
+        task = Task.from_dict({
+            "id": "task-kt", "title": "Kotlin 태스크", "description": "d",
+            "acceptance_criteria": ["c"],
+            "language": "kotlin",
+        })
+        path = tmp_path / "tasks.yaml"
+        save_tasks([task], path)
+        loaded = load_tasks(path)
+        assert loaded[0].language == "kotlin"
+
+
+# ── LANGUAGE_TEST_FRAMEWORK_MAP ───────────────────────────────────────────────
+
+
+class TestLanguageTestFrameworkMap:
+    def test_python_maps_to_pytest(self):
+        assert LANGUAGE_TEST_FRAMEWORK_MAP["python"] == "pytest"
+
+    def test_go_maps_to_go(self):
+        assert LANGUAGE_TEST_FRAMEWORK_MAP["go"] == "go"
+
+    def test_kotlin_maps_to_gradle(self):
+        assert LANGUAGE_TEST_FRAMEWORK_MAP["kotlin"] == "gradle"
+
+    def test_javascript_maps_to_jest(self):
+        assert LANGUAGE_TEST_FRAMEWORK_MAP["javascript"] == "jest"
+
+    def test_typescript_maps_to_jest(self):
+        assert LANGUAGE_TEST_FRAMEWORK_MAP["typescript"] == "jest"
+
+    def test_ruby_maps_to_rspec(self):
+        assert LANGUAGE_TEST_FRAMEWORK_MAP["ruby"] == "rspec"
+
+    def test_c_maps_to_c(self):
+        assert LANGUAGE_TEST_FRAMEWORK_MAP["c"] == "c"
+
+    def test_cpp_maps_to_cpp(self):
+        assert LANGUAGE_TEST_FRAMEWORK_MAP["cpp"] == "cpp"
+
+    def test_all_values_are_nonempty_strings(self):
+        for lang, fw in LANGUAGE_TEST_FRAMEWORK_MAP.items():
+            assert isinstance(fw, str) and fw, f"언어 '{lang}'의 매핑값이 비어 있음"
