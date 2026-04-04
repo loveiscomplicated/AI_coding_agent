@@ -224,12 +224,22 @@ class TDDPipeline:
         )
 
     def _check_dependency_files(self, task: Task, all_tasks: list[Task], base_path: str) -> list[str]:
-        """선행 태스크의 target_files가 존재하는지 확인. 없는 파일 경로 리스트 반환."""
+        """선행 태스크의 target_files가 존재하는지 확인. 없는 파일 경로 리스트 반환.
+
+        완료된(DONE) 선행 태스크는 스킵한다 — 산출물이 git 브랜치에 존재하며,
+        inject_dependency_context()가 git show로 읽어 workspace에 주입하기 때문이다.
+        auto_merge 없이도 정상 동작해야 하므로 filesystem 존재 여부가 아닌
+        태스크 상태를 기준으로 판단한다.
+        """
         missing = []
         for dep_id in (task.depends_on or []):
             dep_task = next((t for t in all_tasks if t.id == dep_id), None)
             if dep_task is None:
                 continue
+            # 완료된 태스크는 브랜치에 산출물 존재 → workspace 주입으로 처리
+            if dep_task.status == TaskStatus.DONE:
+                continue
+            # 미완료 태스크: filesystem에서 확인 (수동 추가 등 대비)
             for filepath in (dep_task.target_files or []):
                 full_path = os.path.join(base_path, filepath)
                 if not os.path.exists(full_path):

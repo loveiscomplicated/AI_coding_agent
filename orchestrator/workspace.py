@@ -269,6 +269,30 @@ class WorkspaceManager:
                     if summary:
                         file_summaries.append(summary)
 
+            # Fallback: target_files 경로가 브랜치에 없는 경우 (언어 불일치 등)
+            # 브랜치에서 실제 추가/수정된 소스 파일을 찾아서 주입
+            if not copied_files:
+                actual_files = self._list_branch_added_files(branch, dep.target_files)
+                for rel_path in actual_files:
+                    content = self._read_from_branch(branch, rel_path)
+                    if content is None:
+                        continue
+                    dest = self.src_dir / rel_path
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_text(content, encoding="utf-8")
+                    copied_files.append(rel_path)
+                    self._ensure_init_files(dest)
+                    if rel_path.endswith(".py"):
+                        summary = _extract_python_signatures(content, rel_path)
+                        if summary:
+                            file_summaries.append(summary)
+                if copied_files:
+                    logger.info(
+                        "[%s] 선행 태스크 %s: target_files 경로 불일치 → "
+                        "브랜치 실제 파일 %d개 fallback 주입",
+                        self.task.id, dep.id, len(copied_files),
+                    )
+
             if copied_files:
                 artifacts_lines.append(f"\n## {dep.id}: {dep.title}\n")
                 artifacts_lines.append(f"**파일**: {', '.join(copied_files)}\n")
@@ -286,6 +310,41 @@ class WorkspaceManager:
             (context_dir / "dependency_artifacts.md").write_text(
                 "\n".join(artifacts_lines), encoding="utf-8",
             )
+
+    def _list_branch_added_files(
+        self, branch: str, target_files: list[str],
+    ) -> list[str]:
+        """브랜치에서 실제로 추가/수정된 소스 파일 목록을 반환한다 (tests/ 제외).
+
+        target_files 경로가 브랜치에 존재하지 않을 때 fallback으로 사용.
+        예: target_files가 Kotlin 경로인데 실제 생성된 건 Python 파일인 경우.
+        """
+        try:
+            # 브랜치의 마지막 커밋에서 추가/수정된 파일 확인
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "--diff-filter=AM",
+                 f"{branch}~1", branch],
+                capture_output=True, text=True, cwd=self.repo_path, timeout=10,
+            )
+            if result.returncode != 0:
+                return []
+        except Exception as e:
+            logger.debug("git diff 실패 (%s): %s", branch, e)
+            return []
+
+        files = []
+        for line in result.stdout.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # tests/ 는 제외 (테스트 파일은 후속 태스크가 직접 생성)
+            if line.startswith("tests/") or line.startswith("test_"):
+                continue
+            # 소스 파일만 (.py, .kt, .java, .js, .ts 등)
+            if any(line.endswith(ext) for ext in
+                   (".py", ".kt", ".java", ".js", ".ts", ".go", ".rb")):
+                files.append(line)
+        return files
 
     def _read_from_branch(self, branch: str, rel_path: str) -> str | None:
         """git show 로 특정 브랜치의 파일 내용을 읽는다. 실패 시 None."""
