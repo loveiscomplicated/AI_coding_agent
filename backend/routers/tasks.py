@@ -50,36 +50,39 @@ _DRAFT_SYSTEM_PROMPT = """\
   - "frontend": HTML/CSS/JS/React/Vue 등 브라우저에서 실행되는 UI 코드. 멀티 에이전트 파이프라인이 실행하지 않으므로 수락 기준을 자동으로 검증할 수 없음. 이 경우에도 태스크를 생성하되, task_type을 "frontend"로 설정할 것.
   - "backend": 서버, CLI, 라이브러리, 테스트, 인프라 등 나머지 모든 것
 
-[분할 예시]
-나쁜 예 — 파일 7개를 한 태스크에:
-  task-001: MapService 전체 (coordinate.py, place.py, route.py, route_step.py, map_service.py, fake_map_service.py)
-
-좋은 예 — 태스크 3개로 분리:
-  task-001: 도메인 모델 정의 (coordinate.py, place.py, route.py)
-  task-002: MapService 인터페이스 (map_service.py, route_step.py) — depends_on: [task-001]
-  task-003: 테스트 스텁 구현 (fake_map_service.py) — depends_on: [task-002]
-
 [language 필드 (필수)]
 각 태스크에 `language` 필드를 반드시 포함한다.
-- context_doc에서 프로젝트의 주요 프로그래밍 언어를 파악한다.
-- 값: "python", "kotlin", "javascript", "go" 등 소문자
+- context_doc에서 프로젝트의 주요 프로그래밍 언어를 먼저 파악한다.
+- 파악한 언어를 해당 태스크의 `language` 필드에 지정한다.
+- 값: "python", "kotlin", "javascript", "typescript", "go", "ruby", "java" 등 소문자
+- 같은 프로젝트라도 태스크별로 언어가 다를 수 있다 (예: 백엔드 Go, 프론트엔드 TypeScript).
 
-[중요: Python 구현 원칙]
-현재 TDD 파이프라인은 Python(pytest)만 지원한다.
-프로젝트의 원래 언어가 Kotlin, Java, Go 등이더라도 다음 규칙을 따른다:
+[target_files 규칙]
+- 프로젝트의 language 필드에 맞는 파일 확장자와 네이밍 컨벤션을 사용하라.
+  - Python: snake_case .py (예: fake_map_service.py)
+  - Kotlin/Java: PascalCase .kt/.java (예: FakeMapService.kt)
+  - Go: snake_case .go (예: fake_map_service.go)
+  - JavaScript/TypeScript: camelCase 또는 PascalCase .js/.ts/.tsx
+- 깊은 패키지 경로 금지: 파일명만 또는 짧은 상대 경로만 사용한다.
+  - 좋은 예: "FakeMapService.kt", "src/map_service.py"
+  - 나쁜 예: "app/src/main/java/com/example/arnavigation/data/fake/FakeMapService.kt"
 
-1. task_type은 "backend"로 유지한다 (파이프라인이 Python으로 로직을 검증).
-   "frontend"는 오직 브라우저 UI 코드에만 사용한다.
-2. target_files는 반드시 Python 파일명(.py)으로 작성한다.
-   - snake_case 파일명 사용: "fake_map_service.py" (O), "FakeMapService.kt" (X)
-   - 깊은 패키지 경로 금지: "coordinate.py" (O), "app/src/main/java/com/example/Coordinate.kt" (X)
-3. description과 acceptance_criteria는 언어 중립적으로 작성한다.
-   - 좋은 예: "distanceTo(other) 메서드가 두 좌표 사이 미터 단위 거리를 반환한다"
-   - 나쁜 예: "Flow<Float> 타입으로 방위각을 emit한다" (Kotlin 전용 API)
-   - 나쁜 예: "SensorManager.getDefaultSensor()를 호출한다" (Android SDK 전용)
-4. 프레임워크/플랫폼 전용 API 대신 핵심 로직만 기술한다.
-   - "센서 매니저가 방위각을 제공한다" → 테스트 가능
-   - "Android SensorManager를 사용하여 TYPE_ROTATION_VECTOR를 등록한다" → 테스트 불가
+[acceptance_criteria — 언어 중립적으로 작성]
+수락 기준은 언어·프레임워크·플랫폼 전용 API를 언급하지 않는 행동 중심 문장으로 작성한다.
+- 좋은 예: "distanceTo(other) 메서드가 두 좌표 사이 미터 단위 거리를 반환한다"
+- 좋은 예: "빈 입력에 대해 빈 리스트를 반환한다"
+- 나쁜 예: "Flow<Float> 타입으로 방위각을 emit한다" (Kotlin 전용 API)
+- 나쁜 예: "Python list를 반환한다" (언어 종속 타입 명시)
+- 나쁜 예: "SensorManager.getDefaultSensor()를 호출한다" (플랫폼 전용 API)
+
+[분할 예시]
+나쁜 예 — 파일 7개를 한 태스크에 (Kotlin 프로젝트):
+  task-001: MapService 전체 (Coordinate.kt, Place.kt, Route.kt, RouteStep.kt, MapService.kt, FakeMapService.kt)
+
+좋은 예 — 태스크 3개로 분리:
+  task-001: 도메인 모델 정의 (Coordinate.kt, Place.kt, Route.kt)
+  task-002: MapService 인터페이스 (MapService.kt, RouteStep.kt) — depends_on: [task-001]
+  task-003: 테스트 스텁 구현 (FakeMapService.kt) — depends_on: [task-002]
 
 [수락 기준 자체 검증]
 생성한 각 태스크의 acceptance_criteria를 검증한다:
@@ -92,7 +95,7 @@ _DRAFT_SYSTEM_PROMPT = """\
 
 [출력 형식]
 다음 JSON만 출력하세요. 마크다운 코드블록, 설명 텍스트 없이 순수 JSON만:
-{"tasks": [{"id": "task-001", "title": "...", "description": "...", "acceptance_criteria": ["..."], "target_files": ["coordinate.py", "place.py"], "depends_on": [], "task_type": "backend", "language": "python"}]}
+{"tasks": [{"id": "task-001", "title": "...", "description": "...", "acceptance_criteria": ["..."], "target_files": ["Coordinate.kt", "Place.kt"], "depends_on": [], "task_type": "backend", "language": "kotlin"}]}
 """
 
 router = APIRouter()
@@ -106,24 +109,11 @@ class DraftRequest(BaseModel):
 
 # ── 엔드포인트 ────────────────────────────────────────────────────────────────
 
-_NON_PY_EXTENSIONS = (".kt", ".java", ".swift", ".go", ".rb", ".ts", ".js", ".cs")
-
-
-def _to_snake_case(name: str) -> str:
-    """PascalCase/camelCase → snake_case 변환."""
-    # "FakeMapService" → "fake_map_service"
-    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
-    s = re.sub(r"([a-z\d])([A-Z])", r"\1_\2", s)
-    return s.lower()
-
-
 def _sanitize_task_draft(task: dict, warnings: list[str]) -> None:
-    """LLM이 생성한 태스크 초안의 target_files 경로와 언어 설정을 보정한다.
+    """LLM이 생성한 태스크 초안의 target_files 깊은 경로를 정리한다.
 
     자동 보정:
-      - 비-Python 확장자(.kt, .java 등) → .py 로 변환
       - 깊은 패키지 경로(app/src/main/...) → 파일명만 추출
-      - PascalCase 파일명 → snake_case 변환
     경고만:
       - target_files 보정이 발생한 경우 원래 경로를 warnings에 기록
     """
@@ -133,22 +123,8 @@ def _sanitize_task_draft(task: dict, warnings: list[str]) -> None:
 
     for fpath in target_files:
         original = fpath
-        # 1) 깊은 경로에서 파일명만 추출: "app/src/.../FakeMapService.kt" → "FakeMapService.kt"
+        # 깊은 경로에서 파일명만 추출: "app/src/.../FakeMapService.kt" → "FakeMapService.kt"
         basename = fpath.rsplit("/", 1)[-1] if "/" in fpath else fpath
-
-        # 2) 비-Python 확장자 → .py
-        for ext in _NON_PY_EXTENSIONS:
-            if basename.endswith(ext):
-                basename = basename[: -len(ext)] + ".py"
-                break
-
-        # 3) PascalCase → snake_case (확장자 분리 후 변환)
-        name_part, _, ext_part = basename.rpartition(".")
-        if name_part and ext_part:
-            snake = _to_snake_case(name_part)
-            basename = f"{snake}.{ext_part}"
-        elif basename:  # 확장자 없는 경우
-            basename = _to_snake_case(basename) + ".py"
 
         sanitized_files.append(basename)
         if basename != original:
@@ -158,7 +134,7 @@ def _sanitize_task_draft(task: dict, warnings: list[str]) -> None:
         original_list = ", ".join(target_files)
         fixed_list = ", ".join(sanitized_files)
         warnings.append(
-            f"target_files 자동 보정: [{original_list}] → [{fixed_list}]"
+            f"target_files 깊은 경로 정리: [{original_list}] → [{fixed_list}]"
         )
         task["target_files"] = sanitized_files
 
