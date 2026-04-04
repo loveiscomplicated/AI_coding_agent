@@ -1,6 +1,6 @@
 # Multi-Agent Development System
 
-> 프로젝트 문서 v1.7 | 2026-04-03 — Discord 핫라인 안정화 + 방어적 폴링 + data/ → agent-data/ 마이그레이션
+> 프로젝트 문서 v1.8 | 2026-04-04 — 의존성 pre-check 수정 + 크로스 언어 target_files 자동 보정 + 테스트 통과 판정 강화
 
 ---
 
@@ -90,8 +90,13 @@ agent-data/tasks.yaml (수동 정의 또는 Sonnet 자동 생성 후 승인)
     │
     ▼ for each Task:
     │
+    ├─► PRE-CHECK: 의존성 산출물 확인
+    │       - 선행 태스크 DONE → 스킵 (산출물은 브랜치에 존재, inject 시 git show로 읽음)
+    │       - 선행 태스크 미완료 → filesystem 확인 → 없으면 [DEPENDENCY_MISSING] 즉시 실패
+    │       - inject_dependency_context: target_files 경로 실패 시 git diff fallback
+    │
     ├─► STEP 1: TestWriter (LLM_MODEL_FAST + ScopedReactLoop)
-    │       input:  task.description + acceptance_criteria
+    │       input:  task.description + acceptance_criteria + enriched description (선행 산출물 정보)
     │       output: workspace/tests/ 에 pytest 테스트 파일 작성
     │       tools:  read_file, write_file, list_directory, search_files
     │
@@ -142,14 +147,14 @@ AI_coding_agent/
 │   └── ollama_client.py       # Ollama 로컬 서버 클라이언트
 ├── orchestrator/
 │   ├── task.py                # Task 데이터 모델 + TaskStatus enum + YAML 로드/저장
-│   ├── pipeline.py            # TDDPipeline 상태 머신
+│   ├── pipeline.py            # TDDPipeline 상태 머신 (의존성 pre-check, enriched description)
 │   ├── task_redesign.py       # 태스크 재설계 유틸리티 (실험적)
-│   ├── workspace.py           # WorkspaceManager (tmp 생성/정리)
+│   ├── workspace.py           # WorkspaceManager (tmp 생성/정리, 의존성 산출물 주입 + fallback)
 │   ├── git_workflow.py        # GitWorkflow (git worktree 기반)
 │   ├── merge_agent.py         # MergeAgent (LLM 기반 머지 충돌 자동 해결)
 │   ├── report.py              # TaskReport 저장/로드/집계 (orchestrator 내부용)
 │   ├── dependency.py          # 위상 정렬 기반 실행 순서 결정
-│   ├── intervention.py        # 오케스트레이터 개입 (analyze/generate_report/save_report)
+│   ├── intervention.py        # 오케스트레이터 개입 (FailureType 분류 + analyze/generate_report/save_report)
 │   ├── weekly.py              # 주간 보고서 생성
 │   ├── milestone.py           # 마일스톤 보고서 생성
 │   └── run.py                 # CLI/API 공용 진입점 (run_pipeline, PauseController — 직접 Discord 폴링 포함)
@@ -180,8 +185,8 @@ AI_coding_agent/
 │       └── utils.py           # 공통 유틸리티
 ├── docker/
 │   ├── Dockerfile.test        # python:3.12-slim + pytest
-│   ├── docker-entrypoint.sh   # requirements.txt 자동 설치 후 pytest 실행
-│   └── runner.py              # DockerTestRunner (RunResult: passed, returncode, stdout, summary, failed_tests)
+│   ├── docker-entrypoint.sh   # 다중 프레임워크 지원 (pytest/jest/vitest/go/rspec/minitest/python/node)
+│   └── runner.py              # DockerTestRunner (RunResult, 언어 분기, 테스트 통과 판정 보정)
 ├── frontend/
 │   └── src/
 │       ├── App.tsx
@@ -209,9 +214,12 @@ AI_coding_agent/
 | Task 정의 방식 | YAML (수동 또는 Sonnet 자동 생성 후 UI 승인) | 명시적 확인, 오류 방지 |
 | Reviewer 판정 후 행동 | CHANGES_REQUESTED여도 PR 생성 | 사람이 최종 판단 |
 | 테스트 타겟 | pytest 기본, jest/go test/rspec 파싱 지원 | 다중 프레임워크 RunResult 파싱 |
+| 테스트 통과 판정 | exit code + summary 기반 보정 (OK: 접두어 + pytest "N passed" 패턴) | INTERNALERROR 등으로 exit code 비정상이어도 실제 통과 시 성공 처리 |
 | 실패한 workspace | 보존 (디버깅용) | 성공 시만 자동 정리 |
 | Implementer 재시도 | MAX_RETRIES=2 (TDDPipeline 내부) | 초과 시 오케스트레이터 개입 |
-| 오케스트레이터 개입 | Sonnet 분석 → RETRY(힌트) or GIVE_UP | max_orchestrator_retries(기본 2회) 초과 시 포기 |
+| 오케스트레이터 개입 | FailureType 분류 → ENV_ERROR 즉시 포기, LOGIC_ERROR만 LLM 분석 | 불필요한 LLM 호출 방지 |
+| 의존성 pre-check | 선행 태스크 DONE이면 스킵, 미완료만 filesystem 확인 | auto_merge 없이도 정상 동작 |
+| 태스크 초안 target_files | Python 파일명으로 자동 보정 (.kt→.py, PascalCase→snake_case) | 크로스 언어 프로젝트 호환 |
 | 모델 선택 | 환경 변수로 프로바이더/모델 완전 분리 | claude/openai/glm/ollama 어디든 교체 가능 |
 
 ### 2.5.4 E2E 검증 결과 (2026-03-30)
@@ -522,6 +530,12 @@ Phase 3 추가 구현 ✅ 완료 (2026-03-31)
   │     max_orchestrator_retries(기본 2회) 초과 시 마크다운 실패 보고서 자동 생성
   ├── MAX_ITER 감지 및 표면화 ✅
   │     ScopedReactLoop 최대 반복 초과 시 failure_reason에 [MAX_ITER] 프리픽스 태깅
+  ├── 크로스 언어 프로젝트 지원 강화 ✅
+  │     _DRAFT_SYSTEM_PROMPT: Python 구현 원칙 (target_files .py 강제, 언어 중립 수락 기준)
+  │     _sanitize_task_draft: .kt/.java→.py 변환, PascalCase→snake_case, 깊은 경로→파일명 추출
+  │     inject_dependency_context fallback: target_files 불일치 시 git diff로 실제 파일 주입
+  │     _check_dependency_files: 선행 DONE 태스크 스킵 (auto_merge 없이도 정상 동작)
+  │     DockerTestRunner: pytest "N passed" 패턴 인식하여 INTERNALERROR 시에도 통과 보정
   ├── Catch-up 머지 ✅
   │     auto_merge=ON으로 재개 시 이전에 완료됐지만 아직 머지 안 된 브랜치를 먼저 처리
   ├── Weekly Report UI ✅
@@ -555,6 +569,9 @@ Phase 3 추가 구현 ✅ 완료 (2026-03-31)
 | Milestone Report 컨텍스트 압축 | Daily Summary 계층 미구현 — Milestone만 있음 | 운영 중 필요 시 |
 | CI/CD 통합 | GitHub Actions 유력 | 8단계 또는 별도 |
 | 태스크 타입 분기 | frontend 태스크 파이프라인 제외 구현됨 (task_type="frontend") | ✅ 완료 |
+| 크로스 언어 target_files | **확정**: 초안 생성 시 자동 보정 (.kt→.py, PascalCase→snake_case) + inject fallback | ✅ 완료 |
+| 의존성 pre-check | **확정**: 선행 DONE 태스크 스킵, 미완료만 filesystem 확인 | ✅ 완료 |
+| 테스트 통과 판정 | **확정**: OK: 접두어 + pytest "N passed" (failed/error 없음) 패턴 보정 | ✅ 완료 |
 | 핫라인 확장 | 버튼 인터랙션, /run 명령어, PR 요약, 스크린샷 피드백 | 필요 시 |
 | 오케스트레이터 → 사용자 질문 | ask_user 도구로 에이전트가 Discord/stdin 경유 질의 가능 | ✅ 완료 |
 | Discord Message Content Intent | **필수**: Developer Portal → Bot → Privileged Gateway Intents에서 활성화. 미활성 시 REST API가 content를 빈 문자열로 반환하여 모든 명령이 무시됨 | ✅ 확인 완료 |

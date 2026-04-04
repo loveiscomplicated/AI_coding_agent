@@ -1,6 +1,6 @@
 ---
 completeness: 98
-hint: 5단계 전체 구현 완료. Phase 3 멀티 에이전트 및 모델 무관 설계 + Discord 핫라인 안정화까지 반영. (2026-04-03 업데이트)
+hint: 5단계 전체 구현 완료. Phase 3 멀티 에이전트 + Discord 핫라인 안정화 + 크로스 언어 프로젝트 지원 강화. (2026-04-04 업데이트)
 ---
 
 # 프로젝트 컨텍스트 문서: Multi-Agent Development System — 5단계 오케스트레이터 연결
@@ -179,6 +179,30 @@ tasks.yaml의 `task_type` 필드로 파이프라인 동작을 분기:
 
 **"하나의 태스크는 파일 3개 이하"** — Implementer가 안정적으로 구현할 수 있는 크기를 유지. 이 가이드라인은 초안 생성 프롬프트에 포함된다 (`_DRAFT_SYSTEM_PROMPT` in `backend/routers/tasks.py`).
 
+### 3.5 크로스 언어 프로젝트 지원 (Python 구현 원칙) ✅ 구현 완료
+
+**문제**: Kotlin/Java 등 비-Python 프로젝트에서 LLM이 `.kt`/`.java` 확장자와 깊은 패키지 경로(`app/src/main/java/com/...`)로 target_files를 생성. 파이프라인은 Python으로 구현하므로 실제 생성 파일과 target_files가 불일치 → 의존성 주입 실패.
+
+**해결 (2단계 방어):**
+
+1. **프롬프트 가이드** (`_DRAFT_SYSTEM_PROMPT`):
+   - target_files는 반드시 `.py` + snake_case (깊은 패키지 경로 금지)
+   - description/acceptance_criteria는 언어 중립적으로 작성 (플랫폼 전용 API 금지)
+   - task_type "frontend"는 오직 브라우저 UI에만 (Kotlin 프로젝트도 "backend" 유지)
+
+2. **후처리 자동 보정** (`_sanitize_task_draft`):
+   - `.kt`/`.java`/`.ts` 등 → `.py` 변환
+   - PascalCase → snake_case 변환 (`FakeMapService.kt` → `fake_map_service.py`)
+   - 깊은 경로에서 파일명만 추출 (`app/src/.../Coordinate.kt` → `coordinate.py`)
+   - 변환 후 중복 제거
+   - 보정 발생 시 `warnings` 필드에 기록
+
+**실제 사례** (AR 길안내 앱 프로젝트):
+```
+입력:  app/src/main/java/com/arwalk/data/fake/FakeMapService.kt
+보정:  fake_map_service.py
+```
+
 ### 3.4 tasks.yaml 확장 형식
 
 ```yaml
@@ -243,6 +267,18 @@ discord_channel_id: str|None  Discord 채널 ID
 **의존성 실패 시 스킵**: 태스크 실패 시 failed_ids에 추가. depends_on ∩ failed_ids가 있는 후속 태스크는 FAILED 처리. 독립 태스크는 계속 실행.
 
 **재개 지원**: `resolve_execution_groups(tasks, all_valid_ids=all_task_ids)` — 완료된 태스크 ID를 유효 ID로 인정하여 depends_on 검증 통과.
+
+**의존성 pre-check (pipeline.py)** ✅:
+- 선행 태스크가 DONE이면 파일 존재 확인 스킵 (산출물은 git 브랜치에 존재)
+- 미완료 태스크만 filesystem에서 target_files 확인 → 없으면 `[DEPENDENCY_MISSING]` 즉시 실패
+- auto_merge 없이도 정상 동작 (inject_dependency_context가 `git show`로 브랜치에서 읽음)
+
+**의존성 산출물 주입 (workspace.py)** ✅:
+- 1차: target_files 경로로 `git show {branch}:{path}` 읽기
+- 2차 (fallback): target_files 경로 실패 시 `git diff --name-only`로 브랜치에서 실제 추가된 소스 파일을 찾아 주입 (tests/ 제외)
+- Python 파일은 심볼 요약(클래스/함수 시그니처) 추출 → `context/dependency_artifacts.md`에 기록
+
+**실제 사례**: AR 길안내 앱에서 task-004의 target_files가 `app/src/.../FakeMapService.kt`이지만 실제 생성 파일은 `FakeMapService.py`. fallback이 `git diff`로 실제 파일을 찾아 workspace에 주입.
 
 ### 4.3 컨텍스트 전달: 트리 문서(PROJECT_STRUCTURE.md) ✅ 구현 완료
 
@@ -631,7 +667,10 @@ task-004: execution_brief 생성기 (→ task-001)
 | 429 Rate Limit 처리 | ✅ retry_after 파싱 후 자동 대기 (listen_for_commands + wait_for_reply) | 완료 |
 | 회의 타입별 LLM 시스템 프롬프트 차이 | ✅ MeetingApp meetingType으로 분리 구현 | 완료 |
 | execution_brief LLM 프롬프트 | ✅ _BRIEF_SYSTEM 프롬프트 구현 완료 (backend/routers/reports.py) | 완료 |
-| 태스크 초안 생성 LLM 프롬프트 | ✅ _DRAFT_SYSTEM_PROMPT 구현 완료 (backend/routers/tasks.py) | 완료 |
+| 태스크 초안 생성 LLM 프롬프트 | ✅ _DRAFT_SYSTEM_PROMPT + _sanitize_task_draft 후처리 (Python 구현 원칙, target_files 자동 보정) | 완료 |
+| 크로스 언어 target_files | ✅ .kt/.java→.py 변환, PascalCase→snake_case, 깊은 경로→파일명 추출, 중복 제거 | 완료 |
+| 의존성 pre-check | ✅ 선행 DONE 태스크 스킵 + inject fallback (git diff) — auto_merge 없이 정상 동작 | 완료 |
+| 테스트 통과 판정 보정 | ✅ OK: 접두어 + pytest "N passed" (failed/error 없음) 패턴 인식 | 완료 |
 | depends_on 필드 정확한 스펙 | ✅ 문자열 리스트 (task ID) 확정, YAML로 저장 | 완료 |
 | 파이프라인 동기/비동기 실행 | ✅ POST /api/pipeline/run → job_id 비동기 실행, SSE 스트리밍 | 완료 |
 | 아이맥 서버 Docker 호환성 | macOS Monterey 경계선, 실측 필요 | 서버 이전 검토 시 |
