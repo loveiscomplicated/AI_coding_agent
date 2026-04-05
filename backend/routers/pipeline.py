@@ -24,6 +24,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from agents.roles import RoleModelConfig
 from backend.config import DISCORD_BOT_TOKEN, DISCORD_GUILD_ID, LLM_PROVIDER, LLM_MODEL_FAST, LLM_MODEL_CAPABLE
 from hotline.notifier import DiscordNotifier
 from orchestrator.run import PauseController, run_pipeline
@@ -68,6 +69,21 @@ class RunRequest(BaseModel):
     model_capable: str | None = None     # 오케스트레이터 모델
     provider_fast: str | None = None     # 코딩 에이전트 프로바이더 (None → provider)
     provider_capable: str | None = None  # 오케스트레이터 프로바이더 (None → provider)
+    role_models: dict[str, dict[str, str | None]] | None = None
+    # 역할별 모델 오버라이드. 예: {"reviewer": {"provider": "claude", "model": "claude-sonnet-4-20250514"}}
+    # 지원 키: "test_writer", "implementer", "reviewer", "orchestrator", "merge_agent", "intervention"
+
+
+def _parse_role_models(raw: dict[str, dict] | None) -> dict[str, RoleModelConfig] | None:
+    if not raw:
+        return None
+    return {
+        role: RoleModelConfig(
+            provider=cfg.get("provider"),
+            model=cfg.get("model"),
+        )
+        for role, cfg in raw.items()
+    }
 
 
 # ── 엔드포인트 ────────────────────────────────────────────────────────────────
@@ -138,6 +154,7 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
                 model_capable=body.model_capable or LLM_MODEL_CAPABLE,
                 provider_fast=body.provider_fast,
                 provider_capable=body.provider_capable,
+                role_models=_parse_role_models(body.role_models),
             )
             with _lock:
                 _jobs[job_id]["status"] = "done"

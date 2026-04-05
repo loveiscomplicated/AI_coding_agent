@@ -38,6 +38,10 @@ _llm_lock = threading.Lock()
 _hotline_provider: str = "claude"
 _hotline_conv_model: str = ""
 
+# 태스크 재설계용 LLM 설정 (런타임 변경 지원용)
+_redesign_provider: str = ""
+_redesign_model: str = ""
+
 
 def set_llm(conv_llm: BaseLLMClient, sum_llm: BaseLLMClient) -> None:
     """
@@ -67,6 +71,18 @@ def set_conv_model(model: str, provider: str | None = None) -> None:
         _conv_llm = new_conv
         _hotline_conv_model = model
         _hotline_provider = target_provider
+
+
+def get_redesign_model() -> dict:
+    """현재 태스크 재설계용 LLM provider/model을 반환한다."""
+    return {"provider": _redesign_provider, "model": _redesign_model}
+
+
+def set_redesign_model(model: str, provider: str) -> None:
+    """태스크 재설계용 LLM 모델을 런타임에 변경한다."""
+    global _redesign_provider, _redesign_model
+    _redesign_provider = provider
+    _redesign_model = model
 
 
 def create_hotline_llms(provider: str, model: str) -> tuple[BaseLLMClient, BaseLLMClient]:

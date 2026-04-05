@@ -24,6 +24,7 @@ from backend.config import LLM_PROVIDER, LLM_MODEL_CAPABLE
 from llm import LLMConfig, Message, create_client
 from orchestrator.task import Task, load_tasks, save_tasks
 from orchestrator.task_redesign import create_redesign_llm, redesign_task
+from tools.hotline_tools import get_redesign_model
 
 # ── 초안 생성 잡 저장소 ──────────────────────────────────────────────────────
 _draft_jobs: dict[str, dict] = {}
@@ -342,7 +343,10 @@ def _run_redesign(job_id: str, task_id: str, tasks_path: str, repo_path: str) ->
             except OSError:
                 pass
 
-        llm = create_redesign_llm(LLM_PROVIDER, LLM_MODEL_CAPABLE)
+        redesign_info = get_redesign_model()
+        redesign_provider = redesign_info["provider"] or LLM_PROVIDER
+        redesign_model_id = redesign_info["model"] or LLM_MODEL_CAPABLE
+        llm = create_redesign_llm(redesign_provider, redesign_model_id)
         result = redesign_task(task, tasks, spec_content, llm, orch_report=orch_report)
 
         with _redesign_lock:

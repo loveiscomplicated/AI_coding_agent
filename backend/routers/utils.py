@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.config import LLM_PROVIDER, LLM_MODEL_FAST, LLM_MODEL_CAPABLE
-from tools.hotline_tools import get_conv_model, set_conv_model
+from tools.hotline_tools import get_conv_model, set_conv_model, get_redesign_model, set_redesign_model
 
 router = APIRouter()
 
@@ -30,21 +30,26 @@ def get_config() -> dict:
 class LLMSettingsRequest(BaseModel):
     hotline_conv_model: str
     hotline_conv_provider: str
+    redesign_model: str = ""
+    redesign_provider: str = ""
 
 
 @router.get("/config/llm")
 def get_llm_settings() -> dict:
     """런타임 LLM 설정을 반환한다."""
-    info = get_conv_model()
+    conv_info = get_conv_model()
+    redesign_info = get_redesign_model()
     return {
-        "hotline_conv_model": info["model"] or LLM_MODEL_CAPABLE,
-        "hotline_conv_provider": info["provider"] or LLM_PROVIDER,
+        "hotline_conv_model": conv_info["model"] or LLM_MODEL_CAPABLE,
+        "hotline_conv_provider": conv_info["provider"] or LLM_PROVIDER,
+        "redesign_model": redesign_info["model"] or LLM_MODEL_CAPABLE,
+        "redesign_provider": redesign_info["provider"] or LLM_PROVIDER,
     }
 
 
 @router.patch("/config/llm")
 def update_llm_settings(body: LLMSettingsRequest) -> dict:
-    """Discord 대화용 LLM 모델을 런타임에 변경한다."""
+    """Discord 대화용 및 태스크 재설계용 LLM 모델을 런타임에 변경한다."""
     model = body.hotline_conv_model.strip()
     provider = body.hotline_conv_provider.strip()
     if not model:
@@ -52,7 +57,18 @@ def update_llm_settings(body: LLMSettingsRequest) -> dict:
     if not provider:
         raise HTTPException(status_code=422, detail="provider가 비어 있습니다.")
     set_conv_model(model, provider)
-    return {"hotline_conv_model": model, "hotline_conv_provider": provider}
+
+    redesign_m = body.redesign_model.strip()
+    redesign_p = body.redesign_provider.strip()
+    if redesign_m and redesign_p:
+        set_redesign_model(redesign_m, redesign_p)
+
+    return {
+        "hotline_conv_model": model,
+        "hotline_conv_provider": provider,
+        "redesign_model": redesign_m or model,
+        "redesign_provider": redesign_p or provider,
+    }
 
 
 class SaveContextDocRequest(BaseModel):
