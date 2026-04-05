@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from agents.roles import RoleModelConfig, resolve_model_for_role, ROLE_INTERVENTION
 from llm import BaseLLMClient, LLMConfig, Message, create_client
 
 from orchestrator.task import Task
@@ -56,6 +57,7 @@ def classify_and_analyze(
     attempt: int,
     test_stdout: str = "",
     previous_hints: list[str] | None = None,
+    role_models: dict[str, RoleModelConfig] | None = None,
 ) -> AnalysisResult:
     """
     실패 유형을 먼저 분류하고, LOGIC_ERROR만 LLM analyze()로 넘긴다.
@@ -86,12 +88,19 @@ def classify_and_analyze(
         return AnalysisResult(should_retry=True, hint=hint, raw="[fast-path] max_iter_retry")
 
     # LOGIC_ERROR → 기존 LLM 분석
-    return analyze(task, failure_reason, attempt, previous_hints=previous_hints)
+    return analyze(task, failure_reason, attempt, previous_hints=previous_hints, role_models=role_models)
 
 logger = logging.getLogger(__name__)
 
 _analyze_llm: BaseLLMClient | None = None
 _report_llm: BaseLLMClient | None = None
+
+# 역할별 모델 오버라이드 지원을 위한 모델 config 글로벌
+_provider: str = "claude"
+_model_fast: str = ""
+_model_capable: str = ""
+_provider_fast: str | None = None
+_provider_capable: str | None = None
 
 
 def set_llm(analyze_llm: BaseLLMClient, report_llm: BaseLLMClient) -> None:
@@ -99,6 +108,22 @@ def set_llm(analyze_llm: BaseLLMClient, report_llm: BaseLLMClient) -> None:
     global _analyze_llm, _report_llm
     _analyze_llm = analyze_llm
     _report_llm = report_llm
+
+
+def set_model_config(
+    provider: str,
+    model_fast: str,
+    model_capable: str,
+    provider_fast: str | None = None,
+    provider_capable: str | None = None,
+) -> None:
+    """모델 config를 주입한다. role_models 오버라이드 적용 시 사용."""
+    global _provider, _model_fast, _model_capable, _provider_fast, _provider_capable
+    _provider = provider
+    _model_fast = model_fast
+    _model_capable = model_capable
+    _provider_fast = provider_fast
+    _provider_capable = provider_capable
 
 
 def create_intervention_llms(provider: str, model: str) -> tuple[BaseLLMClient, BaseLLMClient]:
@@ -189,6 +214,7 @@ def analyze(
     failure_reason: str,
     attempt: int,
     previous_hints: list[str] | None = None,
+    role_models: dict[str, RoleModelConfig] | None = None,
 ) -> AnalysisResult:
     """
     LLM에게 실패 원인을 분석시키고 RETRY/GIVE_UP 결정을 받는다.
@@ -198,10 +224,27 @@ def analyze(
         failure_reason : PipelineResult.failure_reason
         attempt  : 오케스트레이터 재시도 횟수 (1-based)
         previous_hints : 이전 시도에서 제공한 힌트 목록 (중복 방지용)
+        role_models: 역할별 모델 오버라이드. None이면 글로벌 _analyze_llm 사용.
     """
-    if _analyze_llm is None:
+    # role_models에 "intervention" 오버라이드가 있으면 새 클라이언트 생성
+    if role_models and _model_capable:
+        int_provider, int_model = resolve_model_for_role(
+            role=ROLE_INTERVENTION,
+            role_models=role_models,
+            provider=_provider,
+            model_fast=_model_fast,
+            model_capable=_model_capable,
+            provider_fast=_provider_fast,
+            provider_capable=_provider_capable,
+        )
+        llm: BaseLLMClient = create_client(
+            int_provider, LLMConfig(model=int_model, system_prompt=_ANALYZE_SYSTEM, max_tokens=1024)
+        )
+    elif _analyze_llm is None:
         logger.error("intervention.set_llm()이 호출되지 않았습니다.")
         return AnalysisResult(should_retry=False, hint="오케스트레이터 LLM 미초기화", raw="")
+    else:
+        llm = _analyze_llm
 
     last_error_snippet = (task.last_error or "")[:2000]
 
@@ -229,7 +272,7 @@ id: {task.id}
 {last_error_snippet if last_error_snippet else "(없음)"}
 {hints_section}"""
     try:
-        response = _analyze_llm.chat([Message(role="user", content=user_msg)])
+        response = llm.chat([Message(role="user", content=user_msg)])
         raw = _extract_text(response)
     except Exception as e:
         logger.error("오케스트레이터 분석 LLM 호출 실패: %s", e)

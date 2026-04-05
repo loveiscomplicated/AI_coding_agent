@@ -50,8 +50,10 @@ from orchestrator.intervention import (
     generate_report as orch_report,
     save_report as orch_save_report,
     set_llm as _set_intervention_llm,
+    set_model_config as _set_intervention_model_config,
     create_intervention_llms,
 )
+from agents.roles import RoleModelConfig, resolve_model_for_role, ROLE_MERGE_AGENT
 from orchestrator.pipeline import TDDPipeline
 from orchestrator.report import build_report, load_reports, save_report
 from orchestrator.task import Task, TaskStatus, load_tasks, save_tasks
@@ -353,6 +355,7 @@ def run_pipeline(
     model_capable: str = "claude-sonnet-4-6",
     provider_fast: str | None = None,    # None이면 provider 사용
     provider_capable: str | None = None, # None이면 provider 사용
+    role_models: dict[str, RoleModelConfig] | None = None,  # 역할별 모델 오버라이드
 ) -> dict:
     """
     파이프라인 실행 핵심 로직. CLI와 FastAPI 백엔드 양쪽에서 호출된다.
@@ -434,9 +437,27 @@ def run_pipeline(
     if not runner._image_exists():
         runner.build_image()
 
-    pipeline = TDDPipeline(agent_llm=fast_llm, implementer_llm=fast_llm, test_runner=runner)
+    pipeline = TDDPipeline(
+        agent_llm=fast_llm, implementer_llm=fast_llm, test_runner=runner,
+        role_models=role_models,
+        provider=provider,
+        model_fast=model_fast,
+        model_capable=model_capable,
+        provider_fast=provider_fast,
+        provider_capable=provider_capable,
+    )
     git = GitWorkflow(repo_path, base_branch=base_branch)
-    merge_agent = MergeAgent(llm=fast_llm, repo_path=repo_path)
+    _merge_provider, _merge_model = resolve_model_for_role(
+        role=ROLE_MERGE_AGENT,
+        role_models=role_models,
+        provider=provider,
+        model_fast=model_fast,
+        model_capable=model_capable,
+        provider_fast=provider_fast,
+        provider_capable=provider_capable,
+    )
+    merge_llm = create_client(_merge_provider, LLMConfig(model=_merge_model, max_tokens=8192))
+    merge_agent = MergeAgent(llm=merge_llm, repo_path=repo_path)
     # discord_channel_id가 없으면 notifier 생성 안 함 (채널 생성 실패 포함)
     notifier = DiscordNotifier.from_env(channel_id=discord_channel_id) if discord_channel_id else None
     # 에이전트 ask_user 도구에 notifier + LLM 주입 (None이면 stdin 폴백)
@@ -448,6 +469,7 @@ def run_pipeline(
     # 오케스트레이터 개입 LLM 주입
     analyze_llm, report_llm = create_intervention_llms(_provider_capable, model_capable)
     _set_intervention_llm(analyze_llm, report_llm)
+    _set_intervention_model_config(provider, model_fast, model_capable, provider_fast, provider_capable)
 
     # ── auto_merge catch-up: 이전 실행에서 완료됐지만 미머지된 브랜치 처리 ────────
     if auto_merge and not no_pr:
@@ -606,7 +628,8 @@ def run_pipeline(
                             emit({"type": "task_fail", "task_id": task.id, "title": task.title,
                                   "reason": str(e), "elapsed": round(elapsed, 1)})
                             _notify_failure(notifier, task, str(e), elapsed)
-                            report = build_report(task, result, elapsed_seconds=elapsed, pr_url="")
+                            report = build_report(task, result, elapsed_seconds=elapsed, pr_url="",
+                                                  models_used=result.models_used or None)
                             save_report(report, reports_dir=reports_dir)
                             with _save_lock:
                                 save_tasks(all_tasks, tasks_path)
@@ -625,7 +648,8 @@ def run_pipeline(
                               "elapsed": round(elapsed, 1)})
                         _notify(notifier, f"✅ [{task.id}] \"{task.title}\" 완료! (⏱ {elapsed:.0f}s)")
 
-                    report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url)
+                    report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url,
+                                          models_used=result.models_used or None)
                     save_report(report, reports_dir=reports_dir)
                     with _save_lock:
                         save_tasks(all_tasks, tasks_path)
@@ -681,6 +705,7 @@ def run_pipeline(
                         task, failure_reason, orch_attempt + 1,
                         test_stdout=test_stdout,
                         previous_hints=hints_tried,
+                        role_models=role_models,
                     )
 
                     # orch_analyze 완료 후 중단 체크 (분석 중 중단 명령 수신 가능)
@@ -781,6 +806,7 @@ def run_pipeline(
                     orchestrator_model=model_capable if hints_tried else "",
                     coding_agent_model=model_fast if hints_tried else "",
                     orchestrator_summary=_extract_orch_summary(orch_report_text),
+                    models_used=result.models_used or None,
                 )
                 save_report(report, reports_dir=reports_dir)
                 with _save_lock:
@@ -1036,7 +1062,8 @@ def _run_single_task(
                           "reason": str(e), "elapsed": round(elapsed, 1)})
                     _notify_failure(notifier, task, str(e), elapsed)
 
-        report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url)
+        report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url,
+                              models_used=result.models_used or None)
         report_path = save_report(report, reports_dir=reports_dir)
         print(f"  [{task.id}] 리포트: {report_path}")
 

@@ -53,6 +53,66 @@ WRITE_TOOLS: list[str] = [
 ]
 
 
+# ── 역할 키 상수 ─────────────────────────────────────────────────────────────
+
+ROLE_TEST_WRITER = "test_writer"
+ROLE_IMPLEMENTER = "implementer"
+ROLE_REVIEWER = "reviewer"
+ROLE_ORCHESTRATOR = "orchestrator"
+ROLE_MERGE_AGENT = "merge_agent"
+ROLE_INTERVENTION = "intervention"
+
+
+# ── 역할별 모델 오버라이드 ────────────────────────────────────────────────────
+
+
+@dataclass
+class RoleModelConfig:
+    """역할별 모델 오버라이드 설정. None인 필드는 기본값(model_fast/model_capable) 사용."""
+
+    provider: str | None = None
+    model: str | None = None
+
+
+def resolve_model_for_role(
+    role: str,
+    role_models: dict[str, RoleModelConfig] | None,
+    provider: str,
+    model_fast: str,
+    model_capable: str,
+    provider_fast: str | None = None,
+    provider_capable: str | None = None,
+) -> tuple[str, str]:
+    """역할에 맞는 (provider, model) 튜플을 반환한다.
+
+    우선순위: role_models[role] → fast/capable 기본값 → 공통 provider
+
+    Args:
+        role: 역할 키 (ROLE_TEST_WRITER 등)
+        role_models: 역할별 모델 오버라이드 딕셔너리. None이면 기본값만 사용.
+        provider: 공통 기본 프로바이더
+        model_fast: 코딩 에이전트 기본 모델
+        model_capable: 오케스트레이터 기본 모델
+        provider_fast: 코딩 에이전트 프로바이더 (None이면 provider 사용)
+        provider_capable: 오케스트레이터 프로바이더 (None이면 provider 사용)
+
+    Returns:
+        (provider, model) 튜플
+    """
+    role_cfg = (role_models or {}).get(role)
+
+    if role in (ROLE_ORCHESTRATOR, ROLE_INTERVENTION):
+        # 오케스트레이터/개입 분석은 capable 모델이 기본
+        resolved_provider = (role_cfg and role_cfg.provider) or provider_capable or provider
+        resolved_model = (role_cfg and role_cfg.model) or model_capable
+    else:
+        # 코딩 에이전트(TestWriter, Implementer, Reviewer, MergeAgent)는 fast 모델이 기본
+        resolved_provider = (role_cfg and role_cfg.provider) or provider_fast or provider
+        resolved_model = (role_cfg and role_cfg.model) or model_fast
+
+    return resolved_provider, resolved_model
+
+
 # ── 역할 데이터 클래스 ────────────────────────────────────────────────────────
 
 

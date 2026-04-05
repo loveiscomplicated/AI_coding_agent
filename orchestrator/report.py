@@ -56,6 +56,8 @@ class TaskReport:
     review_retries: int = 0
     dep_files_injected: int = 0
     failed_stage: str = ""
+    # 역할별 실제 사용 모델. 예: {"test_writer": "openai/gpt-4.1-mini", "reviewer": "claude/claude-sonnet-4-20250514"}
+    models_used: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -94,6 +96,8 @@ class TaskReport:
                 "coding_agent_model": self.coding_agent_model,
                 "summary": self.orchestrator_summary,
             }
+        if self.models_used is not None:
+            d["models_used"] = self.models_used
         return d
 
     @classmethod
@@ -129,6 +133,7 @@ class TaskReport:
             orchestrator_model=o.get("orchestrator_model", ""),
             coding_agent_model=o.get("coding_agent_model", ""),
             orchestrator_summary=o.get("summary", ""),
+            models_used=data.get("models_used"),
         )
 
 
@@ -141,6 +146,7 @@ def build_report(
     orchestrator_model: str = "",
     coding_agent_model: str = "",
     orchestrator_summary: str = "",
+    models_used: dict[str, str] | None = None,
 ) -> TaskReport:
     """PipelineResult → TaskReport 변환."""
     test_count = 0
@@ -198,6 +204,7 @@ def build_report(
         review_retries=m.review_retries,
         dep_files_injected=m.dep_files_injected,
         failed_stage=m.failed_stage,
+        models_used=models_used,
     )
 
 

@@ -34,9 +34,16 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agents.roles import TEST_WRITER, IMPLEMENTER, REVIEWER
+from agents.roles import (
+    TEST_WRITER, IMPLEMENTER, REVIEWER,
+    RoleModelConfig,
+    resolve_model_for_role,
+    ROLE_TEST_WRITER, ROLE_IMPLEMENTER, ROLE_REVIEWER,
+    ROLE_ORCHESTRATOR, ROLE_INTERVENTION,
+)
 from agents.scoped_loop import ScopedReactLoop, ScopedResult
 from docker.runner import DockerTestRunner, RunResult, _detect_runtime
+from llm import LLMConfig, create_client
 from llm.base import Message, StopReason
 from orchestrator.task import Task, TaskStatus, LANGUAGE_TEST_FRAMEWORK_MAP
 from orchestrator.workspace import WorkspaceManager
@@ -99,6 +106,7 @@ class PipelineResult:
     test_files: list[str] = field(default_factory=list)
     impl_files: list[str] = field(default_factory=list)
     metrics: PipelineMetrics = field(default_factory=PipelineMetrics)
+    models_used: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def failed(cls, task: Task, reason: str, metrics: "PipelineMetrics | None" = None) -> "PipelineResult":
@@ -132,6 +140,13 @@ class TDDPipeline:
         max_iterations: int = 15,
         reviewer_max_iterations: int = 5,
         implementer_write_deadline: int = 8,
+        # 역할별 모델 오버라이드 (None이면 agent_llm/implementer_llm 사용)
+        role_models: dict[str, RoleModelConfig] | None = None,
+        provider: str | None = None,
+        model_fast: str | None = None,
+        model_capable: str | None = None,
+        provider_fast: str | None = None,
+        provider_capable: str | None = None,
     ):
         self.agent_llm = agent_llm
         self.implementer_llm = implementer_llm or agent_llm
@@ -141,6 +156,30 @@ class TDDPipeline:
         self.max_iterations = max_iterations
         self.reviewer_max_iterations = reviewer_max_iterations
         self.implementer_write_deadline = implementer_write_deadline
+        self.role_models = role_models
+        self.provider = provider
+        self.model_fast = model_fast
+        self.model_capable = model_capable
+        self.provider_fast = provider_fast
+        self.provider_capable = provider_capable
+
+    # ── 역할별 LLM 생성 ──────────────────────────────────────────────────────
+
+    def _llm_for_role(self, role: str, fallback):
+        """resolve_model_for_role()로 역할별 LLM 클라이언트를 생성한다.
+        model config가 주입되지 않은 경우(레거시 호출) fallback LLM을 반환한다."""
+        if self.provider is None or self.model_fast is None or self.model_capable is None:
+            return fallback
+        p, m = resolve_model_for_role(
+            role=role,
+            role_models=self.role_models,
+            provider=self.provider,
+            model_fast=self.model_fast,
+            model_capable=self.model_capable,
+            provider_fast=self.provider_fast,
+            provider_capable=self.provider_capable,
+        )
+        return create_client(p, LLMConfig(model=m, max_tokens=8192))
 
     # ── 공개 인터페이스 ───────────────────────────────────────────────────────
 
@@ -248,12 +287,30 @@ class TDDPipeline:
 
     def _run_pipeline(self, task, workspace, _p, _agent_p, pause_ctrl=None, enriched_desc=None) -> "PipelineResult":
         """run()의 실제 파이프라인 로직. workspace 등록/해제는 run()이 담당한다."""
+        # 역할별 실제 사용 모델을 미리 계산 — 성공/실패 양쪽 모두 TaskReport에 기록
+        models_used: dict[str, str] = {}
+        if self.provider and self.model_fast and self.model_capable:
+            for _role_key in [ROLE_TEST_WRITER, ROLE_IMPLEMENTER, ROLE_REVIEWER]:
+                _rp, _rm = resolve_model_for_role(
+                    role=_role_key,
+                    role_models=self.role_models,
+                    provider=self.provider,
+                    model_fast=self.model_fast,
+                    model_capable=self.model_capable,
+                    provider_fast=self.provider_fast,
+                    provider_capable=self.provider_capable,
+                )
+                models_used[_role_key] = f"{_rp}/{_rm}"
+
         try:
-            return self.__run_pipeline_inner(task, workspace, _p, _agent_p, pause_ctrl=pause_ctrl,
-                                             enriched_desc=enriched_desc)
+            result = self.__run_pipeline_inner(task, workspace, _p, _agent_p, pause_ctrl=pause_ctrl,
+                                               enriched_desc=enriched_desc)
         except _StopRequested:
             logger.info("[%s] 즉시 중단 요청 — 파이프라인 종료", task.id)
-            return PipelineResult.failed(task, "[ABORTED] 사용자 즉시 중단 요청")
+            result = PipelineResult.failed(task, "[ABORTED] 사용자 즉시 중단 요청")
+
+        result.models_used = models_used
+        return result
 
     def __run_pipeline_inner(self, task, workspace, _p, _agent_p, pause_ctrl=None, enriched_desc=None) -> "PipelineResult":
         """_run_pipeline() 의 실제 구현. _StopRequested 는 _run_pipeline() 이 잡는다."""
@@ -302,7 +359,7 @@ class TDDPipeline:
 
         # ── Step 1.5: 테스트 품질 게이트 (P2 정적 검증 + P3 커버리지) ────────
         static_issues = _validate_tests_static(test_files, workspace)
-        missing_criteria = _check_criteria_coverage(task, test_files, workspace, self.agent_llm)
+        missing_criteria = _check_criteria_coverage(task, test_files, workspace, self._llm_for_role(ROLE_TEST_WRITER, self.agent_llm))
         if static_issues or missing_criteria:
             metrics.quality_gate_rejections += 1
             metrics.quality_gate_reasons = (static_issues or []) + [
@@ -501,7 +558,7 @@ class TDDPipeline:
         stop_check = (lambda: pause_ctrl.is_stopped) if pause_ctrl else None
         _framework = LANGUAGE_TEST_FRAMEWORK_MAP.get(task.language, task.test_framework)
         loop = ScopedReactLoop(
-            llm=self.agent_llm,
+            llm=self._llm_for_role(ROLE_TEST_WRITER, self.agent_llm),
             role=TEST_WRITER.render(task.language, _framework),
             workspace_dir=workspace.path,
             max_iterations=self.max_iterations,
@@ -535,7 +592,7 @@ class TDDPipeline:
         stop_check = (lambda: pause_ctrl.is_stopped) if pause_ctrl else None
         _framework = LANGUAGE_TEST_FRAMEWORK_MAP.get(task.language, task.test_framework)
         loop = ScopedReactLoop(
-            llm=self.implementer_llm,
+            llm=self._llm_for_role(ROLE_IMPLEMENTER, self.implementer_llm),
             role=IMPLEMENTER.render(task.language, _framework),
             workspace_dir=workspace.path,
             max_iterations=self.max_iterations,
@@ -562,7 +619,7 @@ class TDDPipeline:
         stop_check = (lambda: pause_ctrl.is_stopped) if pause_ctrl else None
         _framework = LANGUAGE_TEST_FRAMEWORK_MAP.get(task.language, task.test_framework)
         loop = ScopedReactLoop(
-            llm=self.agent_llm,
+            llm=self._llm_for_role(ROLE_REVIEWER, self.agent_llm),
             role=REVIEWER.render(task.language, _framework),
             workspace_dir=workspace.path,
             max_iterations=self.reviewer_max_iterations,
