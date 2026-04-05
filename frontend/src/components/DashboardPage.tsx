@@ -522,7 +522,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
     }
   }
 
-  async function resumePipeline(providerFast: string, modelFast: string, providerCapable: string, modelCapable: string) {
+  async function resumePipeline(providerFast: string, modelFast: string, providerCapable: string, modelCapable: string, roleModels?: Record<string, {provider?: string; model?: string}>) {
     if (!project) return
     setShowResumeModal(false)
     setResuming(true)
@@ -541,6 +541,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
           model_fast: modelFast,
           provider_capable: providerCapable,
           model_capable: modelCapable,
+          ...(roleModels && Object.keys(roleModels).length > 0 ? { role_models: roleModels } : {}),
         }),
       })
       if (!res.ok) throw new Error('파이프라인 시작 실패')

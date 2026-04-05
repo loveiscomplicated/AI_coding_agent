@@ -13,6 +13,9 @@ export interface AvailableModel {
   provider: string
 }
 
+export type RoleOverride = { provider?: string; model?: string }
+export type RoleOverrides = Record<string, RoleOverride>
+
 // ── ModelSelect ───────────────────────────────────────────────────────────────
 
 interface ModelSelectProps {
@@ -63,11 +66,82 @@ export function ModelSelect({
   )
 }
 
+// ── RoleOverrideRow ───────────────────────────────────────────────────────────
+
+const SELECT_CLS =
+  'rounded-lg border border-gray-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 ' +
+  'text-xs text-gray-700 dark:text-zinc-200 px-2 py-1.5 focus:outline-none focus:ring-2 ' +
+  'focus:ring-blue-500 disabled:opacity-40'
+
+interface RoleOverrideRowProps {
+  label: string
+  models: AvailableModel[]
+  override: RoleOverride
+  onChange: (cfg: RoleOverride) => void
+  onReset: () => void
+}
+
+function RoleOverrideRow({ label, models, override, onChange, onReset }: RoleOverrideRowProps) {
+  const providers = Array.from(new Set(models.map(m => m.provider)))
+  const filtered = override.provider ? models.filter(m => m.provider === override.provider) : []
+
+  function handleProviderChange(p: string) {
+    if (!p) {
+      onChange({})
+    } else {
+      const firstModel = models.find(m => m.provider === p)?.id
+      onChange({ provider: p, model: firstModel })
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs text-gray-600 dark:text-zinc-400 w-20 shrink-0">{label}</span>
+      <select
+        className={`${SELECT_CLS} w-24 shrink-0`}
+        value={override.provider ?? ''}
+        onChange={e => handleProviderChange(e.target.value)}
+      >
+        <option value="">기본값</option>
+        {providers.map(p => <option key={p} value={p}>{p}</option>)}
+      </select>
+      <select
+        className={`${SELECT_CLS} flex-1`}
+        value={override.model ?? ''}
+        disabled={!override.provider}
+        onChange={e => onChange({ ...override, model: e.target.value })}
+      >
+        {!override.provider && <option value="">기본 모델 사용</option>}
+        {filtered.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+      </select>
+      <button
+        className="text-xs text-gray-400 dark:text-zinc-500 hover:text-red-500 dark:hover:text-red-400 shrink-0 transition-colors"
+        onClick={onReset}
+        title="기본값으로 초기화"
+      >
+        기본값
+      </button>
+    </div>
+  )
+}
+
 // ── PipelineModelModal ────────────────────────────────────────────────────────
+
+const ROLES: Array<{ key: string; label: string }> = [
+  { key: 'test_writer', label: '테스트 작성기' },
+  { key: 'implementer', label: '구현기' },
+  { key: 'reviewer', label: '리뷰어' },
+]
 
 interface PipelineModelModalProps {
   models: AvailableModel[]
-  onConfirm: (providerFast: string, modelFast: string, providerCapable: string, modelCapable: string) => void
+  onConfirm: (
+    providerFast: string,
+    modelFast: string,
+    providerCapable: string,
+    modelCapable: string,
+    roleModels?: RoleOverrides,
+  ) => void
   onCancel: () => void
 }
 
@@ -85,6 +159,9 @@ export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineMode
     return list[list.length - 1]?.id ?? ''
   })
 
+  const [roleOverrides, setRoleOverrides] = useState<RoleOverrides>({})
+  const [showAdvanced, setShowAdvanced] = useState(false)
+
   const handleFastProviderChange = (p: string) => {
     setFastProvider(p)
     setFastModel(modelsForProvider(p)[0]?.id ?? '')
@@ -94,6 +171,17 @@ export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineMode
     setCapableProvider(p)
     const list = modelsForProvider(p)
     setCapableModel(list[list.length - 1]?.id ?? '')
+  }
+
+  function handleConfirm() {
+    const roleModels = Object.entries(roleOverrides)
+      .filter(([, cfg]) => cfg.provider || cfg.model)
+      .reduce<RoleOverrides>((acc, [role, cfg]) => ({ ...acc, [role]: cfg }), {})
+    onConfirm(
+      fastProvider, fastModel,
+      capableProvider, capableModel,
+      Object.keys(roleModels).length > 0 ? roleModels : undefined,
+    )
   }
 
   return (
@@ -127,6 +215,39 @@ export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineMode
           onModelChange={setCapableModel}
         />
 
+        {/* 역할별 모델 설정 */}
+        <div className="rounded-xl border border-gray-200 dark:border-zinc-700 overflow-hidden">
+          <button
+            className="w-full flex items-center justify-between px-3 py-2.5 text-xs font-semibold text-gray-600 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-zinc-800 transition-colors"
+            onClick={() => setShowAdvanced(v => !v)}
+          >
+            <span>역할별 모델 설정</span>
+            <span className="text-gray-400 dark:text-zinc-600">{showAdvanced ? '▲' : '▼'}</span>
+          </button>
+
+          {showAdvanced && (
+            <div className="px-3 pb-3 space-y-2 border-t border-gray-100 dark:border-zinc-800 pt-2">
+              <p className="text-xs text-gray-400 dark:text-zinc-500">
+                비워두면 위의 코딩 에이전트 모델이 사용됩니다.
+              </p>
+              {ROLES.map(({ key, label }) => (
+                <RoleOverrideRow
+                  key={key}
+                  label={label}
+                  models={models}
+                  override={roleOverrides[key] ?? {}}
+                  onChange={cfg => setRoleOverrides(prev => ({ ...prev, [key]: cfg }))}
+                  onReset={() => setRoleOverrides(prev => {
+                    const next = { ...prev }
+                    delete next[key]
+                    return next
+                  })}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
         <div className="flex justify-end gap-2 pt-1">
           <button
             className="rounded-lg border border-gray-300 dark:border-zinc-600 px-4 py-2 text-sm text-gray-600 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-zinc-800 transition-colors"
@@ -136,7 +257,7 @@ export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineMode
           </button>
           <button
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
-            onClick={() => onConfirm(fastProvider, fastModel, capableProvider, capableModel)}
+            onClick={handleConfirm}
             disabled={!fastModel || !capableModel}
           >
             파이프라인 시작 🚀

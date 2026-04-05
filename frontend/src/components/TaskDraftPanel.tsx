@@ -106,7 +106,7 @@ function reducer(state: State, action: Action): State {
 
 interface Props {
   contextDoc: string
-  draftKey: string
+  draftKey?: string
   onBack: () => void
   onPipelineStarted?: (jobId: string) => void
 }
@@ -125,7 +125,7 @@ function loadSavedState(draftKey: string): State | null {
   }
 }
 
-export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted }: Props) {
+export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPipelineStarted }: Props) {
   const [modelName, setModelName] = useState<string>('AI')
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([])
   const [showModelModal, setShowModelModal] = useState(false)
@@ -266,6 +266,7 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
   async function handleSaveAndRun(
     providerFast: string, modelFast: string,
     providerCapable: string, modelCapable: string,
+    roleModels?: Record<string, {provider?: string; model?: string}>,
   ) {
     setShowModelModal(false)
     dispatch({ type: 'SAVING' })
@@ -306,6 +307,7 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
           model_fast: modelFast,
           provider_capable: providerCapable,
           model_capable: modelCapable,
+          ...(roleModels && Object.keys(roleModels).length > 0 ? { role_models: roleModels } : {}),
         }),
       })
       if (!runRes.ok) {
@@ -375,7 +377,7 @@ export function TaskDraftPanel({ contextDoc, draftKey, onBack, onPipelineStarted
     {showModelModal && (
       <PipelineModelModal
         models={availableModels}
-        onConfirm={(pf, mf, pc, mc) => handleSaveAndRun(pf, mf, pc, mc)}
+        onConfirm={(pf, mf, pc, mc, rm) => handleSaveAndRun(pf, mf, pc, mc, rm)}
         onCancel={() => setShowModelModal(false)}
       />
     )}

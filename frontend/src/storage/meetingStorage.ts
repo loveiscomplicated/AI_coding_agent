@@ -9,7 +9,7 @@ export class MeetingStorage {
       if (!raw) return []
       const parsed = JSON.parse(raw) as MeetingRecord[]
       // backward compat: 기존 레코드에 meetingType이 없으면 'project'로 설정
-      return parsed.map(r => ({ meetingType: 'project' as const, ...r }))
+      return parsed.map(r => ({ ...r, meetingType: (r as Partial<MeetingRecord>).meetingType ?? 'project' as const }))
     } catch {
       return []
     }
