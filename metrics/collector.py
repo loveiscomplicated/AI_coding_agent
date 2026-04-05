@@ -27,6 +27,8 @@ class TaskReport:
     reviewer_verdict: str = ""
     failure_reasons: list = field(default_factory=list)
     reviewer_feedback: str = ""
+    models_used: dict | None = None
+    # 역할별 실제 사용 모델. 예: {"test_writer": "openai/gpt-4.1-mini", "reviewer": "claude/claude-sonnet-4-20250514"}
 
 
 def save_report(report: TaskReport, reports_dir: str = "agent-data/reports") -> Path:
@@ -99,6 +101,7 @@ def load_reports(
             time_elapsed_seconds=data["time_elapsed_seconds"],
             failure_reasons=data["failure_reasons"] if data["failure_reasons"] is not None else [],
             reviewer_feedback=data["reviewer_feedback"],
+            models_used=data.get("models_used"),
         )
 
         # since 필터링
@@ -158,6 +161,24 @@ def aggregate(reports: list) -> dict:
     first_try_rate = round(first_try_count / total * 100)
     avg_elapsed_seconds = total_elapsed / total
 
+    # 모델별 통계 (models_used가 있는 태스크 기준, 역할 구분 없이 모델 단위 집계)
+    model_stats: dict[str, dict] = {}
+    for r in reports:
+        if not r.models_used:
+            continue
+        seen_models: set[str] = set()
+        for model_key in r.models_used.values():
+            if model_key in seen_models:
+                continue
+            seen_models.add(model_key)
+            if model_key not in model_stats:
+                model_stats[model_key] = {"total": 0, "completed": 0}
+            model_stats[model_key]["total"] += 1
+            if r.status == "COMPLETED":
+                model_stats[model_key]["completed"] += 1
+    for stats in model_stats.values():
+        stats["success_rate"] = round(stats["completed"] / stats["total"], 4) if stats["total"] else 0
+
     return {
         "total": total,
         "completed": completed,
@@ -167,4 +188,5 @@ def aggregate(reports: list) -> dict:
         "avg_elapsed_seconds": avg_elapsed_seconds,
         "total_retries": total_retries,
         "reviewer_approved": reviewer_approved,
+        "model_stats": model_stats,
     }
