@@ -1,6 +1,6 @@
 ---
 completeness: 98
-hint: 5단계 전체 구현 완료. Phase 3 멀티 에이전트 + Discord 핫라인 안정화 + 크로스 언어 프로젝트 지원 강화. (2026-04-04 업데이트)
+hint: 5단계 전체 구현 완료. Phase 3 멀티 에이전트 + Discord 핫라인 안정화 + 크로스 언어 프로젝트 지원 강화. StructureUpdater Tree-sitter 재작성 (다언어 지원 + fallback). (2026-04-06 업데이트)
 ---
 
 # 프로젝트 컨텍스트 문서: Multi-Agent Development System — 5단계 오케스트레이터 연결
@@ -303,6 +303,12 @@ TDD 파이프라인:
 Tree-sitter 기반 다언어 파서로 실제 코드에서 트리 문서를 자동 생성. 에이전트가 프로젝트마다 어떤 언어/프레임워크를 선택하더라도 grammar 패키지 추가만으로 확장 가능. 코드에서 직접 생성하므로 불일치가 구조적으로 불가능.
 
 **현재 지원 언어**: Python, TypeScript, TSX, JavaScript, JSX, C, C++, Rust, Go, Java
+
+**미지원 언어 fallback**: grammar가 없는 확장자 파일은 파싱 건너뛰지 않고 파일명만 포함된 항목으로 PROJECT_STRUCTURE.md에 등재. 에이전트가 해당 파일의 존재를 인지하고 필요 시 직접 읽을 수 있음.
+
+**자동 제외 디렉토리** (`_EXCLUDE_DIRS`): `.git`, `__pycache__`, `node_modules`, `.venv`, `venv`, `.next`, `dist`, `build`, `.cache`, `coverage`, `.agent-workspace`, `.pytest_cache`, `.mypy_cache`, `target`, `.tox` — 빌드 산출물·캐시 디렉토리만 제외. 바이너리 확장자 기준 필터링 없음(에이전트가 `.png`, `.db` 등 임의 파일을 필요로 할 수 있음).
+
+**grammar 선택적 설치**: `pyproject.toml`에는 Python/TS/JS/C/C++/Rust/Go/Java grammar가 기본 포함. 특정 언어가 불필요한 환경에서는 해당 패키지만 제거해도 나머지 언어 파싱은 정상 동작 (`_load_parser()`가 `ImportError` 시 해당 언어를 fallback 처리).
 
 **새 언어 추가 절차** (`structure/updater.py`):
 1. `pip install tree-sitter-{언어}` + `pyproject.toml` 의존성 추가
@@ -627,7 +633,7 @@ Step 6: 보고서 체계 ✅
 
 1. **메트릭 수집기** (`metrics/collector.py`) — Task Report 저장/로드/집계 (34 tests APPROVED)
 2. **Weekly Report 생성기** (`reports/weekly.py`) — 주간 마크다운 보고서 + 패턴 분석 (39 tests APPROVED)
-3. **PROJECT_STRUCTURE.md 생성기** (`structure/updater.py`) — Tree-sitter 다언어 파싱 → 트리 문서 (51 tests APPROVED)
+3. **PROJECT_STRUCTURE.md 생성기** (`structure/updater.py`) — Tree-sitter 다언어 파싱 → 트리 문서 (52 tests APPROVED)
 4. **execution_brief 생성기** (`reports/execution_brief.py`) — 회의 시작 시 주입할 실행 요약 (35 tests APPROVED)
 5. **태스크 의존성 계산기** (`orchestrator/dependency.py`) — 위상 정렬 기반 실행 순서 결정 (27 tests APPROVED)
 

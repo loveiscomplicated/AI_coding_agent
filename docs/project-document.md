@@ -1,6 +1,6 @@
 # Multi-Agent Development System
 
-> 프로젝트 문서 v1.8 | 2026-04-04 — 의존성 pre-check 수정 + 크로스 언어 target_files 자동 보정 + 테스트 통과 판정 강화
+> 프로젝트 문서 v1.9 | 2026-04-06 — StructureUpdater Tree-sitter 재작성 (다언어 지원: Python/TS/JS/C/C++/Rust/Go/Java) + fallback 포함
 
 ---
 
@@ -475,7 +475,7 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
   첫 실제 프로젝트 — 유틸리티 모듈 5개 (셀프 호스팅 검증) ✅ 완료 (2026-03-31)
   ├── metrics/collector.py       — Task Report 저장/로드/집계 (34 tests APPROVED)
   ├── reports/weekly.py          — 주간 보고서 생성 (39 tests APPROVED)
-  ├── structure/updater.py       — Tree-sitter 다언어 파싱 → PROJECT_STRUCTURE.md (51 tests APPROVED)
+  ├── structure/updater.py       — Tree-sitter 다언어 파싱 → PROJECT_STRUCTURE.md (52 tests APPROVED)
   │     지원: Python/TS/JS/C/C++/Rust/Go/Java. 새 언어: pip install + _LANG_MAP + _load_parser() + _parse_{lang}() 추가
   ├── reports/execution_brief.py — 회의 시작 시 주입할 실행 요약 (35 tests APPROVED)
   └── orchestrator/dependency.py — 위상 정렬 기반 실행 순서 결정 (27 tests APPROVED)
