@@ -3,7 +3,7 @@ structure.updater 모듈의 테스트
 """
 import pytest
 from pathlib import Path
-from structure.updater import parse_module, scan_directory, generate_markdown, update
+from structure.updater import parse_module, scan_directory, generate_markdown, update, parse_file
 
 
 class TestParseModule:
@@ -127,18 +127,19 @@ def top_level_func():
 class TestScanDirectory:
     """scan_directory() 함수 테스트"""
     
-    def test_scan_directory_finds_python_files(self, complex_directory_structure):
-        """수락 기준 4: .py 확장자 파일만 처리한다"""
+    def test_scan_directory_finds_supported_files(self, complex_directory_structure):
+        """수락 기준 4: 지원 언어 파일(.py/.ts/.tsx/.js/.jsx)을 처리한다"""
         result = scan_directory(complex_directory_structure)
-        
+
         assert isinstance(result, list)
         assert len(result) > 0
-        
-        # 모든 결과가 dict이고 path를 포함해야 함
+
+        supported_exts = {".py", ".ts", ".tsx", ".js", ".jsx"}
         for module in result:
             assert isinstance(module, dict)
             assert "path" in module
-            assert module["path"].endswith(".py")
+            ext = "." + module["path"].rsplit(".", 1)[-1]
+            assert ext in supported_exts
     
     def test_scan_directory_excludes_default_dirs(self, complex_directory_structure):
         """수락 기준 5: exclude_dirs에 지정된 디렉토리를 건너뛴다"""
@@ -218,11 +219,11 @@ class TestGenerateMarkdown:
         assert "# MY_STRUCTURE" in result
     
     def test_generate_markdown_no_modules(self):
-        """수락 기준 7: 모듈이 없으면 "(파이썬 파일 없음)"을 포함한다"""
+        """수락 기준 7: 모듈이 없으면 "(소스 파일 없음)"을 포함한다"""
         modules = []
         result = generate_markdown(modules)
-        
-        assert "(파이썬 파일 없음)" in result
+
+        assert "(소스 파일 없음)" in result
     
     def test_generate_markdown_includes_file_paths(self):
         """파일 경로를 헤더로 표시한다"""
@@ -395,3 +396,275 @@ class TestIntegration:
         assert result["classes"][0]["name"] == "ClassA"
         assert len(result["functions"]) == 1
         assert result["functions"][0]["name"] == "func_a"
+
+
+class TestParseFileTypeScript:
+    """TypeScript 파일 파싱 테스트"""
+
+    def test_parse_ts_class(self, tmp_path):
+        """TypeScript 클래스와 메서드를 추출한다"""
+        f = tmp_path / "service.ts"
+        f.write_text(
+            """\
+class TokenService {
+    createToken(userId: string): string {
+        return '';
+    }
+    verifyToken(token: string): boolean {
+        return true;
+    }
+}
+""",
+            encoding="utf-8",
+        )
+        result = parse_file(f)
+
+        assert result["language"] == "TypeScript"
+        assert len(result["classes"]) == 1
+        assert result["classes"][0]["name"] == "TokenService"
+        assert "createToken" in result["classes"][0]["methods"]
+        assert "verifyToken" in result["classes"][0]["methods"]
+
+    def test_parse_ts_function(self, tmp_path):
+        """TypeScript 최상위 함수를 추출한다"""
+        f = tmp_path / "utils.ts"
+        f.write_text(
+            """\
+export function add(a: number, b: number): number {
+    return a + b;
+}
+""",
+            encoding="utf-8",
+        )
+        result = parse_file(f)
+
+        assert len(result["functions"]) == 1
+        func = result["functions"][0]
+        assert func["name"] == "add"
+        assert "a" in func["signature"]
+        assert "b" in func["signature"]
+
+    def test_parse_ts_jsdoc(self, tmp_path):
+        """TypeScript JSDoc 주석 첫 줄을 docstring으로 추출한다"""
+        f = tmp_path / "api.ts"
+        f.write_text(
+            """\
+/** Generates a random key */
+export function generateKey(): string {
+    return '';
+}
+""",
+            encoding="utf-8",
+        )
+        result = parse_file(f)
+
+        assert len(result["functions"]) == 1
+        assert result["functions"][0]["docstring"] == "Generates a random key"
+
+    def test_parse_ts_arrow_function(self, tmp_path):
+        """const 화살표 함수를 추출한다"""
+        f = tmp_path / "arrow.ts"
+        f.write_text(
+            "export const multiply = (x: number, y: number): number => x * y;\n",
+            encoding="utf-8",
+        )
+        result = parse_file(f)
+
+        assert len(result["functions"]) == 1
+        assert result["functions"][0]["name"] == "multiply"
+
+
+class TestScanDirectoryMultiLang:
+    """다언어 scan_directory 테스트"""
+
+    def test_includes_typescript(self, tmp_path):
+        """.ts 파일을 포함한다"""
+        (tmp_path / "index.ts").write_text("export function foo() {}\n", encoding="utf-8")
+        (tmp_path / "main.py").write_text("def bar(): pass\n", encoding="utf-8")
+
+        result = scan_directory(tmp_path)
+        paths = [m["path"] for m in result]
+
+        assert any(p.endswith(".ts") for p in paths)
+        assert any(p.endswith(".py") for p in paths)
+
+    def test_unsupported_language_included_as_file_only(self, tmp_path):
+        """미지원 언어(.rb/.lua)는 파일명만 포함되고 클래스/함수는 빈 리스트다"""
+        (tmp_path / "app.rb").write_text("def foo; end\n", encoding="utf-8")
+        (tmp_path / "script.lua").write_text("function foo() end\n", encoding="utf-8")
+        (tmp_path / "main.py").write_text("def ok(): pass\n", encoding="utf-8")
+
+        result = scan_directory(tmp_path)
+        paths = [m["path"] for m in result]
+
+        # 미지원 언어도 경로는 포함
+        assert any(p.endswith(".rb") for p in paths)
+        assert any(p.endswith(".lua") for p in paths)
+        # 하지만 클래스/함수 정보는 없음
+        rb = next(m for m in result if m["path"].endswith(".rb"))
+        assert rb["classes"] == []
+        assert rb["functions"] == []
+
+    def test_all_non_excluded_dir_files_included(self, tmp_path):
+        """제외 디렉토리 밖의 파일은 확장자에 무관하게 목록에 포함된다"""
+        (tmp_path / "image.png").write_bytes(b"\x89PNG")
+        (tmp_path / "data.db").write_bytes(b"SQLite")
+        (tmp_path / "main.py").write_text("def ok(): pass\n", encoding="utf-8")
+
+        result = scan_directory(tmp_path)
+        paths = [m["path"] for m in result]
+
+        assert any(p.endswith(".png") for p in paths)
+        assert any(p.endswith(".db") for p in paths)
+        assert any(p.endswith(".py") for p in paths)
+
+
+class TestParseFileC:
+    """C 파일 파싱 테스트"""
+
+    def test_parse_c_struct(self, tmp_path):
+        """C struct를 클래스로 추출한다"""
+        f = tmp_path / "point.c"
+        f.write_text("struct Point { int x; int y; };\n", encoding="utf-8")
+        result = parse_file(f)
+        assert result["language"] == "C"
+        assert any(c["name"] == "Point" for c in result["classes"])
+
+    def test_parse_c_function(self, tmp_path):
+        """C 최상위 함수를 추출한다"""
+        f = tmp_path / "math.c"
+        f.write_text("int add(int a, int b) { return a + b; }\n", encoding="utf-8")
+        result = parse_file(f)
+        assert any(fn["name"] == "add" for fn in result["functions"])
+        func = next(fn for fn in result["functions"] if fn["name"] == "add")
+        assert "a" in func["signature"]
+        assert "b" in func["signature"]
+
+    def test_parse_h_header(self, tmp_path):
+        """.h 파일도 C로 파싱한다"""
+        f = tmp_path / "api.h"
+        f.write_text("void greet(const char* name);\n", encoding="utf-8")
+        result = parse_file(f)
+        assert result["language"] == "C"
+
+
+class TestParseFileCpp:
+    """C++ 파일 파싱 테스트"""
+
+    def test_parse_cpp_class_with_methods(self, tmp_path):
+        """C++ 클래스와 멤버 함수를 추출한다"""
+        f = tmp_path / "animal.cpp"
+        f.write_text(
+            "class Animal {\npublic:\n    void speak() {}\n    int age() { return 0; }\n};\n",
+            encoding="utf-8",
+        )
+        result = parse_file(f)
+        assert result["language"] == "C++"
+        assert any(c["name"] == "Animal" for c in result["classes"])
+        animal = next(c for c in result["classes"] if c["name"] == "Animal")
+        assert "speak" in animal["methods"]
+        assert "age" in animal["methods"]
+
+    def test_parse_cpp_top_level_function(self, tmp_path):
+        """C++ 최상위 함수를 추출한다"""
+        f = tmp_path / "utils.cpp"
+        f.write_text("int square(int x) { return x * x; }\n", encoding="utf-8")
+        result = parse_file(f)
+        assert any(fn["name"] == "square" for fn in result["functions"])
+
+
+class TestParseFileRust:
+    """Rust 파일 파싱 테스트"""
+
+    def test_parse_rust_struct(self, tmp_path):
+        """Rust struct를 클래스로 추출한다"""
+        f = tmp_path / "config.rs"
+        f.write_text("pub struct Config { pub name: String }\n", encoding="utf-8")
+        result = parse_file(f)
+        assert result["language"] == "Rust"
+        assert any(c["name"] == "Config" for c in result["classes"])
+
+    def test_parse_rust_impl_methods(self, tmp_path):
+        """Rust impl 블록의 메서드를 struct에 귀속시킨다"""
+        f = tmp_path / "server.rs"
+        f.write_text(
+            "pub struct Server {}\nimpl Server {\n    pub fn start(&self) {}\n    pub fn stop(&self) {}\n}\n",
+            encoding="utf-8",
+        )
+        result = parse_file(f)
+        server = next(c for c in result["classes"] if c["name"] == "Server")
+        assert "start" in server["methods"]
+        assert "stop" in server["methods"]
+
+    def test_parse_rust_function(self, tmp_path):
+        """Rust 최상위 함수를 추출한다"""
+        f = tmp_path / "lib.rs"
+        f.write_text("pub fn greet(name: &str) -> String { String::new() }\n", encoding="utf-8")
+        result = parse_file(f)
+        assert any(fn["name"] == "greet" for fn in result["functions"])
+        func = next(fn for fn in result["functions"] if fn["name"] == "greet")
+        assert "name" in func["signature"]
+
+
+class TestParseFileGo:
+    """Go 파일 파싱 테스트"""
+
+    def test_parse_go_struct(self, tmp_path):
+        """Go struct를 클래스로 추출한다"""
+        f = tmp_path / "server.go"
+        f.write_text("package main\ntype Server struct { Port int }\n", encoding="utf-8")
+        result = parse_file(f)
+        assert result["language"] == "Go"
+        assert any(c["name"] == "Server" for c in result["classes"])
+
+    def test_parse_go_method_attached_to_struct(self, tmp_path):
+        """Go 메서드를 receiver 타입의 struct에 귀속시킨다"""
+        f = tmp_path / "server.go"
+        f.write_text(
+            "package main\ntype Server struct {}\nfunc (s *Server) Start() error { return nil }\n",
+            encoding="utf-8",
+        )
+        result = parse_file(f)
+        server = next(c for c in result["classes"] if c["name"] == "Server")
+        assert "Start" in server["methods"]
+
+    def test_parse_go_function(self, tmp_path):
+        """Go 최상위 함수를 추출한다"""
+        f = tmp_path / "math.go"
+        f.write_text("package main\nfunc Add(a, b int) int { return a + b }\n", encoding="utf-8")
+        result = parse_file(f)
+        assert any(fn["name"] == "Add" for fn in result["functions"])
+
+
+class TestParseFileJava:
+    """Java 파일 파싱 테스트"""
+
+    def test_parse_java_class_with_methods(self, tmp_path):
+        """Java 클래스와 메서드를 추출한다"""
+        f = tmp_path / "Calculator.java"
+        f.write_text(
+            "public class Calculator {\n    public int add(int a, int b) { return a + b; }\n}\n",
+            encoding="utf-8",
+        )
+        result = parse_file(f)
+        assert result["language"] == "Java"
+        assert any(c["name"] == "Calculator" for c in result["classes"])
+        calc = next(c for c in result["classes"] if c["name"] == "Calculator")
+        assert "add" in calc["methods"]
+
+    def test_parse_java_javadoc(self, tmp_path):
+        """Java Javadoc 주석 첫 줄을 docstring으로 추출한다"""
+        f = tmp_path / "Service.java"
+        f.write_text(
+            "/** User service class */\npublic class UserService {}\n",
+            encoding="utf-8",
+        )
+        result = parse_file(f)
+        assert result["classes"][0]["docstring"] == "User service class"
+
+    def test_parse_java_interface(self, tmp_path):
+        """Java interface를 클래스로 추출한다"""
+        f = tmp_path / "Repo.java"
+        f.write_text("public interface Repository { void save(); }\n", encoding="utf-8")
+        result = parse_file(f)
+        assert any(c["name"] == "Repository" for c in result["classes"])
