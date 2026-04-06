@@ -300,7 +300,17 @@ TDD 파이프라인:
                                               → 다음 그룹 에이전트에 주입
 ```
 
-Python AST 파싱 스크립트로 실제 코드에서 트리 문서를 자동 생성. 코드에서 직접 생성하므로 불일치가 구조적으로 불가능.
+Tree-sitter 기반 다언어 파서로 실제 코드에서 트리 문서를 자동 생성. 에이전트가 프로젝트마다 어떤 언어/프레임워크를 선택하더라도 grammar 패키지 추가만으로 확장 가능. 코드에서 직접 생성하므로 불일치가 구조적으로 불가능.
+
+**현재 지원 언어**: Python, TypeScript, TSX, JavaScript, JSX, C, C++, Rust, Go, Java
+
+**새 언어 추가 절차** (`structure/updater.py`):
+1. `pip install tree-sitter-{언어}` + `pyproject.toml` 의존성 추가
+2. `_LANG_MAP`에 확장자 → 언어 키 매핑 추가 (예: `".rb": "ruby"`)
+3. `_LANG_LABEL`에 언어 키 → 표시 이름 추가 (예: `"ruby": "Ruby"`)
+4. `_load_parser()`에 `elif lang == "ruby":` 분기 추가
+5. `_parse_{언어}()` 함수 작성 (클래스·함수 추출 로직)
+6. `parse_file()`의 언어 분기에 연결
 
 ---
 
@@ -617,7 +627,7 @@ Step 6: 보고서 체계 ✅
 
 1. **메트릭 수집기** (`metrics/collector.py`) — Task Report 저장/로드/집계 (34 tests APPROVED)
 2. **Weekly Report 생성기** (`reports/weekly.py`) — 주간 마크다운 보고서 + 패턴 분석 (39 tests APPROVED)
-3. **PROJECT_STRUCTURE.md 생성기** (`structure/updater.py`) — Python AST 파싱 → 트리 문서 (31 tests APPROVED)
+3. **PROJECT_STRUCTURE.md 생성기** (`structure/updater.py`) — Tree-sitter 다언어 파싱 → 트리 문서 (51 tests APPROVED)
 4. **execution_brief 생성기** (`reports/execution_brief.py`) — 회의 시작 시 주입할 실행 요약 (35 tests APPROVED)
 5. **태스크 의존성 계산기** (`orchestrator/dependency.py`) — 위상 정렬 기반 실행 순서 결정 (27 tests APPROVED)
 
@@ -648,7 +658,7 @@ task-004: execution_brief 생성기 (→ task-001)
 | 핫라인 | Discord Bot (hotline/notifier.py) | 모바일 알림, 채널 분리, 풍부한 Bot API |
 | Task Report 저장 | YAML (metrics/collector.py) | tasks.yaml과 일관성 |
 | Weekly Report | 마크다운 | LLM이 직접 소비 가능, 사람도 읽기 쉬움 |
-| AST 파싱 | Python `ast` 모듈 (structure/updater.py) | 표준 라이브러리, 외부 의존성 없음 |
+| 코드 파싱 | Tree-sitter (structure/updater.py) | 다언어 지원 — Python/TS/JS/C/C++/Rust/Go/Java 기본 포함, grammar 패키지 추가만으로 확장 가능 |
 | 그래프 알고리즘 | Kahn's algorithm (resolve_execution_groups) | 단순, 외부 라이브러리 불필요 |
 | 병렬 실행 | ThreadPoolExecutor (orchestrator/run.py) | Python 표준 라이브러리 |
 | Git 병렬 안전 | git worktree (orchestrator/git_workflow.py) | 메인 repo HEAD 불변, 여러 태스크 동시 작업 가능 |
@@ -694,6 +704,7 @@ task-004: execution_brief 생성기 (→ task-001)
 | 매 응답마다 JSON 컨텍스트 문서 반환 | 회의 대화 흐름을 방해, 별도 호출로 분리 (기존 설계에서 이미 확정) |
 | PROJECT_STRUCTURE 레벨 4 (전체 docstring) | 문서 비대화, 토큰 낭비 |
 | PROJECT_STRUCTURE 레벨 2 (시그니처만) | 함수 역할 파악 불충분, 결국 파일을 열어야 함 |
+| Python `ast` 모듈로 StructureUpdater 구현 | Python 전용 — 에이전트가 다른 언어를 선택할 경우 파싱 불가. Tree-sitter로 대체 |
 | Task Report JSON 형식 | tasks.yaml과의 일관성을 위해 YAML 선택 |
 | Anthropic 전용 설계 | 멀티 프로바이더 지원으로 확장 — claude/openai/glm/ollama 모두 동일 인터페이스 |
 | dangerouslyAllowBrowser (프론트엔드 직접 API 호출) | 백엔드 API 프록시로 전환하여 API 키 서버 측 관리 |

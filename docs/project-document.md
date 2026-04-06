@@ -164,7 +164,7 @@ AI_coding_agent/
 │   ├── weekly.py              # 주간 보고서 생성기 (에이전트가 생성한 독립 모듈)
 │   └── execution_brief.py     # execution_brief 생성기
 ├── structure/
-│   └── updater.py             # Python AST → PROJECT_STRUCTURE.md 자동 생성
+│   └── updater.py             # Tree-sitter 다언어 파싱 → PROJECT_STRUCTURE.md 자동 생성
 ├── hotline/
 │   └── notifier.py            # DiscordNotifier (httpx 기반, send/wait_for_reply/listen_for_commands, 429 rate limit, urgent_callback)
 ├── tools/
@@ -475,7 +475,8 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
   첫 실제 프로젝트 — 유틸리티 모듈 5개 (셀프 호스팅 검증) ✅ 완료 (2026-03-31)
   ├── metrics/collector.py       — Task Report 저장/로드/집계 (34 tests APPROVED)
   ├── reports/weekly.py          — 주간 보고서 생성 (39 tests APPROVED)
-  ├── structure/updater.py       — Python AST → PROJECT_STRUCTURE.md (31 tests APPROVED)
+  ├── structure/updater.py       — Tree-sitter 다언어 파싱 → PROJECT_STRUCTURE.md (51 tests APPROVED)
+  │     지원: Python/TS/JS/C/C++/Rust/Go/Java. 새 언어: pip install + _LANG_MAP + _load_parser() + _parse_{lang}() 추가
   ├── reports/execution_brief.py — 회의 시작 시 주입할 실행 요약 (35 tests APPROVED)
   └── orchestrator/dependency.py — 위상 정렬 기반 실행 순서 결정 (27 tests APPROVED)
   상세 설계: docs/project-document-after_Phase_2.md
