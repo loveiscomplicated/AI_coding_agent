@@ -50,6 +50,8 @@ WRITE_TOOLS: list[str] = [
     "write_file",
     "edit_file",
     "append_to_file",
+    "delete_file",
+    "delete_directory",
 ]
 
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from tools.file_tools import (
     append_to_file,
+    delete_directory,
+    delete_file,
     edit_file,
     list_directory,
     read_file,
@@ -114,6 +116,26 @@ TOOL_REGISTRY: dict[str, dict] = {
         "params": {
             "path": ("string", "대상 파일 경로", True, None),
             "content": ("string", "추가할 내용", True, None),
+        },
+    },
+    "delete_file": {
+        "fn": delete_file,
+        "description": (
+            "파일 삭제. 워크스페이스 내부 파일만 삭제 가능하며 context/ 디렉토리는 보호됩니다. "
+            "디렉토리 삭제는 delete_directory를 사용하세요."
+        ),
+        "params": {
+            "path": ("string", "삭제할 파일 경로 (워크스페이스 기준 상대 경로)", True, None),
+        },
+    },
+    "delete_directory": {
+        "fn": delete_directory,
+        "description": (
+            "디렉토리와 하위 내용을 모두 삭제. 워크스페이스 내부만 허용하며 "
+            "context/ 디렉토리와 워크스페이스 루트는 보호됩니다."
+        ),
+        "params": {
+            "path": ("string", "삭제할 디렉토리 경로 (워크스페이스 기준 상대 경로)", True, None),
         },
     },
     "get_imports": {
