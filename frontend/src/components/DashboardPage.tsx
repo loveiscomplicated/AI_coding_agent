@@ -132,10 +132,29 @@ function ModelInfoRow({
       'claude-haiku-4-5-20251001': 'Haiku 4.5',
       'claude-sonnet-4-6': 'Sonnet 4.6',
       'claude-opus-4-6': 'Opus 4.6',
+      'gpt-4.1': 'GPT-4.1',
+      'gpt-4.1-mini': 'GPT-4.1 Mini',
       'gpt-4o-mini': 'GPT-4o Mini',
       'gpt-4o': 'GPT-4o',
     }
     return map[id] || id
+  }
+
+  const roleLabels: Record<string, string> = {
+    test_writer: '테스트 작성',
+    implementer: '구현',
+    reviewer: '리뷰',
+  }
+
+  // role_models에서 기본값(agentModel)과 다른 항목만 추출
+  const roleOverrides: { label: string; provider: string; model: string }[] = []
+  const roleModels: Record<string, { provider?: string; model?: string }> = req?.role_models ?? {}
+  for (const [key, val] of Object.entries(roleModels)) {
+    const rModel = val?.model || ''
+    const rProvider = val?.provider || agentProvider
+    if (rModel && (rModel !== agentModel || rProvider !== agentProvider)) {
+      roleOverrides.push({ label: roleLabels[key] ?? key, provider: rProvider, model: rModel })
+    }
   }
 
   return (
@@ -163,6 +182,14 @@ function ModelInfoRow({
         <span className="text-gray-400 dark:text-zinc-500">오케스트레이터</span>
         <span className="font-medium">{orchProvider} / {modelName(orchModel)}</span>
       </span>
+
+      {/* 역할별 오버라이드 모델 (기본값과 다를 때만 표시) */}
+      {roleOverrides.map(({ label, provider, model }) => (
+        <span key={label} className="flex items-center gap-1 text-[10px] bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded-full">
+          <span className="text-blue-400 dark:text-blue-500">{label}</span>
+          <span className="font-medium">{provider} / {modelName(model)}</span>
+        </span>
+      ))}
     </div>
   )
 }

@@ -36,6 +36,7 @@ _KNOWN_MODELS: dict[str, list[dict[str, str]]] = {
         {"id": "claude-opus-4-6", "name": "Opus 4.6"},
     ],
     "openai": [
+        {"id": "gpt-4.1", "name": "GPT-4.1"},
         {"id": "gpt-4.1-mini", "name": "GPT-4.1 Mini"},
         {"id": "gpt-4o-mini", "name": "GPT-4o Mini"},
         {"id": "gpt-4o", "name": "GPT-4o"},
