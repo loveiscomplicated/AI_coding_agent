@@ -434,8 +434,6 @@ def run_pipeline(
     fast_llm = create_client(_provider_fast, LLMConfig(model=model_fast, max_tokens=8192))
     capable_llm = create_client(_provider_capable, LLMConfig(model=model_capable, max_tokens=8192))
     runner = DockerTestRunner()
-    if not runner._image_exists():
-        runner.build_image()
 
     pipeline = TDDPipeline(
         agent_llm=fast_llm, implementer_llm=fast_llm, test_runner=runner,
@@ -773,6 +771,7 @@ def run_pipeline(
                         task, failure_reason, orch_attempt + 1, hints_tried,
                         orchestrator_model=model_capable,
                         coding_agent_model=model_fast,
+                        models_used=result.models_used or None,
                     )
                     report_path = orch_save_report(orch_report_text, task.id, reports_dir)
                     logger.warning(
@@ -1546,16 +1545,8 @@ def main() -> int:
             print(f"  {_warn(issue)}")
         return 1
 
-    # Docker 이미지
+    # Docker 이미지 (언어별 자동 빌드 — DockerTestRunner.run() 내부에서 처리)
     runner = DockerTestRunner()
-    if not runner._image_exists():
-        print(_info("Docker 테스트 이미지 빌드 중..."))
-        try:
-            runner.build_image()
-            print(_ok("이미지 빌드 완료"))
-        except RuntimeError as e:
-            print(_fail(f"Docker 이미지 빌드 실패: {e}"))
-            return 1
 
     # LLM 클라이언트
     try:

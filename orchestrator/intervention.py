@@ -306,6 +306,7 @@ def generate_report(
     hints_tried: list[str],
     orchestrator_model: str = "",
     coding_agent_model: str = "",
+    models_used: dict[str, str] | None = None,
 ) -> str:
     """
     최종 실패 보고서를 LLM으로 생성한다.
@@ -350,12 +351,25 @@ id: {task.id}
         logger.error("오케스트레이터 보고서 생성 LLM 호출 실패: %s", e)
         report_body = f"# 보고서 생성 실패\n\n오류: {e}\n\n## 최종 실패 원인\n{failure_reason}"
 
+    role_labels = {
+        "test_writer": "테스트 작성 에이전트",
+        "implementer": "구현 에이전트",
+        "reviewer": "리뷰 에이전트",
+    }
+    rows = (
+        f"| 중앙 오케스트레이터 | `{orchestrator_model or '(미지정)'}` |\n"
+        f"| 코딩 에이전트 | `{coding_agent_model or '(미지정)'}` |\n"
+    )
+    if models_used:
+        for role_key, model_str in models_used.items():
+            label = role_labels.get(role_key, role_key)
+            rows += f"| {label} | `{model_str}` |\n"
+
     model_section = (
         f"\n\n---\n\n## 사용 모델\n\n"
         f"| 역할 | 모델 |\n"
         f"|------|------|\n"
-        f"| 중앙 오케스트레이터 | `{orchestrator_model or '(미지정)'}` |\n"
-        f"| 코딩 에이전트 | `{coding_agent_model or '(미지정)'}` |\n"
+        + rows
     )
     return report_body + model_section
 
