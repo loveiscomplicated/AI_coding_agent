@@ -64,7 +64,7 @@ class ScopedReactLoop(ReactLoop):
         llm,
         role: RoleConfig,
         workspace_dir: str | Path,
-        max_iterations: int = 20,
+        max_iterations: int = 25,
         on_progress=None,
         write_deadline: int | None = None,
         stop_check=None,

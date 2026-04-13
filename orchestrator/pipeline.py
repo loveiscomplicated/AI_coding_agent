@@ -137,8 +137,8 @@ class TDDPipeline:
         test_runner: DockerTestRunner | None = None,
         max_retries: int = MAX_RETRIES,
         max_review_retries: int = MAX_REVIEW_RETRIES,
-        max_iterations: int = 15,
-        reviewer_max_iterations: int = 5,
+        max_iterations: int = 20,
+        reviewer_max_iterations: int = 8,
         implementer_write_deadline: int = 8,
         # 역할별 모델 오버라이드 (None이면 agent_llm/implementer_llm 사용)
         role_models: dict[str, RoleModelConfig] | None = None,
@@ -500,6 +500,16 @@ class TDDPipeline:
             task.status = TaskStatus.REVIEWING
             _p({"type": "step", "step": "reviewing", "message": "Reviewer: 코드 검토 중…"})
             review_scoped = self._run_reviewer(task, workspace, docker_result, on_progress=_agent_p, pause_ctrl=pause_ctrl)
+            # MAX_ITER로 종료된 경우 파싱 전에 명시적 오류 메시지로 교체
+            if review_scoped.loop_result and not review_scoped.loop_result.succeeded:
+                from llm.base import StopReason as _SR
+                if review_scoped.loop_result.stop_reason == _SR.MAX_ITER:
+                    review_scoped = type(review_scoped)(
+                        answer=f"VERDICT: CHANGES_REQUESTED\nSUMMARY: 리뷰어가 반복 한도({self.reviewer_max_iterations}회)를 초과했습니다.\nDETAILS:\n리뷰어가 파일 탐색 중 반복 한도를 초과하여 판정을 완료하지 못했습니다. 구현을 수동으로 확인하거나 재시도하세요.",
+                        succeeded=False,
+                        workspace_files=review_scoped.workspace_files,
+                        loop_result=review_scoped.loop_result,
+                    )
             review = _parse_review(review_scoped.answer)
             logger.info("[%s] 리뷰 결과: %s — %s", task.id, review.verdict, review.summary)
 
@@ -509,12 +519,13 @@ class TDDPipeline:
                 metrics.review_retries = review_attempt
                 break
 
+            _reviewer_fb = review.details or review.summary or "(Reviewer 피드백 없음)"
             _p({"type": "step", "step": "review_rejected",
-                "message": f"Reviewer CHANGES_REQUESTED — {review.summary}"})
+                "message": f"Reviewer CHANGES_REQUESTED — {_reviewer_fb}"})
 
             if review_attempt < self.max_review_retries:
                 # CHANGES_REQUESTED → 피드백을 Implementer에 전달하고 재시도
-                reviewer_feedback = review.details or review.summary
+                reviewer_feedback = _reviewer_fb
                 logger.warning(
                     "[%s] Reviewer CHANGES_REQUESTED (리뷰 시도 %d/%d) — 피드백 반영 재구현\n  %s",
                     task.id, review_attempt + 1, self.max_review_retries,
@@ -529,7 +540,7 @@ class TDDPipeline:
         task.status = TaskStatus.COMMITTING
         failure_reason = (
             "" if review.approved
-            else f"Reviewer CHANGES_REQUESTED: {review.summary}"
+            else f"Reviewer CHANGES_REQUESTED: {review.details or review.summary or '(피드백 없음)'}"
         )
         return PipelineResult(
             task=task,
@@ -932,7 +943,10 @@ def _validate_python_test(src: str, fname: str) -> list[str]:
     # ── 플레이스홀더 감지: src/ import 없음 ───────────────────────────────
     # 커스텀 Python 테스트(pytest 미사용)는 test_ 함수 없이 모듈 레벨에서 동작한다.
     # src.* 또는 workspace 코드를 전혀 import하지 않으면 플레이스홀더로 간주한다.
+    # 단, 파일시스템/환경 검증 테스트(os, shutil, pathlib, importlib)는 예외다.
+    _FILESYSTEM_MODULES = {"os", "shutil", "pathlib", "importlib", "subprocess"}
     has_src_import = False
+    has_filesystem_import = False
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             if node.module and (
@@ -942,11 +956,15 @@ def _validate_python_test(src: str, fname: str) -> list[str]:
             ):
                 has_src_import = True
                 break
+            if node.module and node.module.split(".")[0] in _FILESYSTEM_MODULES:
+                has_filesystem_import = True
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name.startswith("src"):
                     has_src_import = True
                     break
+                if alias.name.split(".")[0] in _FILESYSTEM_MODULES:
+                    has_filesystem_import = True
         if has_src_import:
             break
 
@@ -954,8 +972,8 @@ def _validate_python_test(src: str, fname: str) -> list[str]:
         n for n in ast.walk(tree)
         if isinstance(n, ast.FunctionDef) and n.name.startswith("test")
     ]
-    # test_ 함수도 없고 src import도 없으면 → 플레이스홀더
-    if not test_funcs and not has_src_import:
+    # test_ 함수도 없고 src import도 없고 파일시스템 import도 없으면 → 플레이스홀더
+    if not test_funcs and not has_src_import and not has_filesystem_import:
         issues.append(
             f"{fname}: src/ import 없음 — 태스크와 무관한 플레이스홀더 테스트로 의심됨"
         )
@@ -1165,19 +1183,21 @@ def _parse_review(raw: str) -> ReviewResult:
 
     for line in raw.splitlines():
         stripped = line.strip()
+        # 마크다운 볼드(**VERDICT**: ...) 또는 헤더(## VERDICT: ...) 제거 후 파싱
+        normalized = re.sub(r"^\*{1,3}|^#{1,6}\s*|\*{1,3}(?=:)", "", stripped).strip()
 
-        if stripped.upper().startswith("VERDICT:"):
-            value = stripped.split(":", 1)[1].strip().upper()
+        if normalized.upper().startswith("VERDICT:"):
+            value = normalized.split(":", 1)[1].strip().upper()
             if value in ("APPROVED", "CHANGES_REQUESTED"):
                 verdict = value
 
-        elif stripped.upper().startswith("SUMMARY:"):
-            summary = stripped.split(":", 1)[1].strip()
+        elif normalized.upper().startswith("SUMMARY:"):
+            summary = normalized.split(":", 1)[1].strip()
 
-        elif stripped.upper().startswith("DETAILS:"):
+        elif normalized.upper().startswith("DETAILS:"):
             in_details = True
             # DETAILS: 와 같은 줄에 내용이 있을 수도 있음
-            inline = stripped.split(":", 1)[1].strip()
+            inline = normalized.split(":", 1)[1].strip()
             if inline:
                 details_lines.append(inline)
 

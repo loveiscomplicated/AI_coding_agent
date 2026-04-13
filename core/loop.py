@@ -105,7 +105,7 @@ class ReactLoop:
     def __init__(
         self,
         llm,  # BaseLLM 구현체
-        max_iterations: int = 10,
+        max_iterations: int = 15,
         tool_timeout_s: float = 30.0,  # 도구 실행 타임아웃 (초)
         on_tool_call=None,     # Callable[[ToolCall], None] — CLI 훅
         on_tool_result=None,   # Callable[[ToolResult], None] — CLI 훅
@@ -506,29 +506,39 @@ def _truncate_tool_result(content: str, max_chars: int) -> str:
 def _trim_history(messages: list[Message], window: int) -> list[Message]:
     """
     초기 태스크 메시지(messages[0])를 유지하고,
-    최근 window 쌍(assistant + tool_result)만 남긴다.
+    최근 window 턴만 남긴다.
 
-    각 쌍은 2개 메시지(assistant 턴 + user/tool_result 턴)로 구성되므로
-    보존 기준은 1 + 2*window 개 메시지다.
-
-    tail의 첫 메시지가 user(tool_result)이면 한 칸 더 잘라 assistant로 시작하게 한다.
-    GLM 등은 messages[0](user/task) 바로 뒤에 user가 오면 1214 오류를 반환한다.
+    한 턴 = (assistant 메시지, user 메시지) 쌍. 쌍을 원자 단위로 취급하므로
+    assistant(tool_calls)와 그에 대응하는 user(tool_results)가 분리되지 않는다.
+    GLM·OpenAI·Claude 모두 tool_call ↔ tool_result 쌍이 깨지면 오류를 반환한다.
 
     window=0이면 트리밍하지 않는다.
     """
     if window <= 0:
         return messages
-    max_msgs = 1 + 2 * window
-    if len(messages) <= max_msgs:
+
+    # messages[0]은 초기 user(task). 이후 메시지를 (assistant, user) 쌍으로 묶는다.
+    turns: list[tuple[int, int | None]] = []
+    i = 1
+    while i < len(messages):
+        if messages[i].role == "assistant":
+            if i + 1 < len(messages) and messages[i + 1].role == "user":
+                turns.append((i, i + 1))
+                i += 2
+            else:
+                turns.append((i, None))
+                i += 1
+        else:
+            i += 1
+
+    if len(turns) <= window:
         return messages
-    trimmed = len(messages) - max_msgs
-    logger.debug("히스토리 트리밍: %d개 메시지 드롭 (window=%d)", trimmed, window)
-    tail = messages[-(2 * window):]
-    # messages[0]은 user(task)이므로 tail[0]도 assistant여야 한다.
-    # 짝수 개 슬라이싱으로 인해 tail이 user(tool_result)로 시작할 수 있으므로 한 칸 제거.
-    if tail and tail[0].role != "assistant":
-        tail = tail[1:]
-    return [messages[0]] + tail
+
+    dropped = len(turns) - window
+    logger.debug("히스토리 트리밍: %d턴 드롭 (window=%d)", dropped, window)
+    kept = turns[-window:]
+    start_idx = kept[0][0]
+    return [messages[0]] + messages[start_idx:]
 
 
 def _is_fatal_error(error_message: str) -> bool:
