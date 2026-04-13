@@ -1,11 +1,20 @@
 """
-core/loop.py — ReAct 루프 (Reason → Act → Observe)
+core/loop.py — ReAct 루프 (Reason → Act → Observe → Heal → Replan)
 
 흐름:
   1. LLM에 메시지 + 도구 스키마 전송
   2. tool_use 블록 감지 → 실제 도구 실행
-  3. tool_result를 다시 LLM에 전달
-  4. stop_reason == "end_turn"이면 종료
+  3. TRANSIENT 에러: 자동 재시도 (LLM 관여 없음)
+     FIXABLE 에러: 힐 프롬프트 주입 → LLM 재계획 (Self-Healing)
+     FATAL 에러: 즉시 루프 종료
+  4. tool_result를 다시 LLM에 전달
+  5. stop_reason == "end_turn"이면 종료
+
+신규 파라미터:
+  max_heal_attempts  : FIXABLE 에러당 LLM 재시도 한도 (기본 2)
+  enable_healing     : False → 기존 동작 완벽 보존
+  verification_gate  : VerificationGate 인스턴스 (git_commit 전 검증)
+  context_pruner     : SemanticContextPruner 인스턴스 (시맨틱 컨텍스트 관리)
 """
 
 from __future__ import annotations
@@ -13,6 +22,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 
 from typing import Any, Callable
 
@@ -37,6 +47,16 @@ _WRITE_TOOLS = frozenset({"write_file", "edit_file", "append_to_file"})
 
 
 # ── 타입 정의 ─────────────────────────────────────────────────────────────────
+
+class LoopPhase(str, Enum):
+    """ReAct 루프의 실행 단계."""
+    PLAN    = "plan"
+    EXECUTE = "execute"
+    OBSERVE = "observe"
+    HEAL    = "heal"
+    REPLAN  = "replan"
+
+
 @dataclass
 class ToolCall:
     """LLM이 요청한 도구 호출 하나"""
@@ -63,6 +83,30 @@ class LoopIteration:
     tool_calls: list[ToolCall]
     tool_results: list[ToolResult]
     elapsed_ms: float
+    phase: LoopPhase = LoopPhase.OBSERVE
+
+
+@dataclass
+class HealEvent:
+    """자가 수정(Self-Healing) 이벤트 기록."""
+    iteration: int
+    tool_name: str
+    attempt: int
+    error_class: str
+    error_summary: str
+
+
+@dataclass
+class HealAttemptTracker:
+    """루프 전체에서 도구별 힐 시도 횟수를 추적한다."""
+    counts: dict[str, int] = field(default_factory=dict)
+
+    def increment(self, tool_use_id: str) -> int:
+        self.counts[tool_use_id] = self.counts.get(tool_use_id, 0) + 1
+        return self.counts[tool_use_id]
+
+    def get(self, tool_use_id: str) -> int:
+        return self.counts.get(tool_use_id, 0)
 
 
 @dataclass
@@ -75,6 +119,7 @@ class LoopResult:
     messages: list[Message] = field(default_factory=list)
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    heal_events: list[HealEvent] = field(default_factory=list)  # 자가 수정 이벤트 기록
 
     @property
     def succeeded(self) -> bool:
@@ -116,6 +161,11 @@ class ReactLoop:
         history_window: int = 6,  # 보존할 최근 turn 쌍 수 (0=무제한)
         write_deadline: int | None = None,  # 이 반복 수 내 write 도구 미호출 시 WRITE_LOOP 종료
         stop_check: Callable[[], bool] | None = None,  # True 반환 시 LLM 호출 전 즉시 중단
+        # ── 신규: 4개 모듈 파라미터 ──────────────────────────────────────────
+        max_heal_attempts: int = 2,      # [Module 1] FIXABLE 에러당 LLM 재시도 한도
+        enable_healing: bool = True,     # [Module 1] False → 기존 에러 동작 완벽 보존
+        verification_gate=None,          # [Module 4] VerificationGate | None
+        context_pruner=None,             # [Module 3] SemanticContextPruner | None
     ):
         self.llm: BaseLLMClient = llm
         self.max_iterations = max_iterations
@@ -129,6 +179,10 @@ class ReactLoop:
         self.history_window = history_window
         self.write_deadline = write_deadline
         self.stop_check = stop_check
+        self.max_heal_attempts = max_heal_attempts
+        self.enable_healing = enable_healing
+        self.verification_gate = verification_gate
+        self.context_pruner = context_pruner
         self.TOOLS_SCHEMA = self.get_tools_schema()
 
     # ── 공개 인터페이스 ────────────────────────────────────────────────────────
@@ -153,11 +207,13 @@ class ReactLoop:
             user_input=user_message, history=history
         )
         iterations: list[LoopIteration] = []
+        heal_events: list[HealEvent] = []
         total_input_tokens: int = 0
         total_output_tokens: int = 0
         _consecutive_missing_tool_use = 0  # tool_use 블록 없이 연속 발생 횟수
         _write_tool_used = False  # 루프 동안 쓰기 도구가 호출되었는지 추적
         _nudge_attempted = False  # 코드블록 감지 → 도구 사용 유도를 이미 시도했는지
+        _heal_tracker = HealAttemptTracker()  # [Module 1] 도구별 힐 시도 횟수
 
         for i in range(self.max_iterations):
             # ── 중단 체크: LLM 호출 전 ────────────────────────────────────────
@@ -170,6 +226,7 @@ class ReactLoop:
                     messages=messages,
                     total_input_tokens=total_input_tokens,
                     total_output_tokens=total_output_tokens,
+                    heal_events=heal_events,
                 )
 
             t0 = time.perf_counter()
@@ -188,6 +245,7 @@ class ReactLoop:
                     stop_reason=StopReason.LLM_ERROR,
                     iterations=iterations,
                     messages=messages,
+                    heal_events=heal_events,
                 )
 
             # 토큰 누적 (LLMResponse 에 input_tokens/output_tokens 가 있을 때)
@@ -248,6 +306,7 @@ class ReactLoop:
                     messages=messages,
                     total_input_tokens=total_input_tokens,
                     total_output_tokens=total_output_tokens,
+                    heal_events=heal_events,
                 )
 
             # ── Act: tool_use 블록 수집 ───────────────────────────────────────
@@ -284,9 +343,11 @@ class ReactLoop:
 
             # assistant 턴을 히스토리에 추가
             messages.append(Message(role="assistant", content=response.content))
-            # ── Observe: 도구 실행 ────────────────────────────────────────────
+
+            # ── Execute + Observe: 도구 실행 (Self-Healing 포함) ─────────────
             tool_results: list[ToolResult] = []
             hard_stop = False
+            heal_injected = False  # 이번 iteration 에서 힐 프롬프트를 주입했는지
 
             for tc in tool_calls:
                 # 쓰기 도구 사용 추적
@@ -310,35 +371,105 @@ class ReactLoop:
                             self.on_tool_result(tr)
                         continue
 
-                tr = self._execute_tool(tc)
+                # [Module 1] TRANSIENT 에러 자동 재시도 (LLM 관여 없음)
+                tr = self._execute_tool_with_transient_retry(tc)
                 tool_results.append(tr)
 
                 if self.on_tool_result:
                     self.on_tool_result(tr)
 
-                # 치명적 오류면 루프 종료
-                if tr.is_error and _is_fatal_error(tr.content):
-                    hard_stop = True
-                    break
+                if tr.is_error:
+                    if self.enable_healing:
+                        # [Module 1] 에러 분류 → 처리 방식 결정
+                        from core.heal import classify_error, ErrorClass, HealContext, build_heal_prompt
+                        ec = classify_error(tc.name, tr.content)
 
-            # tool_results를 다음 user 턴으로 추가 (결과가 너무 크면 잘라냄)
-            messages.append(
-                Message(
-                    role="user",
-                    content=[
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tr.tool_use_id,
-                            "content": _truncate_tool_result(tr.content, self.max_tool_result_chars),
-                            "is_error": tr.is_error,
-                        }
-                        for tr in tool_results
-                    ],
+                        if ec == ErrorClass.FATAL or _is_fatal_error(tr.content):
+                            hard_stop = True
+                            break
+
+                        if ec == ErrorClass.FIXABLE:
+                            attempt = _heal_tracker.increment(tc.id)
+                            logger.warning(
+                                "[HEAL] '%s' FIXABLE 에러 (attempt %d/%d): %s",
+                                tc.name, attempt, self.max_heal_attempts,
+                                tr.content[:120],
+                            )
+                            heal_events.append(HealEvent(
+                                iteration=i + 1,
+                                tool_name=tc.name,
+                                attempt=attempt,
+                                error_class=ec.value,
+                                error_summary=tr.content[:200],
+                            ))
+
+                            if attempt <= self.max_heal_attempts:
+                                # 부분 tool_results + 힐 프롬프트를 메시지에 주입
+                                partial_content = [
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": r.tool_use_id,
+                                        "content": _truncate_tool_result(
+                                            r.content, self.max_tool_result_chars
+                                        ),
+                                        "is_error": r.is_error,
+                                    }
+                                    for r in tool_results
+                                ]
+                                messages.append(
+                                    Message(role="user", content=partial_content)
+                                )
+                                heal_prompt = build_heal_prompt(HealContext(
+                                    tool_name=tc.name,
+                                    tool_input=tc.input,
+                                    error_content=tr.content,
+                                    attempt=attempt,
+                                    max_attempts=self.max_heal_attempts,
+                                    error_class=ec,
+                                ))
+                                messages.append(
+                                    Message(role="user", content=heal_prompt)
+                                )
+                                heal_injected = True
+                                break  # tool_calls 루프 탈출 → outer for-loop 다음 iteration
+                            else:
+                                # 힐 한도 초과 → FATAL 처리
+                                logger.error(
+                                    "[HEAL] '%s' 최대 힐 시도(%d) 초과 — 루프 종료",
+                                    tc.name, self.max_heal_attempts,
+                                )
+                                hard_stop = True
+                                break
+                    else:
+                        # enable_healing=False: 기존 동작 (FATAL 키워드만 검사)
+                        if _is_fatal_error(tr.content):
+                            hard_stop = True
+                            break
+
+            # 힐 프롬프트를 주입한 경우 tool_results 블록을 다시 추가하지 않는다
+            if not heal_injected:
+                # tool_results를 다음 user 턴으로 추가 (결과가 너무 크면 잘라냄)
+                messages.append(
+                    Message(
+                        role="user",
+                        content=[
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tr.tool_use_id,
+                                "content": _truncate_tool_result(tr.content, self.max_tool_result_chars),
+                                "is_error": tr.is_error,
+                            }
+                            for tr in tool_results
+                        ],
+                    )
                 )
-            )
 
-            # 슬라이딩 윈도우: 초기 태스크 메시지 + 최근 history_window 쌍만 유지
-            messages = _trim_history(messages, self.history_window)
+            # [Module 3] 시맨틱 컨텍스트 pruner 또는 기존 슬라이딩 윈도우
+            if self.context_pruner is not None:
+                messages = self.context_pruner.fit(messages)
+            else:
+                # 슬라이딩 윈도우: 초기 태스크 메시지 + 최근 history_window 쌍만 유지
+                messages = _trim_history(messages, self.history_window)
 
             elapsed = (time.perf_counter() - t0) * 1000
             iterations.append(
@@ -383,6 +514,7 @@ class ReactLoop:
                     messages=messages,
                     total_input_tokens=total_input_tokens,
                     total_output_tokens=total_output_tokens,
+                    heal_events=heal_events,
                 )
 
             if hard_stop:
@@ -393,6 +525,7 @@ class ReactLoop:
                     messages=messages,
                     total_input_tokens=total_input_tokens,
                     total_output_tokens=total_output_tokens,
+                    heal_events=heal_events,
                 )
 
         # ── 최대 반복 초과 ────────────────────────────────────────────────────
@@ -404,14 +537,70 @@ class ReactLoop:
             messages=messages,
             total_input_tokens=total_input_tokens,
             total_output_tokens=total_output_tokens,
+            heal_events=heal_events,
         )
 
     # ── 내부 헬퍼 ─────────────────────────────────────────────────────────────
+
+    def _execute_tool_with_transient_retry(
+        self, tc: ToolCall, max_retries: int = 2
+    ) -> ToolResult:
+        """
+        [Module 1] TRANSIENT 에러 시 LLM 없이 자동 재시도.
+
+        대기 시간: 0.5s → 1.0s (지수 백오프).
+        TRANSIENT 가 아닌 에러는 즉시 반환 (재시도 없음).
+
+        Args:
+            tc:          실행할 도구 호출
+            max_retries: 최대 재시도 횟수 (기본 2)
+
+        Returns:
+            ToolResult — 성공 or 마지막 시도 결과
+        """
+        from core.heal import classify_error, ErrorClass
+
+        for attempt in range(max_retries + 1):
+            tr = self._execute_tool(tc)
+            if not tr.is_error:
+                return tr
+            # TRANSIENT 가 아니면 즉시 반환 (힐 로직이 처리)
+            if classify_error(tc.name, tr.content) != ErrorClass.TRANSIENT:
+                return tr
+            if attempt < max_retries:
+                delay = 0.5 * (2 ** attempt)
+                logger.warning(
+                    "[TRANSIENT RETRY] '%s' — %d/%d, %.1fs 대기",
+                    tc.name, attempt + 1, max_retries, delay,
+                )
+                time.sleep(delay)
+        return tr  # type: ignore[return-value]  # 루프 후 tr 은 항상 할당됨
+
     def _execute_tool(self, tc: ToolCall) -> ToolResult:
         """
         단일 도구를 실행하고 ToolResult를 반환합니다.
         타임아웃·예외를 모두 여기서 처리합니다.
+
+        [Module 4] git_commit 도구는 verification_gate 가 설정된 경우
+        실제 커밋 전에 검증 커맨드를 실행한다. 검증 실패 시 에러 ToolResult 를 반환.
         """
+        # ── [Module 4] git_commit 검증 게이트 ────────────────────────────────
+        if tc.name == "git_commit" and self.verification_gate is not None:
+            repo_path = tc.input.get("repo_path", ".")
+            logger.info("[VERIFICATION GATE] git_commit 전 검증 시작 (repo=%s)", repo_path)
+            gate_result = self.verification_gate.check(repo_path)
+            if not gate_result.all_passed:
+                logger.warning(
+                    "[VERIFICATION GATE] 검증 실패 — git_commit 차단 (repo=%s)", repo_path
+                )
+                return ToolResult(
+                    tool_use_id=tc.id,
+                    content=gate_result.failure_summary,
+                    is_error=True,
+                )
+            logger.info("[VERIFICATION GATE] 검증 통과 — git_commit 진행")
+
+        # ── 도구 실행 ─────────────────────────────────────────────────────────
         logger.debug("도구 실행: %s(%s)", tc.name, tc.input)
         try:
             result = call_tool(tc.name, **tc.input)
@@ -544,13 +733,10 @@ def _trim_history(messages: list[Message], window: int) -> list[Message]:
 def _is_fatal_error(error_message: str) -> bool:
     """
     루프를 즉시 중단해야 하는 치명적 오류인지 판별합니다.
-    파일 없음, 권한 거부 등 재시도해도 의미 없는 오류는 False.
+
+    core/heal.py 의 classify_error() 로 위임한다.
+    enable_healing=False 인 경우에도 이 함수로 FATAL 에러를 검출하므로
+    backward-compatible 으로 유지한다.
     """
-    fatal_keywords = [
-        "permission denied",
-        "disk full",
-        "out of memory",
-        "killed",
-    ]
-    lower = error_message.lower()
-    return any(kw in lower for kw in fatal_keywords)
+    from core.heal import classify_error, ErrorClass
+    return classify_error("", error_message) == ErrorClass.FATAL
