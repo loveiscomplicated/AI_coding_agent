@@ -252,3 +252,255 @@ class TestContextManagerEdgeCases:
         result = mgr.fit(messages)
         assert isinstance(result, list)
         assert len(result) <= len(messages)
+
+
+# ── SemanticContextPruner 테스트 ──────────────────────────────────────────────
+
+from core.context import SemanticContextPruner
+
+
+def _tool_pair_msgs(tool_id: str) -> list[Message]:
+    """tool_use + tool_result 쌍 (SemanticContextPruner 용)."""
+    return [
+        Message(
+            role="assistant",
+            content=[{"type": "tool_use", "id": tool_id, "name": "read_file", "input": {}}],
+        ),
+        Message(
+            role="user",
+            content=[{"type": "tool_result", "tool_use_id": tool_id, "content": "file content"}],
+        ),
+    ]
+
+
+class TestSemanticContextPrunerBasic:
+    """SemanticContextPruner 기본 동작 테스트."""
+
+    def test_empty_returns_empty(self):
+        pruner = SemanticContextPruner(max_tokens=10_000)
+        assert pruner.fit([]) == []
+
+    def test_system_messages_preserved(self):
+        pruner = SemanticContextPruner(max_tokens=10_000)
+        messages = [
+            _msg("system", "sys"),
+            _msg("user", "initial task"),
+        ]
+        result = pruner.fit(messages)
+        assert any(m.role == "system" for m in result)
+
+    def test_anchor_message_preserved(self):
+        """초기 user 메시지(anchor)는 항상 보존된다."""
+        pruner = SemanticContextPruner(max_tokens=10_000, recent_turns=1, middle_turns=1)
+        anchor = _msg("user", "initial task ANCHOR")
+        turns = []
+        for i in range(10):
+            turns.append(_msg("assistant", f"assistant turn {i}"))
+            turns.append(_msg("user", f"user tool result {i}"))
+
+        messages = [anchor] + turns
+        result = pruner.fit(messages)
+        assert any(m.content == "initial task ANCHOR" for m in result)
+
+    def test_returns_list_of_message(self):
+        pruner = SemanticContextPruner(max_tokens=10_000)
+        result = pruner.fit([_msg("user", "hi")])
+        assert isinstance(result, list)
+
+    def test_small_history_not_pruned(self):
+        """recent_turns 내의 히스토리는 전문 보존된다."""
+        pruner = SemanticContextPruner(max_tokens=10_000, recent_turns=4, middle_turns=4)
+        messages = [_msg("user", "task")]
+        for i in range(3):
+            messages.append(_msg("assistant", f"a{i}"))
+            messages.append(_msg("user", f"u{i}"))
+        result = pruner.fit(messages)
+        # 히스토리가 recent_turns 이하 → 전문 보존
+        assert len(result) == len(messages)
+
+
+class TestSemanticContextPrunerTiers:
+    """3-tier pruning 동작 테스트."""
+
+    def _build_history(self, n_turns: int, anchor_text: str = "initial task"):
+        """anchor + n_turns 개 (assistant, user) 쌍."""
+        messages = [_msg("user", anchor_text)]
+        for i in range(n_turns):
+            messages.append(_msg("assistant", f"assistant reasoning {i}"))
+            messages.append(_msg("user", f"tool result {i}"))
+        return messages
+
+    def test_recent_turns_kept_verbatim(self):
+        """Tier 1 (recent_turns) 메시지는 [SUMMARY] 없이 전문 보존."""
+        pruner = SemanticContextPruner(max_tokens=10_000, recent_turns=2, middle_turns=2)
+        messages = self._build_history(10)
+        result = pruner.fit(messages)
+
+        # 마지막 2개 쌍(최근)은 전문이어야 함
+        text_contents = [
+            m.content for m in result
+            if isinstance(m.content, str) and m.role in ("assistant", "user")
+        ]
+        # 최근 turn 은 SUMMARY 없어야 함 (원본 그대로)
+        recent_texts = [t for t in text_contents if "assistant reasoning" in t or "tool result" in t]
+        # 일부는 원본 텍스트로 남아있어야 함
+        assert any("assistant reasoning" in t for t in recent_texts)
+
+    def test_middle_turns_compressed(self):
+        """Tier 2 (middle_turns) 메시지는 [SUMMARY] 로 압축된다."""
+        pruner = SemanticContextPruner(max_tokens=10_000, recent_turns=2, middle_turns=2)
+        messages = self._build_history(8)  # 8쌍: tier3(4) + tier2(2) + tier1(2)
+        result = pruner.fit(messages)
+
+        # [SUMMARY] 가 포함된 메시지가 있어야 함
+        all_content = " ".join(
+            m.content for m in result if isinstance(m.content, str)
+        )
+        assert "[SUMMARY]" in all_content
+
+    def test_oldest_turns_dropped(self):
+        """Tier 3 (oldest) 메시지는 결과에 포함되지 않는다."""
+        pruner = SemanticContextPruner(max_tokens=10_000, recent_turns=2, middle_turns=2)
+        messages = self._build_history(8)
+        result = pruner.fit(messages)
+
+        # 총 메시지 수 < 원본 메시지 수 (tier3 드롭됨)
+        assert len(result) < len(messages)
+
+    def test_no_pruning_when_all_fits_in_recent(self):
+        """recent_turns 가 전체 턴 수보다 크면 droping 없음."""
+        pruner = SemanticContextPruner(max_tokens=10_000, recent_turns=100, middle_turns=0)
+        messages = self._build_history(5)
+        result = pruner.fit(messages)
+        # 5턴 < recent_turns=100 → 전문 보존
+        assert len(result) == len(messages)
+
+
+class TestSemanticContextPrunerScoring:
+    """TF-IDF 관련성 점수 테스트."""
+
+    def test_score_higher_for_relevant_message(self):
+        """태스크와 관련된 메시지가 무관한 메시지보다 높은 점수."""
+        pruner = SemanticContextPruner(
+            max_tokens=10_000,
+            task_description="write pytest unit tests for authentication module",
+        )
+        relevant = _msg("user", "running pytest tests for auth login function")
+        irrelevant = _msg("user", "cooking recipe for chocolate cake")
+        assert pruner.score(relevant) > pruner.score(irrelevant)
+
+    def test_score_zero_when_no_task(self):
+        """태스크 설명이 없으면 score=0."""
+        pruner = SemanticContextPruner(max_tokens=10_000, task_description="")
+        msg = _msg("user", "something relevant")
+        assert pruner.score(msg) == 0.0
+
+    def test_update_task_changes_scores(self):
+        """update_task() 후 새 태스크에 맞게 점수가 바뀐다."""
+        pruner = SemanticContextPruner(
+            max_tokens=10_000,
+            task_description="pytest tests",
+        )
+        msg = _msg("user", "git commit changes to authentication module")
+        score_before = pruner.score(msg)
+
+        pruner.update_task("git commit and authentication")
+        score_after = pruner.score(msg)
+
+        assert score_after > score_before
+
+    def test_score_range(self):
+        """score 는 [0.0, 1.0] 범위 내여야 한다."""
+        pruner = SemanticContextPruner(
+            max_tokens=10_000,
+            task_description="fix the login bug",
+        )
+        for content in ["login bug fixed", "unrelated topic", "login login login"]:
+            s = pruner.score(_msg("user", content))
+            assert 0.0 <= s <= 1.0, f"Score out of range: {s}"
+
+
+class TestSemanticContextPrunerSummarize:
+    """_summarize() 메서드 테스트."""
+
+    def test_string_content_summarized(self):
+        pruner = SemanticContextPruner(max_tokens=10_000)
+        msg = _msg("assistant", "This is the first sentence. This is another one.")
+        summary = pruner._summarize(msg)
+        assert "[SUMMARY]" in summary.content
+        assert summary.role == "assistant"
+
+    def test_tool_use_block_summarized(self):
+        pruner = SemanticContextPruner(max_tokens=10_000)
+        msg = Message(
+            role="assistant",
+            content=[{"type": "tool_use", "id": "t1", "name": "read_file", "input": {"path": "a.py"}}],
+        )
+        summary = pruner._summarize(msg)
+        assert "[SUMMARY]" in summary.content
+        assert "read_file" in summary.content
+
+    def test_tool_result_block_summarized(self):
+        pruner = SemanticContextPruner(max_tokens=10_000)
+        msg = Message(
+            role="user",
+            content=[{"type": "tool_result", "tool_use_id": "t1", "content": "file content here"}],
+        )
+        summary = pruner._summarize(msg)
+        assert "[SUMMARY]" in summary.content
+
+    def test_original_message_not_mutated(self):
+        """요약 시 원본 Message 객체를 변경하지 않는다."""
+        pruner = SemanticContextPruner(max_tokens=10_000)
+        original_content = "Original content. Second sentence."
+        msg = _msg("user", original_content)
+        pruner._summarize(msg)
+        assert msg.content == original_content
+
+
+class TestSemanticContextPrunerPerformance:
+    """성능 테스트 — 컨텍스트 관리가 지연을 유발하지 않아야 한다."""
+
+    def test_fit_500_messages_under_50ms(self):
+        """500개 메시지 fit() 이 50ms 미만으로 완료되어야 한다."""
+        import time
+        pruner = SemanticContextPruner(
+            max_tokens=10_000,
+            task_description="write tests",
+            recent_turns=4,
+            middle_turns=4,
+        )
+        messages = [_msg("user", "initial task")]
+        for i in range(250):
+            messages.append(_msg("assistant", f"assistant reasoning step {i} " * 5))
+            messages.append(_msg("user", f"tool result output {i} " * 5))
+
+        start = time.perf_counter()
+        pruner.fit(messages)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        assert elapsed_ms < 50, f"fit() took {elapsed_ms:.1f}ms (limit: 50ms)"
+
+    def test_tool_pair_not_split_in_pruner(self):
+        """SemanticContextPruner 에서도 tool_use/tool_result 쌍이 분리되지 않는다."""
+        pruner = SemanticContextPruner(max_tokens=100, recent_turns=1, middle_turns=1)
+        messages = [_msg("user", "task")]
+        for i in range(5):
+            messages.extend(_tool_pair_msgs(f"id{i}"))
+
+        result = pruner.fit(messages)
+
+        # 결과에서 tool_use_id 와 tool_result 의 tool_use_id 가 일치해야 함
+        tool_use_ids = set()
+        tool_result_ids = set()
+        for m in result:
+            if isinstance(m.content, list):
+                for b in m.content:
+                    if isinstance(b, dict):
+                        if b.get("type") == "tool_use":
+                            tool_use_ids.add(b.get("id"))
+                        if b.get("type") == "tool_result":
+                            tool_result_ids.add(b.get("tool_use_id"))
+
+        # 존재하는 쌍은 양쪽 모두 있어야 함
+        assert tool_use_ids == tool_result_ids
