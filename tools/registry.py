@@ -24,6 +24,7 @@ from tools.shell_tools import execute_command
 from tools.code_tools import get_imports, get_outline, get_function_src
 from tools.git_tools import git_status, git_diff, git_log, git_add, git_commit
 from tools.hotline_tools import ask_user
+from tools.schemas import ToolResult as SchemaToolResult
 
 # ── 타입 별칭 ─────────────────────────────────────────────────────────────────
 # 각 파라미터 항목: (type, description, required, default)
@@ -369,3 +370,76 @@ def call_tool(name: str, **kwargs):
             f"사용 가능한 도구: {list(TOOL_REGISTRY.keys())}"
         )
     return TOOL_REGISTRY[name]["fn"](**kwargs)
+
+
+# ── 체인 등록 시스템 (Tool Chaining) ─────────────────────────────────────────
+
+# 등록된 체인 저장소 (이름 → ToolChain 객체)
+CHAIN_REGISTRY: dict[str, "ToolChain"] = {}
+
+
+def _chain_tool_executor(name: str, **kwargs):
+    """체인 스텝에서 call_tool 을 호출하는 어댑터."""
+    return call_tool(name, **kwargs)
+
+
+def _fmt_chain_result(result: "ChainResult") -> str:
+    """ChainResult 를 LLM이 읽기 좋은 문자열로 변환."""
+    return result.summary(max_chars_per_step=300)
+
+
+def register_chain(chain: "ToolChain") -> None:
+    """
+    ToolChain 을 TOOL_REGISTRY 의 가상 도구로 등록한다.
+
+    등록 후 LLM 은 체인 이름을 일반 도구처럼 호출할 수 있다.
+    스키마는 체인 스텝의 플레이스홀더에서 자동 추론된다.
+
+    Args:
+        chain: 등록할 ToolChain 인스턴스
+    """
+    from tools.chains import ToolChain as _ToolChain, ChainResult as _ChainResult
+
+    CHAIN_REGISTRY[chain.name] = chain
+
+    # 체인 실행 래퍼 함수 (call_tool 과 동일한 인터페이스)
+    def _chain_fn(**kwargs) -> SchemaToolResult:
+        result: _ChainResult = chain.execute(kwargs, _chain_tool_executor)
+        if result.succeeded:
+            return SchemaToolResult(
+                success=True,
+                output=_fmt_chain_result(result),
+            )
+        return SchemaToolResult(
+            success=False,
+            output=_fmt_chain_result(result),
+            error=result.error_message,
+        )
+
+    TOOL_REGISTRY[chain.name] = {
+        "fn": _chain_fn,
+        "description": chain.description,
+        "params": chain._infer_params(),
+    }
+
+    # 스키마 캐시 재생성 (런타임 등록 이후에도 schema 가 최신 상태 유지)
+    # 전역 변수는 참조이므로 리스트를 in-place 업데이트한다
+    new_anthropic = _build_tools_schema(TOOL_REGISTRY, "anthropic")
+    new_openai = _build_tools_schema(TOOL_REGISTRY, "openai")
+    new_ollama = _build_tools_schema(TOOL_REGISTRY, "ollama")
+    TOOLS_SCHEMA_ANTHROPIC[:] = new_anthropic
+    TOOLS_SCHEMA_OPENAI[:] = new_openai
+    TOOLS_SCHEMA_OLLAMA[:] = new_ollama
+
+
+def _register_builtin_chains() -> None:
+    """내장 체인을 모두 TOOL_REGISTRY 에 등록한다 (모듈 로드 시 1회 호출)."""
+    try:
+        from tools.chains import BUILTIN_CHAINS
+        for chain in BUILTIN_CHAINS.values():
+            register_chain(chain)
+    except ImportError:
+        pass  # chains.py 가 없는 환경에서도 registry 가 정상 동작하도록
+
+
+_register_builtin_chains()
