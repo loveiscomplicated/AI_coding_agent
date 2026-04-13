@@ -33,6 +33,7 @@ _draft_lock = threading.Lock()
 # ── 태스크 재설계 잡 저장소 ───────────────────────────────────────────────────
 _redesign_jobs: dict[str, dict] = {}
 _redesign_lock = threading.Lock()
+_redesign_semaphore = threading.Semaphore(2)  # GLM rate limit 대응: 동시 실행 최대 2개
 
 _DRAFT_SYSTEM_PROMPT = """\
 당신은 소프트웨어 개발 태스크를 설계하는 전문가입니다.
@@ -303,66 +304,69 @@ class RedesignRequest(BaseModel):
 
 
 def _run_redesign(job_id: str, task_id: str, tasks_path: str, repo_path: str) -> None:
-    """백그라운드 스레드에서 LLM 태스크 재설계를 실행한다."""
-    try:
-        path = Path(tasks_path)
-        if not path.exists():
-            with _redesign_lock:
-                _redesign_jobs[job_id]["status"] = "error"
-                _redesign_jobs[job_id]["error"] = "tasks 파일을 찾을 수 없습니다."
-            return
+    """백그라운드 스레드에서 LLM 태스크 재설계를 실행한다. 세마포어로 동시 실행 수를 제한한다."""
+    with _redesign_semaphore:
+        with _redesign_lock:
+            _redesign_jobs[job_id]["status"] = "running"
+        try:
+            path = Path(tasks_path)
+            if not path.exists():
+                with _redesign_lock:
+                    _redesign_jobs[job_id]["status"] = "error"
+                    _redesign_jobs[job_id]["error"] = "tasks 파일을 찾을 수 없습니다."
+                return
 
-        tasks = load_tasks(path)
-        task = next((t for t in tasks if t.id == task_id), None)
-        if task is None:
-            with _redesign_lock:
-                _redesign_jobs[job_id]["status"] = "error"
-                _redesign_jobs[job_id]["error"] = f"태스크 '{task_id}'를 찾을 수 없습니다."
-            return
+            tasks = load_tasks(path)
+            task = next((t for t in tasks if t.id == task_id), None)
+            if task is None:
+                with _redesign_lock:
+                    _redesign_jobs[job_id]["status"] = "error"
+                    _redesign_jobs[job_id]["error"] = f"태스크 '{task_id}'를 찾을 수 없습니다."
+                return
 
-        # spec.md 등 컨텍스트 문서 읽기
-        spec_content = ""
-        context_dir = Path(repo_path) / "agent-data" / "context"
-        if context_dir.exists():
-            spec_files = list(context_dir.glob("*.md"))
-            parts = []
-            for sf in sorted(spec_files):
+            # spec.md 등 컨텍스트 문서 읽기
+            spec_content = ""
+            context_dir = Path(repo_path) / "agent-data" / "context"
+            if context_dir.exists():
+                spec_files = list(context_dir.glob("*.md"))
+                parts = []
+                for sf in sorted(spec_files):
+                    try:
+                        parts.append(f"### {sf.name}\n{sf.read_text(encoding='utf-8')}")
+                    except OSError:
+                        pass
+                spec_content = "\n\n".join(parts)
+
+            # 오케스트레이터 마크다운 보고서 읽기 (있으면 raw 로그 대신 사용)
+            orch_report = ""
+            reports_dir = Path(repo_path) / "agent-data" / "reports"
+            orch_report_path = reports_dir / f"{task_id}_orchestrator_report.md"
+            if orch_report_path.exists():
                 try:
-                    parts.append(f"### {sf.name}\n{sf.read_text(encoding='utf-8')}")
+                    orch_report = orch_report_path.read_text(encoding="utf-8")
                 except OSError:
                     pass
-            spec_content = "\n\n".join(parts)
 
-        # 오케스트레이터 마크다운 보고서 읽기 (있으면 raw 로그 대신 사용)
-        orch_report = ""
-        reports_dir = Path(repo_path) / "agent-data" / "reports"
-        orch_report_path = reports_dir / f"{task_id}_orchestrator_report.md"
-        if orch_report_path.exists():
-            try:
-                orch_report = orch_report_path.read_text(encoding="utf-8")
-            except OSError:
-                pass
+            redesign_info = get_redesign_model()
+            redesign_provider = redesign_info["provider"] or LLM_PROVIDER
+            redesign_model_id = redesign_info["model"] or LLM_MODEL_CAPABLE
+            llm = create_redesign_llm(redesign_provider, redesign_model_id)
+            result = redesign_task(task, tasks, spec_content, llm, orch_report=orch_report)
 
-        redesign_info = get_redesign_model()
-        redesign_provider = redesign_info["provider"] or LLM_PROVIDER
-        redesign_model_id = redesign_info["model"] or LLM_MODEL_CAPABLE
-        llm = create_redesign_llm(redesign_provider, redesign_model_id)
-        result = redesign_task(task, tasks, spec_content, llm, orch_report=orch_report)
+            with _redesign_lock:
+                if result.success:
+                    _redesign_jobs[job_id]["status"] = "done"
+                    _redesign_jobs[job_id]["action"] = result.action
+                    _redesign_jobs[job_id]["explanation"] = result.explanation
+                    _redesign_jobs[job_id]["tasks"] = result.tasks
+                else:
+                    _redesign_jobs[job_id]["status"] = "error"
+                    _redesign_jobs[job_id]["error"] = result.error or "재설계 실패"
 
-        with _redesign_lock:
-            if result.success:
-                _redesign_jobs[job_id]["status"] = "done"
-                _redesign_jobs[job_id]["action"] = result.action
-                _redesign_jobs[job_id]["explanation"] = result.explanation
-                _redesign_jobs[job_id]["tasks"] = result.tasks
-            else:
+        except Exception as e:
+            with _redesign_lock:
                 _redesign_jobs[job_id]["status"] = "error"
-                _redesign_jobs[job_id]["error"] = result.error or "재설계 실패"
-
-    except Exception as e:
-        with _redesign_lock:
-            _redesign_jobs[job_id]["status"] = "error"
-            _redesign_jobs[job_id]["error"] = str(e)
+                _redesign_jobs[job_id]["error"] = str(e)
 
 
 @router.post("/tasks/{task_id}/redesign")
@@ -376,7 +380,7 @@ def start_task_redesign(task_id: str, body: RedesignRequest) -> dict:
     job_id = str(uuid.uuid4())
     with _redesign_lock:
         _redesign_jobs[job_id] = {
-            "status": "running",
+            "status": "queued",
             "action": None,
             "explanation": None,
             "tasks": None,
@@ -398,6 +402,79 @@ def get_redesign_status(job_id: str) -> dict:
     if job is None:
         raise HTTPException(status_code=404, detail=f"재설계 잡 '{job_id}'를 찾을 수 없습니다.")
     return {"job_id": job_id, **job}
+
+
+_FIX_DEPS_SYSTEM = """\
+You are a task dependency graph expert. Remove the minimum number of depends_on entries to eliminate all circular dependencies.
+
+CRITICAL: Your response must contain ONLY a valid JSON object. No explanation text before or after. No markdown code blocks. No reasoning. Start your response with '{' and end with '}'.
+
+Rules:
+- Remove only what is necessary to break cycles
+- Prefer removing dependencies that are least logically important based on task titles
+- Write a short Korean explanation in the "explanation" field
+- Include ALL task IDs in the output
+
+Required JSON format (output this and nothing else):
+{"explanation": "수정 이유 요약", "tasks": [{"id": "task-001", "depends_on": [...]}, ...]}
+"""
+
+
+class FixDepsRequest(BaseModel):
+    tasks: list[dict]
+
+
+@router.post("/tasks/fix-dependencies")
+def fix_dependencies(body: FixDepsRequest) -> dict:
+    """순환 참조를 LLM이 분석하여 자동으로 수정한다."""
+    summary = [
+        {"id": t.get("id"), "title": t.get("title", ""), "depends_on": t.get("depends_on", [])}
+        for t in body.tasks
+    ]
+    client = create_client(
+        LLM_PROVIDER,
+        LLMConfig(model=LLM_MODEL_CAPABLE, max_tokens=4096, system_prompt=_FIX_DEPS_SYSTEM),
+    )
+    prompt = f"다음 태스크 목록의 순환 참조를 수정하세요:\n{json.dumps(summary, ensure_ascii=False, indent=2)}"
+    llm_response = client.chat([Message(role="user", content=prompt)])
+
+    raw = ""
+    for block in llm_response.content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            raw = block["text"]
+            break
+        if hasattr(block, "type") and block.type == "text":
+            raw = block.text
+            break
+
+    # 응답에서 JSON 객체 추출 (reasoning 텍스트가 앞에 붙는 경우 대응)
+    result: Any = None
+    # 1순위: 코드블록 내 JSON
+    code_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+    if code_match:
+        candidate = code_match.group(1)
+    else:
+        # 2순위: 첫 번째 '{' ~ 마지막 '}' 사이 추출
+        start = raw.find("{")
+        end = raw.rfind("}")
+        candidate = raw[start : end + 1] if start != -1 and end != -1 else ""
+
+    try:
+        result = json.loads(candidate)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail=f"LLM 응답 파싱 실패: {e}\n응답:\n{raw[:400]}")
+
+    fixed_deps: dict[str, list[str]] = {
+        item["id"]: item.get("depends_on", [])
+        for item in result.get("tasks", [])
+        if "id" in item
+    }
+
+    fixed_tasks = [
+        {**t, "depends_on": fixed_deps.get(t.get("id", ""), t.get("depends_on", []))}
+        for t in body.tasks
+    ]
+    return {"tasks": fixed_tasks, "explanation": result.get("explanation", "")}
 
 
 @router.post("/tasks")

@@ -7,9 +7,10 @@
  *   generating → editing → saving → running | error
  */
 
-import { useEffect, useReducer, useRef, useState } from 'react'
+import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { PipelineLogView, ACTIVE_JOB_KEY } from './PipelineLogView'
 import { AvailableModel, PipelineModelModal } from './PipelineModelModal'
+import { DependencyGraphModal } from './DependencyGraphModal'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000') as string
 
@@ -42,6 +43,7 @@ type Action =
   | { type: 'DRAFT_DONE'; tasks: DraftTask[] }
   | { type: 'ERROR'; msg: string }
   | { type: 'UPDATE_TASK'; idx: number; task: DraftTask }
+  | { type: 'UPDATE_ALL_TASKS'; tasks: DraftTask[] }
   | { type: 'DELETE_TASK'; idx: number }
   | { type: 'ADD_TASK' }
   | { type: 'MOVE_TASK'; idx: number; dir: -1 | 1 }
@@ -63,6 +65,8 @@ function reducer(state: State, action: Action): State {
       tasks[action.idx] = action.task
       return { ...state, tasks }
     }
+    case 'UPDATE_ALL_TASKS':
+      return { ...state, tasks: action.tasks }
     case 'DELETE_TASK':
       return { ...state, tasks: state.tasks.filter((_, i) => i !== action.idx) }
     case 'ADD_TASK': {
@@ -129,6 +133,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
   const [modelName, setModelName] = useState<string>('AI')
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([])
   const [showModelModal, setShowModelModal] = useState(false)
+  const [showGraphModal, setShowGraphModal] = useState(false)
 
   useEffect(() => {
     fetch(`${API_BASE}/api/config`)
@@ -154,6 +159,34 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
     baseBranch: 'main',
     agentCount: 1,
   })
+
+  // 클라이언트 사이드 순환 참조 감지 (Kahn's algorithm)
+  const hasCycle = useMemo(() => {
+    const tasks = state.tasks
+    const validIds = new Set(tasks.map(t => t.id))
+    const inDegree: Record<string, number> = {}
+    const adj: Record<string, string[]> = {}
+    for (const t of tasks) { inDegree[t.id] = 0; adj[t.id] = [] }
+    for (const t of tasks) {
+      for (const dep of t.depends_on) {
+        if (!validIds.has(dep)) continue
+        adj[dep].push(t.id)
+        inDegree[t.id]++
+      }
+    }
+    const queue = Object.keys(inDegree).filter(id => inDegree[id] === 0)
+    let processed = 0
+    while (queue.length > 0) {
+      const node = queue.shift()!
+      processed++
+      for (const neighbor of adj[node]) {
+        inDegree[neighbor]--
+        if (inDegree[neighbor] === 0) queue.push(neighbor)
+      }
+    }
+    // tasks.length가 아닌 유니크 ID 수와 비교 (중복 ID 오탐 방지)
+    return processed !== validIds.size
+  }, [state.tasks])
 
   // editing 중 상태 변경마다 localStorage에 저장
   useEffect(() => {
@@ -381,6 +414,16 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
         onCancel={() => setShowModelModal(false)}
       />
     )}
+    {showGraphModal && (
+      <DependencyGraphModal
+        tasks={state.tasks}
+        onClose={() => setShowGraphModal(false)}
+        onApply={fixedTasks => {
+          dispatch({ type: 'UPDATE_ALL_TASKS', tasks: fixedTasks })
+          setShowGraphModal(false)
+        }}
+      />
+    )}
     <div className="flex flex-col h-full">
       {/* 헤더 */}
       <div className="flex items-center justify-between px-4 py-3 bg-white dark:bg-zinc-900 border-b border-gray-200 dark:border-zinc-700">
@@ -407,8 +450,25 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
               ⚠ 크기 초과 태스크 있음
             </span>
           )}
+          {hasCycle && (
+            <span className="text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400 px-2 py-0.5 rounded-full animate-pulse">
+              ⚠ 순환 참조
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
+          {/* 의존성 그래프 */}
+          <button
+            onClick={() => setShowGraphModal(true)}
+            className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+              hasCycle
+                ? 'border-red-400 text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40'
+                : 'border-gray-300 dark:border-zinc-600 text-gray-600 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-zinc-800'
+            }`}
+            title="의존성 DAG 그래프 편집"
+          >
+            {hasCycle ? '⚠ 의존성 그래프 수정' : '의존성 그래프'}
+          </button>
           {/* 프로젝트 루트 (= repo_path, tasks는 rootDir/agent-data/tasks.yaml 고정) */}
           <div className="flex items-center gap-1">
             <span className="text-xs text-gray-400 dark:text-zinc-500 shrink-0">프로젝트 루트</span>
