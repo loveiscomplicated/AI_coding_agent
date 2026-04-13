@@ -172,3 +172,4 @@ agent-data/*.db
 
 # AI agent workspaces (task isolation dirs + git worktrees)
 .agent-workspace/
+agent-data
