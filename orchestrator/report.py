@@ -211,7 +211,7 @@ def build_report(
 def save_report(report: TaskReport, reports_dir: Path = _REPORTS_DIR) -> Path:
     """Task Report를 YAML로 저장하고 경로를 반환한다."""
     reports_dir.mkdir(parents=True, exist_ok=True)
-    path = reports_dir / f"task-{report.task_id}.yaml"
+    path = reports_dir / f"{report.task_id}.yaml"
     with path.open("w", encoding="utf-8") as f:
         yaml.dump(report.to_dict(), f, allow_unicode=True, sort_keys=False, default_flow_style=False)
     logger.info("Task Report 저장: %s", path)
@@ -220,7 +220,7 @@ def save_report(report: TaskReport, reports_dir: Path = _REPORTS_DIR) -> Path:
 
 def load_report(task_id: str, reports_dir: Path = _REPORTS_DIR) -> TaskReport:
     """저장된 Task Report를 로드한다."""
-    path = reports_dir / f"task-{task_id}.yaml"
+    path = reports_dir / f"{task_id}.yaml"
     if not path.exists():
         raise FileNotFoundError(f"Task Report 없음: {path}")
     with path.open(encoding="utf-8") as f:

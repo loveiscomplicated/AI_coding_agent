@@ -108,6 +108,62 @@ def empty_directory(tmp_path: Path) -> Path:
     return d
 
 
+# ── metrics/collector 테스트용 fixture ───────────────────────────────────────
+
+@pytest.fixture
+def temp_reports_dir(tmp_path: Path) -> str:
+    d = tmp_path / "reports"
+    d.mkdir()
+    return str(d)
+
+
+@pytest.fixture
+def sample_task_report_data():
+    return {
+        "task_id": "task-001",
+        "title": "메트릭 수집기 구현",
+        "status": "COMPLETED",
+        "completed_at": "2024-01-15T10:30:00",
+        "retry_count": 2,
+        "time_elapsed_seconds": 3600.5,
+        "test_count": 15,
+        "test_pass_first_try": True,
+        "reviewer_verdict": "APPROVED",
+        "failure_reasons": [],
+        "reviewer_feedback": "좋은 구현입니다",
+    }
+
+
+@pytest.fixture
+def sample_task_report_data_failed():
+    return {
+        "task_id": "task-002",
+        "title": "실패 태스크",
+        "status": "FAILED",
+        "completed_at": "2024-01-16T11:00:00",  # since 필터 테스트: 2024-01-16 이후
+        "retry_count": 5,
+        "time_elapsed_seconds": 7200.0,
+        "test_count": 5,
+        "test_pass_first_try": False,
+        "reviewer_verdict": "CHANGES_REQUESTED",
+        "failure_reasons": ["테스트 실패", "성능 이슈"],
+        "reviewer_feedback": "수정 필요",
+    }
+
+
+@pytest.fixture
+def sample_task_report_data_pending():
+    return {
+        "task_id": "task-003",
+        "title": "대기 태스크",
+        "status": "IN_PROGRESS",
+        "completed_at": None,
+        "retry_count": 1,
+        "time_elapsed_seconds": 1800.0,
+        "test_pass_first_try": True,  # complex_scenario: first_try_rate=67(2/3)
+    }
+
+
 # ── 기존 fixture ─────────────────────────────────────────────────────────────
 
 @pytest.fixture

@@ -48,7 +48,7 @@ def save_report(report: TaskReport, reports_dir: str = "agent-data/reports") -> 
     dir_path = Path(reports_dir)
     dir_path.mkdir(parents=True, exist_ok=True)
 
-    file_path = dir_path / f"task-{report.task_id}.yaml"
+    file_path = dir_path / f"{report.task_id}.yaml"
 
     # dataclass를 dict로 변환하여 YAML로 저장
     data = asdict(report)

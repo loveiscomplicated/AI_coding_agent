@@ -71,7 +71,7 @@ class TestSaveReport:
         
         result_path = save_report(report, reports_dir=temp_reports_dir)
         
-        assert result_path.name == "task-task-001.yaml"
+        assert result_path.name == "task-001.yaml"
 
     def test_save_report_returns_path(self, sample_task_report_data, temp_reports_dir):
         """save_report()가 Path 객체를 반환"""
@@ -115,8 +115,8 @@ class TestSaveReport:
         
         assert path1.exists()
         assert path2.exists()
-        assert path1.name == "task-task-001.yaml"
-        assert path2.name == "task-task-002.yaml"
+        assert path1.name == "task-001.yaml"
+        assert path2.name == "task-002.yaml"
 
 
 class TestLoadReports:

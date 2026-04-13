@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 WORKDIR /workspace
 
-RUN pip install --no-cache-dir pytest pytest-cov pyyaml beautifulsoup4 requests
+RUN pip install --no-cache-dir pytest pytest-asyncio pytest-cov pyyaml beautifulsoup4 requests
 
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

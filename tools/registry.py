@@ -302,7 +302,7 @@ def _build_tools_schema(registry: dict, provider: str = "anthropic") -> list[dic
         params_schema = {
             "type": "object",
             "properties": properties,
-            **({"required": required} if required else {}),
+            "required": required,  # GLM 등 일부 모델은 빈 배열이라도 required 필드를 요구함
         }
         if provider == "anthropic":
             schema.append(
