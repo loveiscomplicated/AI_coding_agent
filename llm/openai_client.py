@@ -12,6 +12,8 @@ base.py의 BaseLLMClient를 구현함.
 import json
 import logging
 import os
+import random
+import re
 import time
 from typing import Generator
 
@@ -22,8 +24,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_MAX_RETRIES = 4
-_BASE_DELAY = 2.0  # 초 (2 → 4 → 8 → 16)
+_MAX_RETRIES = 6
+_BASE_DELAY = 2.0  # 초 (지수 백오프 기준값)
 
 try:
     from dotenv import load_dotenv
@@ -33,6 +35,40 @@ except ImportError:
 from .base import BaseLLMClient, LLMConfig, LLMResponse, Message
 
 load_dotenv()
+
+
+def _parse_retry_after(e: RateLimitError) -> float | None:
+    """RateLimitError에서 권장 대기 시간(초)을 추출한다.
+
+    우선순위:
+      1. Retry-After 응답 헤더
+      2. 에러 메시지 내 "try again in X.XXXs" / "X.XXXms" 패턴
+    """
+    try:
+        header = e.response.headers.get("retry-after")  # type: ignore[union-attr]
+        if header:
+            return float(header)
+    except Exception:
+        pass
+    match = re.search(r"try again in (\d+(?:\.\d+)?)(ms|s)", str(e))
+    if match:
+        val, unit = float(match.group(1)), match.group(2)
+        return val / 1000.0 if unit == "ms" else val
+    return None
+
+
+def _rate_limit_delay(attempt: int, e: RateLimitError) -> float:
+    """재시도 대기 시간을 계산한다.
+
+    - 에러가 권장 대기 시간을 포함하면 그 값 + 소량의 jitter(0~1초)를 사용한다.
+      (병렬 에이전트들이 정확히 같은 시점에 재시도하는 thundering herd 방지)
+    - 권장 시간이 없으면 지수 백오프 + jitter(0~20%)를 사용한다.
+    """
+    suggested = _parse_retry_after(e)
+    if suggested is not None:
+        return suggested + random.uniform(0.0, 1.0)
+    base = _BASE_DELAY * (2 ** attempt)
+    return base + random.uniform(0.0, base * 0.2)
 
 
 def _to_openai_messages(messages: list[Message]) -> list[dict]:
@@ -130,7 +166,6 @@ class OpenaiClient(BaseLLMClient):
         if self.config.temperature is not None:
             create_kwargs["temperature"] = self.config.temperature
 
-        delay = _BASE_DELAY
         for attempt in range(_MAX_RETRIES + 1):
             try:
                 response = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
@@ -138,12 +173,12 @@ class OpenaiClient(BaseLLMClient):
             except RateLimitError as e:
                 if attempt == _MAX_RETRIES:
                     raise
+                delay = _rate_limit_delay(attempt, e)
                 logger.warning(
-                    "OpenAI RateLimitError (시도 %d/%d) — %.0f초 후 재시도: %s",
+                    "OpenAI RateLimitError (시도 %d/%d) — %.2f초 후 재시도: %s",
                     attempt + 1, _MAX_RETRIES, delay, e,
                 )
                 time.sleep(delay)
-                delay *= 2
             except BadRequestError as e:
                 # reasoning 모델(o1/o3)은 temperature 파라미터 자체를 거부함
                 if "temperature" in str(e) and "temperature" in create_kwargs:
@@ -194,19 +229,31 @@ class OpenaiClient(BaseLLMClient):
         if self.config.temperature is not None:
             create_kwargs["temperature"] = self.config.temperature
 
-        try:
-            stream = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
-        except BadRequestError as e:
-            if "temperature" in str(e) and "temperature" in create_kwargs:
-                logger.warning(
-                    "모델 %s이 temperature를 지원하지 않습니다. temperature 없이 재시도합니다.",
-                    self.config.model,
-                )
-                del create_kwargs["temperature"]
+        stream = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
                 stream = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
-            else:
+                break
+            except RateLimitError as e:
+                if attempt == _MAX_RETRIES:
+                    raise
+                delay = _rate_limit_delay(attempt, e)
+                logger.warning(
+                    "OpenAI RateLimitError/stream (시도 %d/%d) — %.2f초 후 재시도: %s",
+                    attempt + 1, _MAX_RETRIES, delay, e,
+                )
+                time.sleep(delay)
+            except BadRequestError as e:
+                if "temperature" in str(e) and "temperature" in create_kwargs:
+                    logger.warning(
+                        "모델 %s이 temperature를 지원하지 않습니다. temperature 없이 재시도합니다.",
+                        self.config.model,
+                    )
+                    del create_kwargs["temperature"]
+                    stream = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
+                    break
                 raise
-        for chunk in stream:
+        for chunk in stream:  # type: ignore[union-attr]
             delta = chunk.choices[0].delta.content  # type: ignore[union-attr]
             if delta:
                 yield delta
