@@ -287,9 +287,19 @@ class SemanticContextPruner:
                     block.get("is_error", False) if isinstance(block, dict)
                     else getattr(block, "is_error", False)
                 )
+                tool_use_id = (
+                    block.get("tool_use_id", "") if isinstance(block, dict)
+                    else getattr(block, "tool_use_id", "")
+                )
                 prefix = "ERROR" if is_err else "OK"
-                return Message(role=msg.role,
-                               content=f"[SUMMARY] tool_result({prefix}): {str(raw)[:100]}")
+                # tool_use_id를 보존해야 OpenAI/GLM API가 tool_call ↔ tool_result
+                # 페어링을 검증할 때 오류가 발생하지 않는다.
+                return Message(role=msg.role, content=[{
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": f"[SUMMARY] tool_result({prefix}): {str(raw)[:100]}",
+                    "is_error": is_err,
+                }])
 
         return Message(role=msg.role, content="[SUMMARY] (structured)")
 

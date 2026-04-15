@@ -416,6 +416,19 @@ class ReactLoop:
                                     }
                                     for r in tool_results
                                 ]
+                                # 아직 실행되지 않은 tool_calls에 대한 placeholder 추가.
+                                # OpenAI/GLM API는 assistant의 모든 tool_call_id에 대응하는
+                                # tool 메시지가 있어야 하므로, break로 루프를 탈출하기 전에
+                                # 미처리 항목을 채워야 400 에러를 방지할 수 있다.
+                                processed_ids = {r.tool_use_id for r in tool_results}
+                                for remaining_tc in tool_calls:
+                                    if remaining_tc.id not in processed_ids:
+                                        partial_content.append({
+                                            "type": "tool_result",
+                                            "tool_use_id": remaining_tc.id,
+                                            "content": "이전 도구 오류로 실행이 중단되었습니다.",
+                                            "is_error": True,
+                                        })
                                 messages.append(
                                     Message(role="user", content=partial_content)
                                 )

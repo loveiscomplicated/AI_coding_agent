@@ -447,7 +447,12 @@ class TestSemanticContextPrunerSummarize:
             content=[{"type": "tool_result", "tool_use_id": "t1", "content": "file content here"}],
         )
         summary = pruner._summarize(msg)
-        assert "[SUMMARY]" in summary.content
+        # tool_result 요약은 tool_use_id를 보존한 구조화된 블록으로 반환된다
+        assert isinstance(summary.content, list)
+        block = summary.content[0]
+        assert block["type"] == "tool_result"
+        assert block["tool_use_id"] == "t1"
+        assert "[SUMMARY]" in block["content"]
 
     def test_original_message_not_mutated(self):
         """요약 시 원본 Message 객체를 변경하지 않는다."""
