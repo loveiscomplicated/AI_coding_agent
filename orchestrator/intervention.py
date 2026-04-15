@@ -36,6 +36,11 @@ class FailureType(Enum):
 
 def classify_failure(failure_reason: str, test_stdout: str = "") -> FailureType:
     """LLM 호출 없이 문자열 패턴으로 실패 유형을 분류한다."""
+    # Reviewer 거부는 test_stdout 내용(pytest 수집 오류 등)과 무관하게 LOGIC_ERROR로 처리.
+    # test_stdout에 섞인 ModuleNotFoundError 등으로 ENV_ERROR로 오분류되는 것을 방지.
+    if "reviewer changes_requested" in failure_reason.lower():
+        return FailureType.LOGIC_ERROR
+
     combined = f"{failure_reason}\n{test_stdout}".lower()
 
     if "[unsupported_language]" in combined:

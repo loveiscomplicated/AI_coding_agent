@@ -82,7 +82,11 @@ class ScopedReactLoop(ReactLoop):
         self._consecutive_readonly = 0
         self._readonly_tool_names = frozenset({"read_file", "list_directory", "search_files"})
         self._write_tool_names = frozenset({"write_file", "edit_file"})
-        self._readonly_warn_threshold = 5  # TODO: RoleConfig에서 설정 가능하게 확장
+        # 쓰기 도구가 없는 역할(Reviewer 등)에는 경고 비활성화.
+        # 읽기 전용 역할에 "write_file을 호출하세요" 경고를 주입하면 LLM이 혼란에 빠져
+        # "파일이 텍스트로만 출력됨" 등의 오판을 유발한다.
+        _has_write_tools = any(t in self._write_tool_names for t in self._role.allowed_tools)
+        self._readonly_warn_threshold: int | None = 5 if _has_write_tools else None
 
         # 허용 도구만 포함한 스키마로 교체
         self.TOOLS_SCHEMA = self._build_scoped_schema()
@@ -158,7 +162,9 @@ class ScopedReactLoop(ReactLoop):
         # 그 외 도구(ask_user 등): 카운터 변경 없음
 
         # 임계값 도달 시 경고를 tool result에 주입 (LLM이 user 메시지로 수신)
-        if self._consecutive_readonly >= self._readonly_warn_threshold:
+        # 쓰기 도구가 없는 역할(Reviewer)은 threshold=None으로 경고 비활성화
+        if (self._readonly_warn_threshold is not None and
+                self._consecutive_readonly >= self._readonly_warn_threshold):
             warning = (
                 f"\n\n⚠️ [SYSTEM WARNING] 읽기 전용 도구를 {self._consecutive_readonly}회 연속 호출했습니다. "
                 f"탐색을 멈추고 반드시 write_file 또는 edit_file을 호출하여 코드를 작성하세요. "
