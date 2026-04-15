@@ -142,6 +142,7 @@ interface PipelineModelModalProps {
     modelCapable: string,
     agentCount: number,
     roleModels?: RoleOverrides,
+    noPush?: boolean,
   ) => void
   onCancel: () => void
 }
@@ -161,6 +162,7 @@ export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineMode
   })
 
   const [agentCount, setAgentCount] = useState(1)
+  const [noPush, setNoPush] = useState(false)
   const [roleOverrides, setRoleOverrides] = useState<RoleOverrides>({})
   const [showAdvanced, setShowAdvanced] = useState(false)
 
@@ -184,6 +186,7 @@ export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineMode
       capableProvider, capableModel,
       agentCount,
       Object.keys(roleModels).length > 0 ? roleModels : undefined,
+      noPush,
     )
   }
 
@@ -232,6 +235,33 @@ export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineMode
             value={agentCount}
             onChange={e => setAgentCount(Math.max(1, Math.min(8, parseInt(e.target.value) || 1)))}
           />
+        </div>
+
+        {/* 푸쉬 온오프 */}
+        <div className="rounded-xl border border-gray-200 dark:border-zinc-700 p-3 flex items-center justify-between">
+          <div>
+            <p className="text-xs font-semibold text-gray-700 dark:text-zinc-200">Git 푸쉬</p>
+            <p className="text-xs text-gray-400 dark:text-zinc-500 mt-0.5">
+              {noPush ? '브랜치를 원격에 푸쉬하지 않습니다' : '각 태스크 완료 후 브랜치를 원격에 푸쉬합니다'}
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={!noPush}
+            onClick={() => setNoPush(v => !v)}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-zinc-900 ${
+              noPush
+                ? 'bg-gray-300 dark:bg-zinc-600'
+                : 'bg-blue-600'
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ${
+                noPush ? 'translate-x-0' : 'translate-x-5'
+              }`}
+            />
+          </button>
         </div>
 
         {/* 역할별 모델 설정 */}

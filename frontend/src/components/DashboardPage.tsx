@@ -591,7 +591,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
     }
   }
 
-  async function resumePipeline(providerFast: string, modelFast: string, providerCapable: string, modelCapable: string, agentCount: number, roleModels?: Record<string, {provider?: string; model?: string}>) {
+  async function resumePipeline(providerFast: string, modelFast: string, providerCapable: string, modelCapable: string, agentCount: number, roleModels?: Record<string, {provider?: string; model?: string}>, noPush?: boolean) {
     if (!project) return
     setShowResumeModal(false)
     setResuming(true)
@@ -604,6 +604,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
           repo_path: project.rootDir,
           base_branch: project.baseBranch ?? 'main',
           no_pr: false,
+          no_push: noPush ?? false,
           max_workers: agentCount,
           discord_channel_id: project.discordChannelId ?? null,
           auto_merge: autoMerge,
