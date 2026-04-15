@@ -38,6 +38,7 @@ from orchestrator.weekly import (
     list_weekly_reports,
     load_weekly_report,
 )
+from project_paths import resolve_reports_dir
 
 router = APIRouter()
 
@@ -87,7 +88,7 @@ async def generate_execution_brief(body: ExecutionBriefRequest) -> dict[str, Any
         except ValueError:
             pass
 
-    reports = load_reports(since=since_dt, reports_dir=Path(body.reports_dir))
+    reports = load_reports(since=since_dt, reports_dir=resolve_reports_dir(body.reports_dir))
     if not reports:
         return {"brief": ""}
 
@@ -173,7 +174,7 @@ def create_weekly_report(body: WeeklyReportRequest) -> dict[str, Any]:
             llm_fn=_make_llm_fn(),
             year=body.year,
             week=body.week,
-            reports_dir=Path(body.reports_dir),
+            reports_dir=resolve_reports_dir(body.reports_dir),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

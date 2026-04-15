@@ -58,6 +58,7 @@ from orchestrator.pipeline import TDDPipeline
 from orchestrator.report import build_report, load_reports, save_report
 from orchestrator.task import Task, TaskStatus, load_tasks, save_tasks
 from orchestrator.workspace import WorkspaceManager
+from project_paths import resolve_reports_dir
 
 # ── ANSI 컬러 ─────────────────────────────────────────────────────────────────
 _GREEN  = "\033[32m"
@@ -334,6 +335,16 @@ def _ensure_gitignore(repo_path: Path) -> None:
         logger.warning(".gitignore 자동 등록 실패 (건너뜀): %s", e)
 
 
+def _default_reports_dir(repo_path: Path) -> Path:
+    """
+    기본 리포트 디렉토리를 해석한다.
+
+    - 우선 `repo_path/agent-data/reports`
+    - 해당 디렉토리가 없고 `repo_path/data/reports`만 있으면 legacy 경로 사용
+    """
+    return resolve_reports_dir("agent-data/reports", base=repo_path)
+
+
 # ── 파이프라인 실행 (CLI + API 공용) ──────────────────────────────────────────
 
 def run_pipeline(
@@ -369,9 +380,9 @@ def run_pipeline(
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    # reports_dir 기본값: 대상 레포 안의 agent-data/reports
+    # reports_dir 기본값: 대상 레포 안의 agent-data/reports (legacy data/reports 자동 fallback)
     if reports_dir is None:
-        reports_dir = repo_path / "agent-data" / "reports"
+        reports_dir = _default_reports_dir(repo_path)
 
     # 파이프라인 시작 전 PROJECT_STRUCTURE.md 초기 생성 (없거나 오래된 경우)
     try:
@@ -1573,8 +1584,12 @@ def main() -> int:
     git = GitWorkflow(repo_path, base_branch=args.base_branch)
     merge_agent = MergeAgent(llm=fast_llm, repo_path=repo_path)
 
-    # reports_dir: --reports-dir 명시 시 그 경로, 아니면 대상 레포 안의 agent-data/reports
-    reports_dir = Path(args.reports_dir) if args.reports_dir != "agent-data/reports" else repo_path / "agent-data" / "reports"
+    # reports_dir: --reports-dir 명시 시 해당 경로, 기본값이면 repo 기준 자동 해석
+    reports_dir = (
+        resolve_reports_dir(args.reports_dir, base=repo_path)
+        if args.reports_dir == "agent-data/reports"
+        else Path(args.reports_dir)
+    )
 
     save_lock = threading.Lock()  # tasks.yaml 쓰기 직렬화
     success_count = 0

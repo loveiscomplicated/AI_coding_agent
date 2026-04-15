@@ -83,7 +83,7 @@ AI 에이전트 팀을 활용한 소프트웨어 개발 파이프라인 구축. 
 ### 2.5.1 전체 데이터 흐름
 
 ```
-agent-data/tasks.yaml (수동 정의 또는 Sonnet 자동 생성 후 승인)
+agent-data/tasks.yaml (수동 정의 또는 Sonnet 자동 생성 후 승인, legacy data/tasks.yaml 자동 호환)
     │
     ▼ orchestrator/run.py (또는 백엔드 API)
 [Task 목록] ──► 의존성 그룹 계산 ──► 진행
@@ -178,12 +178,12 @@ AI_coding_agent/
 │   ├── main.py                # FastAPI 앱 진입점
 │   └── routers/
 │       ├── chat.py            # POST /api/chat/stream, POST /api/chat/complete, GET /api/models
-│       ├── tasks.py           # GET/POST /api/tasks, GET/PATCH /api/tasks/{id}, POST/GET /api/tasks/draft[/{job_id}]
+│       ├── tasks.py           # GET/POST /api/tasks, GET/PATCH /api/tasks/{id}, POST/GET /api/tasks/draft[/{job_id}], POST /api/tasks/{id}/redesign, POST /api/tasks/fix-dependencies
 │       ├── pipeline.py        # POST /api/pipeline/run, GET /api/pipeline/status/{id}, GET /api/pipeline/stream/{id}, GET /api/pipeline/jobs, POST /api/pipeline/control/{id}
 │       ├── reports.py         # POST /api/execution-brief, GET /api/project-structure, POST/GET /api/reports/weekly[/{year}/{week}]
 │       ├── dashboard.py       # GET /api/dashboard/summary, /tasks, /milestones[/{filename}]
-│       ├── discord_router.py  # GET /api/discord/status, POST /api/discord/test
-│       └── utils.py           # 공통 유틸리티
+│       ├── discord_router.py  # GET /api/discord/status, GET /api/discord/guilds, POST /api/discord/test
+│       └── utils.py           # GET /api/config, GET/PATCH /api/config/llm, GET/POST /api/utils/context-docs*
 ├── docker/
 │   ├── Dockerfile.test        # python:3.12-slim + pytest
 │   ├── docker-entrypoint.sh   # 다중 프레임워크 지원 (pytest/jest/vitest/go/rspec/minitest/python/node)
@@ -468,7 +468,7 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
     ├── tools/hotline_tools.py  — ask_user 도구 (에이전트 → 사용자 질의, LLM 대화 파트너)
     ├── orchestrator/run.py  — 파이프라인 알림 + PauseController
     │     직접 Discord 폴링 (리스너 스레드 백업), stop_check → ReactLoop/ScopedReactLoop 연동
-    ├── backend/routers/discord_router.py  — GET /api/discord/status, POST /api/discord/test
+    ├── backend/routers/discord_router.py  — GET /api/discord/status, GET /api/discord/guilds, POST /api/discord/test
     ├── scripts/test_discord_read.py  — Discord 메시지 읽기 진단 스크립트
     └── tests/test_notifier.py
   Step 6: 보고서 체계 (Weekly Report) ✅

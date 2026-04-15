@@ -91,6 +91,9 @@ tasks.py:
   PATCH /api/tasks/{id}        태스크 부분 업데이트 (description, acceptance_criteria)
   POST /api/tasks/draft        태스크 초안 생성 시작 (비동기, job_id 반환)
   GET  /api/tasks/draft/{job_id} 초안 생성 상태/결과 조회
+  POST /api/tasks/{id}/redesign   실패 태스크 재설계 초안 생성 (비동기, job_id 반환)
+  GET  /api/tasks/redesign/{job_id} 재설계 상태/결과 조회
+  POST /api/tasks/fix-dependencies  순환 depends_on 자동 수정
 
 pipeline.py:
   POST /api/pipeline/run           파이프라인 시작 (비동기, job_id 반환)
@@ -114,7 +117,17 @@ dashboard.py:
 
 discord_router.py:
   GET  /api/discord/status         Discord 연결 상태 확인
+  GET  /api/discord/guilds         봇 참여 서버 목록 조회
   POST /api/discord/test           테스트 메시지 전송
+
+utils.py:
+  GET  /api/config                 현재 백엔드 기본 LLM 설정
+  GET  /api/config/llm             런타임 LLM 설정 조회
+  PATCH /api/config/llm            런타임 LLM 설정 변경
+  GET  /api/utils/context-docs     context 문서 목록 조회
+  GET  /api/utils/context-docs/{filename} context 문서 본문 조회
+  POST /api/utils/save-context-doc context 문서 저장
+  GET  /api/utils/browse           macOS 파일/폴더 선택 다이얼로그
 ```
 
 ### 2.2 실행 환경 독립성
@@ -440,6 +453,7 @@ ReactLoop(stop_check=pause_ctrl.is_stopped)
 
 **생성 시점**: 태스크 완료 시 자동 생성  
 **저장 형식**: YAML (`agent-data/reports/task-{id}.yaml`)  
+호환성: 기존 워크스페이스에 `agent-data`가 없고 `data`만 있으면 `data/reports/*`를 자동 사용한다.
 **소비자**: 오케스트레이터(상세), 사람(핫라인 요약), execution_brief 생성
 
 **TaskReport 구조 (metrics/collector.py의 실제 dataclass):**
@@ -475,7 +489,8 @@ cost_usd: 0.0046             # _MODEL_PRICING 테이블 기반 추정 비용
 ### 6.2 Weekly Report (orchestrator/weekly.py)
 
 **생성 주기**: 매주 (POST /api/reports/weekly 호출 시)  
-**저장 위치**: `agent-data/reports/weekly/{year}-W{week}.md`
+**저장 위치**: `agent-data/reports/weekly/{year}-W{week}.md`  
+호환성: `agent-data`가 없고 `data`만 있으면 `data/reports/weekly/*`를 자동 사용한다.
 
 **Daily Summary를 폐기한 이유**: 핫라인으로 태스크별 알림이 이미 오므로, Daily Summary의 단순 나열은 중복. Weekly Report가 데이터 축적 후 의미 있는 분석을 제공하는 최소 주기.
 
@@ -491,6 +506,7 @@ cost_usd: 0.0046             # _MODEL_PRICING 테이블 기반 추정 비용
 
 **생성 시점**: 파이프라인 전체 완료 시 자동 생성  
 **저장 위치**: `agent-data/reports/milestones/{timestamp}.md`  
+호환성: `agent-data`가 없고 `data`만 있으면 `data/reports/milestones/*`를 자동 사용한다.
 **소비자**: 사람, 대시보드
 
 ### 6.4 컨텍스트 압축 (미구현, 필요 시 추가)

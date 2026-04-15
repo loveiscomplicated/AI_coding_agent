@@ -17,7 +17,6 @@ backend/routers/dashboard.py — 대시보드 데이터 API
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -25,6 +24,7 @@ from fastapi import APIRouter, HTTPException
 from orchestrator.milestone import load_milestone_reports
 from orchestrator.report import load_reports
 from orchestrator.task import load_tasks
+from project_paths import resolve_reports_dir, resolve_tasks_path
 
 router = APIRouter()
 
@@ -37,12 +37,12 @@ def get_dashboard_summary(
     reports_dir: str = "agent-data/reports",
     tasks_path: str = "agent-data/tasks.yaml",
 ) -> dict[str, Any]:
-    reports_path = Path(reports_dir)
+    reports_path = resolve_reports_dir(reports_dir)
     milestones_dir = reports_path / "milestones"
 
     # 태스크 현황
     task_stats: dict[str, int] = {}
-    tp = Path(tasks_path)
+    tp = resolve_tasks_path(tasks_path)
     if tp.exists():
         tasks = load_tasks(tp)
         for task in tasks:
@@ -94,12 +94,12 @@ def get_dashboard_tasks(
     reports_dir: str = "agent-data/reports",
     tasks_path: str = "agent-data/tasks.yaml",
 ) -> dict[str, Any]:
-    tp = Path(tasks_path)
+    tp = resolve_tasks_path(tasks_path)
     if not tp.exists():
         return {"tasks": []}
 
     tasks = load_tasks(tp)
-    reports = {r.task_id: r for r in load_reports(reports_dir=Path(reports_dir))}
+    reports = {r.task_id: r for r in load_reports(reports_dir=resolve_reports_dir(reports_dir))}
 
     result = []
     for task in tasks:
@@ -132,7 +132,7 @@ def get_dashboard_tasks(
 
 @router.get("/dashboard/milestones")
 def list_milestones(reports_dir: str = "agent-data/reports") -> dict[str, Any]:
-    milestones_dir = Path(reports_dir) / "milestones"
+    milestones_dir = resolve_reports_dir(reports_dir) / "milestones"
     return {"milestones": load_milestone_reports(milestones_dir=milestones_dir)}
 
 
@@ -141,7 +141,7 @@ def get_milestone(filename: str, reports_dir: str = "agent-data/reports") -> dic
     if "/" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="잘못된 파일명입니다.")
 
-    path = Path(reports_dir) / "milestones" / filename
+    path = resolve_reports_dir(reports_dir) / "milestones" / filename
     if not path.exists():
         raise HTTPException(status_code=404, detail="보고서를 찾을 수 없습니다.")
 

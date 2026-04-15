@@ -28,6 +28,7 @@ from agents.roles import RoleModelConfig
 from backend.config import DISCORD_BOT_TOKEN, DISCORD_GUILD_ID, LLM_PROVIDER, LLM_MODEL_FAST, LLM_MODEL_CAPABLE
 from hotline.notifier import DiscordNotifier
 from orchestrator.run import PauseController, run_pipeline
+from project_paths import resolve_tasks_path
 
 router = APIRouter()
 
@@ -137,7 +138,7 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
                     logger.warning("Discord 채널 생성 실패 (무시): %s", exc)
 
             result = run_pipeline(
-                tasks_path=Path(body.tasks_path),
+                tasks_path=resolve_tasks_path(body.tasks_path, base=Path(body.repo_path).resolve()),
                 repo_path=Path(body.repo_path).resolve(),
                 base_branch=body.base_branch,
                 task_id=body.task_id,

@@ -24,6 +24,7 @@ from backend.config import LLM_PROVIDER, LLM_MODEL_CAPABLE
 from llm import LLMConfig, Message, create_client
 from orchestrator.task import Task, load_tasks, save_tasks
 from orchestrator.task_redesign import create_redesign_llm, redesign_task
+from project_paths import resolve_data_dir, resolve_tasks_path
 from tools.hotline_tools import get_redesign_model
 
 # ── 초안 생성 잡 저장소 ──────────────────────────────────────────────────────
@@ -260,7 +261,7 @@ def get_draft_status(job_id: str) -> dict:
 @router.get("/tasks")
 def list_tasks(tasks_path: str = "agent-data/tasks.yaml") -> dict:
     """tasks.yaml에서 태스크 목록을 반환한다."""
-    path = Path(tasks_path)
+    path = resolve_tasks_path(tasks_path)
     if not path.exists():
         return {"tasks": []}
     try:
@@ -273,7 +274,7 @@ def list_tasks(tasks_path: str = "agent-data/tasks.yaml") -> dict:
 @router.get("/tasks/{task_id}")
 def get_task(task_id: str, tasks_path: str = "agent-data/tasks.yaml") -> dict:
     """특정 ID의 태스크를 반환한다."""
-    path = Path(tasks_path)
+    path = resolve_tasks_path(tasks_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="tasks 파일을 찾을 수 없습니다.")
     try:
@@ -295,7 +296,7 @@ class PatchTaskRequest(BaseModel):
 @router.patch("/tasks/{task_id}")
 def patch_task(task_id: str, body: PatchTaskRequest) -> dict:
     """특정 태스크의 description/acceptance_criteria를 부분 업데이트한다."""
-    path = Path(body.tasks_path)
+    path = resolve_tasks_path(body.tasks_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="tasks 파일을 찾을 수 없습니다.")
     try:
@@ -329,7 +330,7 @@ def _run_redesign(job_id: str, task_id: str, tasks_path: str, repo_path: str) ->
         with _redesign_lock:
             _redesign_jobs[job_id]["status"] = "running"
         try:
-            path = Path(tasks_path)
+            path = resolve_tasks_path(tasks_path)
             if not path.exists():
                 with _redesign_lock:
                     _redesign_jobs[job_id]["status"] = "error"
@@ -346,7 +347,8 @@ def _run_redesign(job_id: str, task_id: str, tasks_path: str, repo_path: str) ->
 
             # spec.md 등 컨텍스트 문서 읽기
             spec_content = ""
-            context_dir = Path(repo_path) / "agent-data" / "context"
+            data_dir = resolve_data_dir(Path(repo_path))
+            context_dir = data_dir / "context"
             if context_dir.exists():
                 spec_files = list(context_dir.glob("*.md"))
                 parts = []
@@ -359,7 +361,7 @@ def _run_redesign(job_id: str, task_id: str, tasks_path: str, repo_path: str) ->
 
             # 오케스트레이터 마크다운 보고서 읽기 (있으면 raw 로그 대신 사용)
             orch_report = ""
-            reports_dir = Path(repo_path) / "agent-data" / "reports"
+            reports_dir = data_dir / "reports"
             orch_report_path = reports_dir / f"{task_id}_orchestrator_report.md"
             if orch_report_path.exists():
                 try:
@@ -518,6 +520,6 @@ def save_tasks_endpoint(body: SaveTasksRequest) -> dict:
         for r in removed:
             cleaned.append(f"{task.id}.depends_on에서 '{r}' 제거")
 
-    path = Path(body.tasks_path)
+    path = resolve_tasks_path(body.tasks_path)
     save_tasks(task_objs, path)
     return {"saved": len(task_objs), "path": str(path), "cleaned_deps": cleaned}
