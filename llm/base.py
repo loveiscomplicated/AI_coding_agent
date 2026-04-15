@@ -140,13 +140,14 @@ class BaseLLMClient(ABC):
         pass
 
     @abstractmethod
-    def stream(self, messages: list[Message]) -> Generator[str, None, None]:
+    def stream(self, messages: list[Message], **kwargs) -> Generator[str, None, None]:
         """
         스트리밍 방식으로 응답을 토큰 단위로 받음.
         CLI에서 실시간으로 출력할 때 사용.
 
         Args:
             messages: 대화 히스토리
+            **kwargs: provider별 확장 인자(예: tools)
 
         Yields:
             str: 토큰 단위 텍스트 조각

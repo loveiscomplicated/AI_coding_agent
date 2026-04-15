@@ -215,7 +215,7 @@ class OpenaiClient(BaseLLMClient):
             output_tokens=usage.completion_tokens if usage else 0,
         )
 
-    def stream(self, messages: list[Message]) -> Generator[str, None, None]:
+    def stream(self, messages: list[Message], **kwargs) -> Generator[str, None, None]:
         """스트리밍 방식 채팅"""
         create_kwargs: dict = {
             "model": self.config.model,
@@ -226,6 +226,9 @@ class OpenaiClient(BaseLLMClient):
             "max_completion_tokens": self.config.max_tokens,
             "stream": True,
         }
+        tools = kwargs.get("tools")
+        if tools:
+            create_kwargs["tools"] = tools
         if self.config.temperature is not None:
             create_kwargs["temperature"] = self.config.temperature
 

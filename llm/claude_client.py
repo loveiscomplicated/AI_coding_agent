@@ -139,11 +139,12 @@ class ClaudeClient(BaseLLMClient):
 
     def stream(self, messages: list[Message], **kwargs) -> Generator[str, None, None]:
         """스트리밍 방식 채팅 — CLI에서 실시간 출력할 때 사용"""
+        tools = kwargs.get("tools", kwargs.get("TOOLS_SCHEMA", omit))
         with self._client.messages.stream(
             model=self.config.model,
             system=self._build_system(),
             messages=self._build_api_messages(messages),  # type: ignore
-            tools=self._apply_tools_cache(kwargs.get("TOOLS_SCHEMA", omit)),
+            tools=self._apply_tools_cache(tools),
             max_tokens=self.config.max_tokens,
             temperature=self.config.temperature,  # type: ignore
         ) as stream:

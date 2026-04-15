@@ -84,6 +84,24 @@ def patch_schema(monkeypatch):
 
 
 class TestStreamingBasic:
+    def test_stream_called_with_tools_schema_kwarg(self, monkeypatch):
+        """end_turn + on_token 경로에서 stream()에 tools kwargs가 전달되어야 한다."""
+        tools_schema = [{"name": "read_file", "input_schema": {"type": "object"}}]
+        monkeypatch.setattr(ReactLoop, "get_tools_schema", lambda self: tools_schema)
+
+        llm = MagicMock()
+        llm.build_messages.return_value = [Message(role="user", content="hi")]
+        llm.chat.return_value = _end_turn_response()
+        llm.stream.return_value = iter(["ok"])
+
+        loop = ReactLoop(llm=llm, on_token=lambda _: None)
+        result = loop.run("hi")
+
+        assert result.succeeded is True
+        llm.stream.assert_called_once()
+        _, kwargs = llm.stream.call_args
+        assert kwargs.get("tools") == tools_schema
+
     def test_on_token_called_during_end_turn(self):
         """end_turn 응답 시 on_token 콜백이 최소 1회 이상 호출돼야 한다."""
         chunks = ["Hello", " world", "!"]

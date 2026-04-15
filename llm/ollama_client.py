@@ -259,7 +259,7 @@ class OllamaClient(BaseLLMClient):
             output_tokens=response.get("eval_count", 0),
         )
 
-    def stream(self, messages: list[Message]) -> Generator[str, None, None]:
+    def stream(self, messages: list[Message], **kwargs) -> Generator[str, None, None]:
         """스트리밍 방식 채팅 — CLI에서 실시간 출력할 때 사용"""
         stream = self._client.chat(
             model=self.config.model,
