@@ -53,6 +53,37 @@ type Action =
   | { type: 'SAVING' }
   | { type: 'RUNNING'; jobId: string }
   | { type: 'DONE' }
+  | { type: 'FIX_DEEP_PATHS' }
+  | { type: 'DISMISS_WARNING'; taskIdx: number; warningIdx: number }
+
+// ── 깊은 경로 정규화 헬퍼 ──────────────────────────────────────────────────────
+
+/** target_files 경로 하나를 정규화한다.
+ * 1. 슬래시 없음 → 그대로  (user.py → user.py)
+ * 2. src/ 접두어 먼저 제거  (src/models/user.py → models/user.py)
+ * 3. 슬래시 1개 → 1-level 경로 유지  (models/user.py → models/user.py)
+ * 4. 슬래시 2개+ → basename만 추출  (app/src/.../FakeMap.kt → FakeMap.kt)
+ */
+function normalizeTargetPath(f: string): string {
+  if (!f.includes('/')) return f
+  let path = f.startsWith('src/') ? f.slice(4) : f
+  if (!path.includes('/')) return path
+  const slashCount = (path.match(/\//g) ?? []).length
+  if (slashCount === 1) return path
+  return path.split('/').pop()!
+}
+
+function sanitizeFilePaths(files: string[]): { files: string[]; changed: boolean } {
+  let changed = false
+  const sanitized = files.map(f => {
+    const result = normalizeTargetPath(f)
+    if (result !== f) changed = true
+    return result
+  })
+  const deduped = [...new Set(sanitized)]
+  if (deduped.length !== sanitized.length) changed = true
+  return { files: deduped, changed }
+}
 
 function reducer(state: State, action: Action): State {
   switch (action.type) {
@@ -95,12 +126,33 @@ function reducer(state: State, action: Action): State {
       return { ...state, baseBranch: action.branch }
     case 'SET_AGENT_COUNT':
       return { ...state, agentCount: Math.max(1, Math.min(8, action.count)) }
+    case 'SET_NO_PUSH':
+      return { ...state, noPush: action.value }
     case 'SAVING':
       return { ...state, phase: 'saving' }
     case 'RUNNING':
       return { ...state, phase: 'running', jobId: action.jobId }
     case 'DONE':
       return { ...state, phase: 'done' }
+    case 'FIX_DEEP_PATHS': {
+      const tasks = state.tasks.map(t => {
+        const { files, changed } = sanitizeFilePaths(t.target_files)
+        if (!changed) return t
+        return {
+          ...t,
+          target_files: files,
+          warnings: (t.warnings ?? []).filter(w => !w.startsWith('target_files 깊은 경로 정리')),
+        }
+      })
+      return { ...state, tasks }
+    }
+    case 'DISMISS_WARNING': {
+      const tasks = [...state.tasks]
+      const task = { ...tasks[action.taskIdx] }
+      task.warnings = (task.warnings ?? []).filter((_, i) => i !== action.warningIdx)
+      tasks[action.taskIdx] = task
+      return { ...state, tasks }
+    }
     default:
       return state
   }
@@ -450,6 +502,15 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
               ⚠ 크기 초과 태스크 있음
             </span>
           )}
+          {state.tasks.some(t => t.warnings?.some(w => w.startsWith('target_files 깊은 경로 정리'))) && (
+            <button
+              className="text-xs font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400 px-2 py-0.5 rounded-full hover:bg-amber-200 dark:hover:bg-amber-800/60 transition-colors"
+              onClick={() => dispatch({ type: 'FIX_DEEP_PATHS' })}
+              title="모든 태스크의 target_files 깊은 경로를 파일명만 남기도록 일괄 수정합니다"
+            >
+              ⚠ 깊은 경로 자동 수정
+            </button>
+          )}
           {hasCycle && (
             <span className="text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400 px-2 py-0.5 rounded-full animate-pulse">
               ⚠ 순환 참조
@@ -543,6 +604,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
             onUpdate={t => dispatch({ type: 'UPDATE_TASK', idx, task: t })}
             onDelete={() => dispatch({ type: 'DELETE_TASK', idx })}
             onMove={dir => dispatch({ type: 'MOVE_TASK', idx, dir })}
+            onDismissWarning={wIdx => dispatch({ type: 'DISMISS_WARNING', taskIdx: idx, warningIdx: wIdx })}
           />
         ))}
 
@@ -567,9 +629,10 @@ interface CardProps {
   onUpdate: (t: DraftTask) => void
   onDelete: () => void
   onMove: (dir: -1 | 1) => void
+  onDismissWarning: (warningIdx: number) => void
 }
 
-function TaskCard({ task, idx, total, onUpdate, onDelete, onMove }: CardProps) {
+function TaskCard({ task, idx, total, onUpdate, onDelete, onMove, onDismissWarning }: CardProps) {
   function updateField<K extends keyof DraftTask>(key: K, value: DraftTask[K]) {
     onUpdate({ ...task, [key]: value })
   }
@@ -685,9 +748,34 @@ function TaskCard({ task, idx, total, onUpdate, onDelete, onMove }: CardProps) {
 
       {/* 경고 */}
       {(task.warnings?.length ?? 0) > 0 && (
-        <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 p-2 space-y-0.5">
+        <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 p-2 space-y-1">
           {task.warnings!.map((w, i) => (
-            <p key={i} className="text-xs text-amber-700 dark:text-amber-400">⚠ {w}</p>
+            <div key={i} className="flex items-start gap-1">
+              <p className="flex-1 text-xs text-amber-700 dark:text-amber-400">⚠ {w}</p>
+              {w.startsWith('target_files 깊은 경로 정리') && (
+                <button
+                  className="shrink-0 text-[10px] text-amber-600 dark:text-amber-400 hover:text-amber-800 dark:hover:text-amber-200 underline leading-4"
+                  onClick={() => {
+                    const { files } = sanitizeFilePaths(task.target_files)
+                    onUpdate({
+                      ...task,
+                      target_files: files,
+                      warnings: (task.warnings ?? []).filter((_, j) => j !== i),
+                    })
+                  }}
+                  title="이 태스크의 경로를 정규화합니다 (src/ 제거, 1-level 유지, 깊은 경로는 파일명만 추출)"
+                >
+                  수정
+                </button>
+              )}
+              <button
+                className="shrink-0 text-amber-400 hover:text-amber-700 dark:hover:text-amber-200 leading-4 px-0.5"
+                onClick={() => onDismissWarning(i)}
+                title="경고 닫기"
+              >
+                ✕
+              </button>
+            </div>
           ))}
         </div>
       )}

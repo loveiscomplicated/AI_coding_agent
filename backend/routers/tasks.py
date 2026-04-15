@@ -65,9 +65,10 @@ _DRAFT_SYSTEM_PROMPT = """\
   - Kotlin/Java: PascalCase .kt/.java (예: FakeMapService.kt)
   - Go: snake_case .go (예: fake_map_service.go)
   - JavaScript/TypeScript: camelCase 또는 PascalCase .js/.ts/.tsx
-- 깊은 패키지 경로 금지: 파일명만 또는 짧은 상대 경로만 사용한다.
-  - 좋은 예: "FakeMapService.kt", "src/map_service.py"
-  - 나쁜 예: "app/src/main/java/com/example/arnavigation/data/fake/FakeMapService.kt"
+- target_files 경로: 파일명(flat) 또는 1단계 상대 경로만 허용한다.
+  - 좋은 예: "user.py", "models/user.py", "services/auth.py", "FakeMapService.kt"
+  - 나쁜 예: "src/models/user.py"  (src/ 접두어 불필요, 자동 제거됨)
+  - 나쁜 예: "app/src/main/java/com/example/FakeMapService.kt"  (깊은 경로 금지)
 
 [acceptance_criteria — 언어 중립적으로 작성]
 수락 기준은 언어·프레임워크·플랫폼 전용 API를 언급하지 않는 행동 중심 문장으로 작성한다.
@@ -111,6 +112,26 @@ class DraftRequest(BaseModel):
 
 # ── 엔드포인트 ────────────────────────────────────────────────────────────────
 
+def _normalize_target_path(fpath: str) -> str:
+    """target_files 경로 하나를 정규화한다.
+
+    규칙:
+      1. 슬래시 없음 → 그대로  (user.py → user.py)
+      2. src/ 접두어 먼저 제거  (src/models/user.py → models/user.py)
+      3. 슬래시 1개 → 1-level 경로 유지  (models/user.py → models/user.py)
+      4. 슬래시 2개 이상 → basename만 추출  (app/src/.../FakeMap.kt → FakeMap.kt)
+    """
+    if "/" not in fpath:
+        return fpath
+    if fpath.startswith("src/"):
+        fpath = fpath[4:]
+    if "/" not in fpath:
+        return fpath
+    if fpath.count("/") == 1:
+        return fpath
+    return fpath.rsplit("/", 1)[-1]
+
+
 def _sanitize_task_draft(task: dict, warnings: list[str]) -> None:
     """LLM이 생성한 태스크 초안의 target_files 깊은 경로를 정리한다.
 
@@ -125,11 +146,10 @@ def _sanitize_task_draft(task: dict, warnings: list[str]) -> None:
 
     for fpath in target_files:
         original = fpath
-        # 깊은 경로에서 파일명만 추출: "app/src/.../FakeMapService.kt" → "FakeMapService.kt"
-        basename = fpath.rsplit("/", 1)[-1] if "/" in fpath else fpath
+        sanitized = _normalize_target_path(fpath)
 
-        sanitized_files.append(basename)
-        if basename != original:
+        sanitized_files.append(sanitized)
+        if sanitized != original:
             any_fixed = True
 
     if any_fixed:

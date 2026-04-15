@@ -681,6 +681,26 @@ def _context_hint(workspace: WorkspaceManager) -> str:
     return f"\n상세 스펙·아키텍처 문서: {doc_list} — 구현 전에 참조하세요.\n"
 
 
+def _python_import_path(f: str) -> str:
+    """target_file 경로에서 Python import 경로를 생성한다.
+
+    models/user.py → models.user
+    user.py        → user
+    """
+    p = Path(f)
+    parts = [part.replace("-", "_") for part in p.with_suffix("").parts]
+    return ".".join(parts)
+
+
+def _node_require_path(f: str) -> str:
+    """target_file 경로에서 Node.js require 경로를 생성한다.
+
+    models/user.js → ../src/models/user
+    user.js        → ../src/user
+    """
+    return f"../src/{Path(f).with_suffix('')}"
+
+
 def _test_lang_rules(task: Task) -> str:
     """
     target_files 기반으로 TestWriter에 주입할 언어·import·출력 규약 섹션을 생성한다.
@@ -693,7 +713,7 @@ def _test_lang_rules(task: Task) -> str:
 
     if runtime == "node":
         import_examples = "\n".join(
-            f"  const ... = require('../src/{Path(f).name}');  // {f}"
+            f"  const ... = require('{_node_require_path(f)}');  // {f}"
             for f in impl_files
         )
         return f"""## 테스트 작성 규칙
@@ -733,7 +753,7 @@ try {{
 """
     else:
         import_examples = "\n".join(
-            f"  from {Path(f).stem.replace('-', '_')} import ...  # src/{Path(f).name}"
+            f"  from {_python_import_path(f)} import ...  # src/{f}"
             for f in impl_files
         )
         return f"""## 테스트 작성 규칙
@@ -849,6 +869,13 @@ def _build_test_writer_prompt(
 """
 
 
+def _format_target_files(target_files: list[str]) -> str:
+    """target_files 목록을 프롬프트용 파일 경로 목록으로 포맷한다."""
+    if not target_files:
+        return "(target_files 없음 — tests/ 를 참고해 적절한 위치에 생성하세요)"
+    return "\n".join(f"- `src/{f}`" for f in target_files)
+
+
 def _build_implementer_prompt(
     task: Task,
     workspace: WorkspaceManager,
@@ -875,6 +902,12 @@ def _build_implementer_prompt(
 
 `{workspace.path}`
 {structure_hint}{_context_hint(workspace)}
+## 생성할 파일 목록
+
+다음 경로에 구현 파일을 작성하세요 (workspace `src/` 기준):
+
+{_format_target_files(task.target_files)}
+
 `tests/` 에 있는 테스트를 먼저 읽고,
 `src/` 에 테스트를 **모두** 통과하는 구현을 작성하세요.
 """
@@ -924,6 +957,10 @@ def _build_reviewer_prompt(
 ## 워크스페이스 경로
 
 `{workspace.path}`
+
+## 생성된 파일 (target_files 기준)
+
+{_format_target_files(task.target_files)}
 
 `src/` 와 `tests/` 를 읽고 코드를 검토한 뒤,
 지시받은 형식대로 VERDICT 를 반환하세요.
