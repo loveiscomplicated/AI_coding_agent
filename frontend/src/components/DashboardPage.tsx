@@ -93,6 +93,11 @@ function buildQuery(cfg: ProjectConfig) {
   return p.toString()
 }
 
+function buildReportsQuery(cfg: ProjectConfig) {
+  const p = new URLSearchParams({ reports_dir: cfg.reportsDir })
+  return p.toString()
+}
+
 // ── 아이콘 ────────────────────────────────────────────────────────────────────
 
 function FolderIcon() {
@@ -491,12 +496,13 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
     setSelectedWeekly(null)
     setSelectedContextDoc(null)
     const q = buildQuery(cfg)
+    const reportsQ = buildReportsQuery(cfg)
     try {
       const [summaryRes, tasksRes, milestonesRes, weeklyRes] = await Promise.all([
         fetch(`${API_BASE}/api/dashboard/summary?${q}`),
         fetch(`${API_BASE}/api/dashboard/tasks?${q}`),
-        fetch(`${API_BASE}/api/dashboard/milestones?${q}`),
-        fetch(`${API_BASE}/api/reports/weekly`),
+        fetch(`${API_BASE}/api/dashboard/milestones?${reportsQ}`),
+        fetch(`${API_BASE}/api/reports/weekly?${reportsQ}`),
       ])
       if (!summaryRes.ok || !tasksRes.ok || !milestonesRes.ok) {
         throw new Error('API 응답 오류')
@@ -806,7 +812,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
 
   const openMilestone = async (filename: string) => {
     try {
-      const q = buildQuery(config)
+      const q = buildReportsQuery(config)
       const res = await fetch(`${API_BASE}/api/dashboard/milestones/${filename}?${q}`)
       const data = await res.json()
       setSelectedWeekly(null)
@@ -816,7 +822,8 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
 
   const openWeeklyReport = async (year: number, week: number) => {
     try {
-      const res = await fetch(`${API_BASE}/api/reports/weekly/${year}/${week}`)
+      const q = buildReportsQuery(config)
+      const res = await fetch(`${API_BASE}/api/reports/weekly/${year}/${week}?${q}`)
       const data = await res.json()
       setSelectedMilestone(null)
       setSelectedWeekly({ year, week, content: data.content })
@@ -829,7 +836,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
       const res = await fetch(`${API_BASE}/api/reports/weekly`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ reports_dir: config.reportsDir }),
       })
       if (!res.ok) throw new Error('생성 실패')
       const data = await res.json()

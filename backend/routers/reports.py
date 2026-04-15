@@ -169,12 +169,14 @@ def _make_llm_fn():
 @router.post("/reports/weekly")
 def create_weekly_report(body: WeeklyReportRequest) -> dict[str, Any]:
     """ISO 주차 주간 보고서를 생성하고 저장한다."""
+    reports_dir = resolve_reports_dir(body.reports_dir)
     try:
         content, save_path = generate_weekly_report(
             llm_fn=_make_llm_fn(),
             year=body.year,
             week=body.week,
-            reports_dir=resolve_reports_dir(body.reports_dir),
+            reports_dir=reports_dir,
+            weekly_dir=reports_dir / "weekly",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -194,15 +196,21 @@ def create_weekly_report(body: WeeklyReportRequest) -> dict[str, Any]:
 
 
 @router.get("/reports/weekly")
-def list_weekly() -> dict[str, Any]:
+def list_weekly(reports_dir: str = "agent-data/reports") -> dict[str, Any]:
     """저장된 주간 보고서 목록을 반환한다."""
-    return {"reports": list_weekly_reports()}
+    weekly_dir = resolve_reports_dir(reports_dir) / "weekly"
+    return {"reports": list_weekly_reports(weekly_dir=weekly_dir)}
 
 
 @router.get("/reports/weekly/{year}/{week}")
-def get_weekly_report(year: int, week: int) -> dict[str, Any]:
+def get_weekly_report(
+    year: int,
+    week: int,
+    reports_dir: str = "agent-data/reports",
+) -> dict[str, Any]:
     """특정 주의 주간 보고서를 반환한다."""
-    content = load_weekly_report(year, week)
+    weekly_dir = resolve_reports_dir(reports_dir) / "weekly"
+    content = load_weekly_report(year, week, weekly_dir=weekly_dir)
     if content is None:
         raise HTTPException(
             status_code=404,

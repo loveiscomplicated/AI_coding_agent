@@ -2,33 +2,53 @@
 메트릭 수집기 모듈
 
 TaskReport를 YAML 파일로 저장/로드하고, 여러 Report를 집계한다.
-표준 라이브러리(dataclasses, pathlib, datetime, yaml)만 사용한다.
+TaskReport 타입의 단일 소스는 orchestrator.report.TaskReport를 사용한다.
 """
-from dataclasses import dataclass, field, asdict
-from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
+
 import yaml
 
+from reports.task_report import TaskReport
 
-@dataclass
-class TaskReport:
-    """태스크 실행 결과 리포트"""
-    # 필수 필드
-    task_id: str
-    title: str
-    status: str
-    completed_at: Optional[str]
-    retry_count: int
-    time_elapsed_seconds: float
-    # 선택 필드 (기본값 있음)
-    test_count: int = 0
-    test_pass_first_try: bool = False
-    reviewer_verdict: str = ""
-    failure_reasons: list = field(default_factory=list)
-    reviewer_feedback: str = ""
-    models_used: dict | None = None
-    # 역할별 실제 사용 모델. 예: {"test_writer": "openai/gpt-4.1-mini", "reviewer": "claude/claude-sonnet-4-20250514"}
+
+def _to_flat_dict(report: TaskReport) -> dict[str, Any]:
+    """collector 레거시 평면 포맷으로 변환한다."""
+    return {
+        "task_id": report.task_id,
+        "title": report.title,
+        "status": report.status,
+        "completed_at": report.completed_at,
+        "retry_count": report.retry_count,
+        "time_elapsed_seconds": report.time_elapsed_seconds,
+        "test_count": report.test_count,
+        "test_pass_first_try": report.test_pass_first_try,
+        "reviewer_verdict": report.reviewer_verdict,
+        "failure_reasons": report.failure_reasons,
+        "reviewer_feedback": report.reviewer_feedback,
+        "models_used": report.models_used,
+    }
+
+
+def _from_flat_dict(data: dict[str, Any]) -> TaskReport:
+    """collector 레거시 평면 포맷 dict를 TaskReport로 변환한다."""
+    return TaskReport(
+        task_id=data["task_id"],
+        title=data.get("title", ""),
+        status=data.get("status", ""),
+        completed_at=data.get("completed_at"),
+        retry_count=data.get("retry_count", 0),
+        total_tokens=data.get("total_tokens", 0),
+        cost_usd=data.get("cost_usd", 0.0),
+        test_count=data.get("test_count", 0),
+        test_pass_first_try=data.get("test_pass_first_try", False),
+        reviewer_verdict=data.get("reviewer_verdict", ""),
+        time_elapsed_seconds=data.get("time_elapsed_seconds", 0.0),
+        failure_reasons=data.get("failure_reasons") or [],
+        reviewer_feedback=data.get("reviewer_feedback", ""),
+        models_used=data.get("models_used"),
+    )
 
 
 def save_report(report: TaskReport, reports_dir: str = "agent-data/reports") -> Path:
@@ -50,8 +70,7 @@ def save_report(report: TaskReport, reports_dir: str = "agent-data/reports") -> 
 
     file_path = dir_path / f"{report.task_id}.yaml"
 
-    # dataclass를 dict로 변환하여 YAML로 저장
-    data = asdict(report)
+    data = _to_flat_dict(report)
     with open(file_path, "w", encoding="utf-8") as f:
         yaml.dump(data, f, allow_unicode=True, default_flow_style=False)
 
@@ -61,7 +80,7 @@ def save_report(report: TaskReport, reports_dir: str = "agent-data/reports") -> 
 def load_reports(
     reports_dir: str = "agent-data/reports",
     since: Optional[datetime] = None,
-) -> list:
+) -> list[TaskReport]:
     """
     디렉토리 내 모든 YAML 파일을 TaskReport 리스트로 로드한다.
 
@@ -81,7 +100,7 @@ def load_reports(
     if not dir_path.exists():
         return []
 
-    reports = []
+    reports: list[TaskReport] = []
     for yaml_file in sorted(dir_path.glob("*.yaml")):
         with open(yaml_file, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
@@ -89,19 +108,11 @@ def load_reports(
         if data is None:
             continue
 
-        report = TaskReport(
-            task_id=data["task_id"],
-            title=data["title"],
-            status=data["status"],
-            completed_at=data["completed_at"],
-            retry_count=data["retry_count"],
-            test_count=data["test_count"],
-            test_pass_first_try=data["test_pass_first_try"],
-            reviewer_verdict=data["reviewer_verdict"],
-            time_elapsed_seconds=data["time_elapsed_seconds"],
-            failure_reasons=data["failure_reasons"] if data["failure_reasons"] is not None else [],
-            reviewer_feedback=data["reviewer_feedback"],
-            models_used=data.get("models_used"),
+        # orchestrator.report의 중첩 포맷도 그대로 읽을 수 있게 지원한다.
+        report = (
+            TaskReport.from_dict(data)
+            if isinstance(data, dict) and "metrics" in data
+            else _from_flat_dict(data)
         )
 
         # since 필터링
@@ -109,7 +120,10 @@ def load_reports(
             if report.completed_at is None:
                 # completed_at이 None이면 제외
                 continue
-            completed_dt = datetime.fromisoformat(report.completed_at)
+            if isinstance(report.completed_at, datetime):
+                completed_dt = report.completed_at
+            else:
+                completed_dt = datetime.fromisoformat(report.completed_at)
             if completed_dt < since:
                 continue
 
@@ -118,7 +132,7 @@ def load_reports(
     return reports
 
 
-def aggregate(reports: list) -> dict:
+def aggregate(reports: list[TaskReport]) -> dict[str, Any]:
     """
     여러 TaskReport를 집계하여 통계 딕셔너리를 반환한다.
 

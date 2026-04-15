@@ -195,6 +195,37 @@ class TestLoadReports:
         
         assert loaded.completed_at is None
 
+    def test_load_reports_accepts_orchestrator_nested_schema(self, temp_reports_dir):
+        """중첩 스키마(metrics/pipeline_result) YAML도 TaskReport로 어댑팅한다"""
+        nested = {
+            "task_id": "task-nested",
+            "title": "nested schema",
+            "status": "COMPLETED",
+            "completed_at": "2024-01-20T09:00:00",
+            "metrics": {
+                "retry_count": 3,
+                "test_count": 12,
+                "test_pass_first_try": False,
+                "reviewer_verdict": "APPROVED",
+                "time_elapsed_seconds": 123.4,
+                "failure_reasons": [],
+            },
+            "pipeline_result": {
+                "reviewer_feedback": "ok",
+            },
+        }
+        path = Path(temp_reports_dir) / "task-nested.yaml"
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(nested, f, allow_unicode=True, sort_keys=False)
+
+        loaded_reports = load_reports(reports_dir=temp_reports_dir)
+        assert len(loaded_reports) == 1
+        loaded = loaded_reports[0]
+        assert loaded.task_id == "task-nested"
+        assert loaded.retry_count == 3
+        assert loaded.time_elapsed_seconds == 123.4
+        assert loaded.reviewer_feedback == "ok"
+
 
 class TestLoadReportsSinceFilter:
     """load_reports()의 since 파라미터 필터링 테스트"""

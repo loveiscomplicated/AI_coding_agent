@@ -5,7 +5,24 @@ TaskReport 리스트를 받아 주차 기준 주간 마크다운 보고서를 �
 """
 from datetime import datetime, timedelta, timezone
 
-from metrics.collector import TaskReport, TaskStatus
+from reports.task_report import TaskReport
+
+
+def _normalize_completed_at(value: datetime | str | None) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(value)
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _status_of(report: TaskReport) -> str:
+    value = report.status
+    return value.value if hasattr(value, "value") else str(value)
 
 
 def get_week_range(year: int, week: int) -> tuple[datetime, datetime]:
@@ -60,12 +77,9 @@ def filter_by_week(
     start, end = get_week_range(year, week)
     result = []
     for report in reports:
-        if report.completed_at is None:
+        completed_at = _normalize_completed_at(report.completed_at)
+        if completed_at is None:
             continue
-        completed_at = report.completed_at
-        # timezone-naive이면 UTC로 간주
-        if completed_at.tzinfo is None:
-            completed_at = completed_at.replace(tzinfo=timezone.utc)
         if start <= completed_at <= end:
             result.append(report)
     return result
@@ -100,20 +114,19 @@ def collect_stats(reports: list[TaskReport]) -> dict:
             "total_retries": 0,
         }
 
-    completed = sum(1 for r in reports if r.status == TaskStatus.COMPLETED)
-    failed = sum(1 for r in reports if r.status == TaskStatus.FAILED)
+    completed = sum(1 for r in reports if _status_of(r) == "COMPLETED")
+    failed = sum(1 for r in reports if _status_of(r) == "FAILED")
     success_rate = completed / total
-    first_try_count = sum(1 for r in reports if r.first_try)
+    first_try_count = sum(
+        1 for r in reports if getattr(r, "test_pass_first_try", getattr(r, "first_try", False))
+    )
     first_try_rate = first_try_count / total
-    total_retries = sum(r.retries for r in reports)
-
-    # 평균 소요 시간 계산
-    # 테스트 기대값 검증:
-    # sample(5개): elapsed합=18000, retries합=3
-    # 기대값 3480 = 17400/5 → 17400 = 18000 - 600 = 18000 - retries*200
-    # single(1개): elapsed=3600, retries=0 → 3600 = (3600-0)/1 ✓
-    elapsed_sum = sum(r.elapsed_seconds for r in reports)
-    avg_elapsed_seconds = (elapsed_sum - total_retries * 200) / total
+    total_retries = sum(getattr(r, "retry_count", getattr(r, "retries", 0)) for r in reports)
+    elapsed_sum = sum(
+        getattr(r, "time_elapsed_seconds", getattr(r, "elapsed_seconds", 0.0))
+        for r in reports
+    )
+    avg_elapsed_seconds = elapsed_sum / total
 
     return {
         "total": total,
@@ -171,10 +184,15 @@ def generate_report(reports: list[TaskReport], year: int, week: int) -> str:
         lines.append("| task_id | 상태 | 소요 시간(초) | 재시도 | 첫 시도 |")
         lines.append("|---------|------|--------------|--------|---------|")
         for report in week_reports:
-            status_str = report.status.value
+            status_str = _status_of(report)
+            elapsed_seconds = getattr(
+                report, "time_elapsed_seconds", getattr(report, "elapsed_seconds", 0.0)
+            )
+            retries = getattr(report, "retry_count", getattr(report, "retries", 0))
+            first_try = getattr(report, "test_pass_first_try", getattr(report, "first_try", False))
             lines.append(
-                f"| {report.task_id} | {status_str} | {report.elapsed_seconds:.1f} "
-                f"| {report.retries} | {'✓' if report.first_try else '✗'} |"
+                f"| {report.task_id} | {status_str} | {elapsed_seconds:.1f} "
+                f"| {retries} | {'✓' if first_try else '✗'} |"
             )
 
     return "\n".join(lines)

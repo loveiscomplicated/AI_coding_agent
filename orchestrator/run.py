@@ -1660,7 +1660,7 @@ def main() -> int:
                 return ""
 
             run_label = tasks_path.stem  # 예: "tasks"
-            task_reports = load_reports()
+            task_reports = load_reports(reports_dir=reports_dir)
             # 이번 실행 태스크만 필터 (all_tasks ID 기준)
             run_ids = {t.id for t in all_tasks}
             run_reports = [r for r in task_reports if r.task_id in run_ids]

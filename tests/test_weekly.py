@@ -7,7 +7,91 @@ from reports.weekly import (
     collect_stats,
     generate_report,
 )
-from metrics.collector import TaskReport, TaskStatus
+from metrics.collector import TaskReport
+
+
+@pytest.fixture
+def sample_reports():
+    return [
+        TaskReport(
+            task_id="task_1",
+            title="task 1",
+            status="COMPLETED",
+            completed_at=datetime(2026, 1, 5, 10, 0, 0, tzinfo=timezone.utc),
+            time_elapsed_seconds=3600.0,
+            retry_count=0,
+            test_pass_first_try=True,
+        ),
+        TaskReport(
+            task_id="task_2",
+            title="task 2",
+            status="COMPLETED",
+            completed_at=datetime(2026, 1, 7, 10, 0, 0, tzinfo=timezone.utc),
+            time_elapsed_seconds=7200.0,
+            retry_count=1,
+            test_pass_first_try=False,
+        ),
+        TaskReport(
+            task_id="task_3",
+            title="task 3",
+            status="FAILED",
+            completed_at=datetime(2026, 1, 8, 10, 0, 0, tzinfo=timezone.utc),
+            time_elapsed_seconds=5400.0,
+            retry_count=2,
+            test_pass_first_try=False,
+        ),
+        TaskReport(
+            task_id="task_4",
+            title="task 4",
+            status="COMPLETED",
+            completed_at=datetime(2026, 1, 10, 10, 0, 0, tzinfo=timezone.utc),
+            time_elapsed_seconds=1800.0,
+            retry_count=0,
+            test_pass_first_try=True,
+        ),
+        TaskReport(
+            task_id="task_5",
+            title="task 5",
+            status="PENDING",
+            completed_at=None,
+            time_elapsed_seconds=0.0,
+            retry_count=0,
+            test_pass_first_try=True,
+        ),
+    ]
+
+
+@pytest.fixture
+def reports_different_weeks():
+    return [
+        TaskReport(
+            task_id="task_w1_1",
+            title="week1",
+            status="COMPLETED",
+            completed_at=datetime(2026, 1, 7, 10, 0, 0, tzinfo=timezone.utc),
+            time_elapsed_seconds=1200.0,
+            retry_count=0,
+            test_pass_first_try=True,
+        ),
+        TaskReport(
+            task_id="task_w2_1",
+            title="week2",
+            status="COMPLETED",
+            completed_at=datetime(2026, 1, 12, 10, 0, 0, tzinfo=timezone.utc),
+            time_elapsed_seconds=1200.0,
+            retry_count=0,
+            test_pass_first_try=True,
+        ),
+        TaskReport(
+            task_id="task_w3_1",
+            title="week3",
+            status="COMPLETED",
+            completed_at=datetime(2026, 1, 19, 10, 0, 0, tzinfo=timezone.utc),
+            time_elapsed_seconds=1200.0,
+            retry_count=0,
+            test_pass_first_try=True,
+        ),
+    ]
 
 
 class TestGetWeekRange:
@@ -119,11 +203,12 @@ class TestFilterByWeek:
         reports = [
             TaskReport(
                 task_id="task_1",
-                status=TaskStatus.COMPLETED,
+                title="task 1",
+                status="COMPLETED",
                 completed_at=datetime(2026, 2, 5, 10, 0, 0, tzinfo=timezone.utc),
-                elapsed_seconds=3600.0,
-                retries=0,
-                first_try=True,
+                time_elapsed_seconds=3600.0,
+                retry_count=0,
+                test_pass_first_try=True,
             ),
         ]
         result = filter_by_week(reports, 2026, 1)
@@ -195,8 +280,8 @@ class TestCollectStats:
     def test_collect_stats_avg_elapsed_seconds(self, sample_reports):
         """collect_stats는 avg_elapsed_seconds를 올바르게 계산한다"""
         result = collect_stats(sample_reports)
-        # (3600 + 7200 + 5400 + 1800 + 0) / 5 = 17400 / 5 = 3480
-        assert result["avg_elapsed_seconds"] == pytest.approx(3480.0)
+        # (3600 + 7200 + 5400 + 1800 + 0) / 5 = 3600
+        assert result["avg_elapsed_seconds"] == pytest.approx(3600.0)
 
     def test_collect_stats_total_retries(self, sample_reports):
         """collect_stats는 total_retries를 올바르게 집계한다"""
@@ -209,11 +294,12 @@ class TestCollectStats:
         reports = [
             TaskReport(
                 task_id="task_1",
-                status=TaskStatus.COMPLETED,
+                title="task 1",
+                status="COMPLETED",
                 completed_at=datetime(2026, 1, 5, 10, 0, 0, tzinfo=timezone.utc),
-                elapsed_seconds=3600.0,
-                retries=0,
-                first_try=True,
+                time_elapsed_seconds=3600.0,
+                retry_count=0,
+                test_pass_first_try=True,
             ),
         ]
         result = collect_stats(reports)
@@ -230,19 +316,21 @@ class TestCollectStats:
         reports = [
             TaskReport(
                 task_id="task_1",
-                status=TaskStatus.FAILED,
+                title="task 1",
+                status="FAILED",
                 completed_at=datetime(2026, 1, 5, 10, 0, 0, tzinfo=timezone.utc),
-                elapsed_seconds=3600.0,
-                retries=2,
-                first_try=False,
+                time_elapsed_seconds=3600.0,
+                retry_count=2,
+                test_pass_first_try=False,
             ),
             TaskReport(
                 task_id="task_2",
-                status=TaskStatus.FAILED,
+                title="task 2",
+                status="FAILED",
                 completed_at=datetime(2026, 1, 6, 10, 0, 0, tzinfo=timezone.utc),
-                elapsed_seconds=3600.0,
-                retries=1,
-                first_try=False,
+                time_elapsed_seconds=3600.0,
+                retry_count=1,
+                test_pass_first_try=False,
             ),
         ]
         result = collect_stats(reports)
@@ -331,11 +419,12 @@ class TestGenerateReport:
         reports = [
             TaskReport(
                 task_id="task_1",
-                status=TaskStatus.COMPLETED,
+                title="task 1",
+                status="COMPLETED",
                 completed_at=datetime(2026, 2, 5, 10, 0, 0, tzinfo=timezone.utc),
-                elapsed_seconds=3600.0,
-                retries=0,
-                first_try=True,
+                time_elapsed_seconds=3600.0,
+                retry_count=0,
+                test_pass_first_try=True,
             ),
         ]
         result = generate_report(reports, 2026, 1)
