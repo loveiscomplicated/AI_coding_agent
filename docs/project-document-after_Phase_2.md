@@ -1,6 +1,6 @@
 ---
-completeness: 98
-hint: 5단계 전체 구현 완료. Phase 3 멀티 에이전트 + Discord 핫라인 안정화 + 크로스 언어 프로젝트 지원 강화. StructureUpdater Tree-sitter 재작성 (다언어 지원 + fallback). (2026-04-06 업데이트)
+completeness: 99
+hint: Phase 3 신뢰성 강화 완료 (2026-04-15). target_files 1-level 경로 보존, git push 스킵 토글(no_push), LLM 토큰·비용 추적 (TaskReport.cost_usd + 대시보드 MetricCard), OpenAI 429 방어 (retry_after + jitter), Reviewer/TestWriter 신뢰성 개선.
 ---
 
 # 프로젝트 컨텍스트 문서: Multi-Agent Development System — 5단계 오케스트레이터 연결
@@ -183,19 +183,34 @@ tasks.yaml의 `task_type` 필드로 파이프라인 동작을 분기:
 
 **문제**: Kotlin/Java 등 비-Python 프로젝트에서 LLM이 `.kt`/`.java` 확장자와 깊은 패키지 경로(`app/src/main/java/com/...`)로 target_files를 생성. 파이프라인은 Python으로 구현하므로 실제 생성 파일과 target_files가 불일치 → 의존성 주입 실패.
 
-**해결 (2단계 방어):**
+또한 `src/models/user.py` 처럼 올바른 패키지 구조를 담은 경로를 기존 로직이 `user.py`(basename)으로 평탄화하여 `src/` 루트에 파일이 쌓이는 구조적 문제도 존재했다.
+
+**해결 (3단계 방어):**
 
 1. **프롬프트 가이드** (`_DRAFT_SYSTEM_PROMPT`):
-   - target_files는 반드시 `.py` + snake_case (깊은 패키지 경로 금지)
+   - target_files: 파일명(flat) 또는 1단계 상대 경로만 허용 (`models/user.py`, `services/auth.py`)
+   - `src/` 접두어 불필요 (자동 제거됨), 2단계 이상 경로 금지
    - description/acceptance_criteria는 언어 중립적으로 작성 (플랫폼 전용 API 금지)
    - task_type "frontend"는 오직 브라우저 UI에만 (Kotlin 프로젝트도 "backend" 유지)
 
-2. **후처리 자동 보정** (`_sanitize_task_draft`):
-   - `.kt`/`.java`/`.ts` 등 → `.py` 변환
-   - PascalCase → snake_case 변환 (`FakeMapService.kt` → `fake_map_service.py`)
-   - 깊은 경로에서 파일명만 추출 (`app/src/.../Coordinate.kt` → `coordinate.py`)
-   - 변환 후 중복 제거
-   - 보정 발생 시 `warnings` 필드에 기록
+2. **후처리 자동 보정** (`_sanitize_task_draft` + `_normalize_target_path`):
+   - `.kt`/`.java`/`.ts` 등 → `.py` 변환, PascalCase → snake_case 변환
+   - `src/` 접두어 제거 → 슬래시 1개이면 1-level 경로 **보존** (`models/user.py` 유지)
+   - 슬래시 2개 이상이면 basename만 추출 (`app/src/.../Coordinate.kt` → `coordinate.py`)
+   - 변환 후 중복 제거, 보정 발생 시 `warnings` 필드에 기록
+   - UI(TaskDraftPanel.tsx)의 `normalizeTargetPath`가 동일 알고리즘으로 동기화
+
+   | 입력 | 결과 | 이유 |
+   |------|------|------|
+   | `user.py` | `user.py` | 슬래시 없음 → 유지 |
+   | `models/user.py` | `models/user.py` | 1-level → 유지 |
+   | `src/user.py` | `user.py` | src/ 접두어 제거 |
+   | `src/models/user.py` | `models/user.py` | src/ 제거 → 1-level 유지 |
+   | `app/src/main/FakeMap.kt` | `FakeMap.kt` | 2+ 슬래시 → basename |
+
+3. **Implementer·Reviewer 프롬프트에 target_files 명시** (`_format_target_files`):
+   - 에이전트가 어느 경로에 파일을 생성해야 하는지 `src/{path}` 형식으로 명확히 안내
+   - import 경로도 모듈 계층 반영: `models/user.py` → `from models.user import ...`
 
 **실제 사례** (AR 길안내 앱 프로젝트):
 ```
@@ -243,6 +258,7 @@ repo_path: str                대상 레포 경로
 base_branch: str              PR 베이스 브랜치 (기본: "main")
 task_id: str | None           단일 태스크 실행 (None이면 전체)
 no_pr: bool                   PR 생성 생략
+no_push: bool                 True 시 로컬 브랜치·커밋만 생성, push/PR 건너뜀
 max_workers: int              병렬 에이전트 수 (기본: 1, 순차)
 max_orchestrator_retries: int 오케스트레이터 자동 재시도 최대 횟수 (기본: 2)
 auto_merge: bool              그룹 완료 후 base_branch에 자동 머지
@@ -252,6 +268,7 @@ model_capable: str            오케스트레이터 모델
 provider_fast: str | None     코딩 에이전트 프로바이더 (None이면 provider 사용)
 provider_capable: str | None  오케스트레이터 프로바이더 (None이면 provider 사용)
 discord_channel_id: str|None  Discord 채널 ID
+role_models: dict | None      역할별 모델 오버라이드 (test_writer/implementer/reviewer/orchestrator)
 ```
 
 ### 4.2 태스크 간 의존성 처리 ✅ 구현 완료
@@ -438,11 +455,20 @@ test_pass_first_try: false
 reviewer_verdict: "APPROVED"
 failure_reasons: ["TypeError in line 23"]
 reviewer_feedback: "..."
+total_tokens: 15420          # 입력+출력 토큰 합산 (implementer + reviewer)
+cost_usd: 0.0046             # _MODEL_PRICING 테이블 기반 추정 비용
 ```
 
 **집계 함수 (aggregate()):**
 - total, completed, failed, success_rate, first_try_rate
 - avg_elapsed_seconds, total_retries, reviewer_approved
+- total_tokens, total_cost_usd (전체 합산)
+
+**비용 계산 (orchestrator/report.py):**
+- `_MODEL_PRICING`: 주요 모델의 입력/출력 토큰 단가 테이블 (claude-opus-4-6, claude-haiku-4-5, gpt-4.1, gpt-4.1-mini 등)
+- `_calculate_cost(model, input_tokens, output_tokens)`: 단가 미등록 모델은 0.0 반환
+- GET /api/dashboard/summary에서 total_tokens / total_cost_usd 합산 반환
+- DashboardPage 비용 MetricCard로 실시간 확인 가능
 
 **구조화된 메트릭의 중요성**: 이 데이터가 시스템 자기 개선 루프의 기반이 됨.
 
@@ -680,11 +706,16 @@ task-004: execution_brief 생성기 (→ task-001)
 | Discord Message Content Intent | ✅ 필수 — Developer Portal에서 활성화 필요. 미활성 시 content 빈 문자열 반환 | 확인 완료 |
 | PauseController 직접 폴링 | ✅ 리스너 스레드 백업으로 직접 Discord API 폴링 구현 | 완료 |
 | ReactLoop stop_check | ✅ 매 LLM 호출 전 콜백 체크 → StopReason.ABORTED로 즉시 종료 | 완료 |
-| 429 Rate Limit 처리 | ✅ retry_after 파싱 후 자동 대기 (listen_for_commands + wait_for_reply) | 완료 |
+| 429 Rate Limit 처리 (Discord) | ✅ retry_after 파싱 후 자동 대기 (listen_for_commands + wait_for_reply) | 완료 |
+| 429 Rate Limit 처리 (OpenAI API) | ✅ openai_client.py — _parse_retry_after + _rate_limit_delay + jitter, MAX_RETRIES=6 | 완료 |
+| git push 스킵 토글 | ✅ RunRequest.no_push, GitWorkflow.run(no_push), TaskDraftPanel UI 토글 (📦 로컬만 / 🚀 push+PR) | 완료 |
+| LLM 토큰·비용 추적 | ✅ PipelineMetrics.token_usage → TaskReport.total_tokens/cost_usd → 대시보드 MetricCard | 완료 |
+| Reviewer CHANGES_REQUESTED 오분류 | ✅ LOGIC_ERROR로 재분류; reviewer.md read_file 해석 규칙; ScopedReactLoop _readonly_warn_threshold=None | 완료 |
+| TestWriter WRITE_LOOP | ✅ write_deadline 초과 감지 + 재시도 로직 (scoped_loop.py + test_writer.md 지침) | 완료 |
 | 회의 타입별 LLM 시스템 프롬프트 차이 | ✅ MeetingApp meetingType으로 분리 구현 | 완료 |
 | execution_brief LLM 프롬프트 | ✅ _BRIEF_SYSTEM 프롬프트 구현 완료 (backend/routers/reports.py) | 완료 |
 | 태스크 초안 생성 LLM 프롬프트 | ✅ _DRAFT_SYSTEM_PROMPT + _sanitize_task_draft 후처리 (Python 구현 원칙, target_files 자동 보정) | 완료 |
-| 크로스 언어 target_files | ✅ .kt/.java→.py 변환, PascalCase→snake_case, 깊은 경로→파일명 추출, 중복 제거 | 완료 |
+| 크로스 언어 target_files | ✅ .kt/.java→.py 변환, PascalCase→snake_case; src/ 제거 후 1-level 경로 보존 → 2단계+ 시 basename 추출; 중복 제거; Implementer/Reviewer 프롬프트에 target_files 명시 | 완료 |
 | 의존성 pre-check | ✅ 선행 DONE 태스크 스킵 + inject fallback (git diff) — auto_merge 없이 정상 동작 | 완료 |
 | 테스트 통과 판정 보정 | ✅ OK: 접두어 + pytest "N passed" (failed/error 없음) 패턴 인식 | 완료 |
 | depends_on 필드 정확한 스펙 | ✅ 문자열 리스트 (task ID) 확정, YAML로 저장 | 완료 |
@@ -698,7 +729,81 @@ task-004: execution_brief 생성기 (→ task-001)
 
 ---
 
-## 14. 탐색 후 폐기된 방향
+## 14. Phase 3 신뢰성 강화 (2026-04-15) ✅ 완료
+
+### 14.1 git push 스킵 토글
+
+원격 저장소 공개 없이 로컬에서만 결과를 확인하고 싶을 때 사용.
+
+```
+RunRequest.no_push = True
+  → GitWorkflow.run(no_push=True)
+  → 로컬 브랜치 생성 + 커밋만 수행
+  → git push origin / gh pr create 건너뜀
+```
+
+**UI**: TaskDraftPanel 헤더의 `📦 로컬만` / `🚀 push+PR` 토글 버튼.
+
+### 14.2 LLM 토큰·비용 추적
+
+```
+TDDPipeline._accumulate_tokens()
+  → PipelineMetrics.token_usage 누적 (implementer + reviewer 응답별)
+  → TaskReport 저장 시 total_tokens / cost_usd 계산
+      orchestrator/report.py _MODEL_PRICING 테이블:
+        claude-opus-4-6, claude-haiku-4-5, gpt-4.1, gpt-4.1-mini 등 단가 등록
+  → GET /api/dashboard/summary 에 total_tokens / total_cost_usd 합산 반환
+  → DashboardPage 비용 MetricCard로 가시화
+```
+
+### 14.3 OpenAI 429 rate limit 방어
+
+병렬 에이전트가 동일 모델(gpt-4.1 등)에 동시 요청할 때 발생하는 429를 자동 처리.
+
+```python
+# llm/openai_client.py
+_parse_retry_after(e):
+  1. e.response.headers["Retry-After"] 파싱
+  2. 없으면 "try again in X.XXXs" 정규식으로 메시지 파싱
+
+_rate_limit_delay(attempt, e):
+  - 서버 권장 시간 + uniform(0, 1) jitter (thundering herd 방지)
+  - 힌트 없으면 BASE_DELAY * 2^attempt + 20% jitter
+
+MAX_RETRIES: 4 → 6
+chat() + stream() 모두 동일 로직 적용
+```
+
+### 14.4 Reviewer 신뢰성 개선
+
+```
+orchestrator/intervention.py:
+  CHANGES_REQUESTED → LOGIC_ERROR 분류
+  (기존 ENV_ERROR 오분류 방지 → GIVE_UP 대신 RETRY 시도)
+
+agents/prompts/reviewer.md:
+  read_file 결과 해석 규칙 추가
+  (툴 응답이 에러인 경우 vs 파일 내용인 경우 구분)
+
+agents/scoped_loop.py:
+  Reviewer 역할: _readonly_warn_threshold = None
+  (쓰기 도구 없는 역할에서 불필요한 경고 제거)
+```
+
+### 14.5 TestWriter WRITE_LOOP 재시도
+
+```
+agents/scoped_loop.py:
+  write_deadline 설정 — TestWriter가 지정된 시간 내 파일을 쓰지 않으면
+  WRITE_LOOP 감지 → 에이전트 재시작 (최대 재시도 횟수 내)
+
+agents/prompts/test_writer.md:
+  WRITE_LOOP 발생 시 재시도 지침 추가
+```
+
+---
+
+## 16. 탐색 후 폐기된 방향
 
 | 방향 | 폐기 이유 |
 |------|-----------|

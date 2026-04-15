@@ -1,6 +1,6 @@
 # Multi-Agent Development System
 
-> 프로젝트 문서 v1.9 | 2026-04-06 — StructureUpdater Tree-sitter 재작성 (다언어 지원: Python/TS/JS/C/C++/Rust/Go/Java) + fallback 포함
+> 프로젝트 문서 v2.0 | 2026-04-15 — target_files 1-level 경로 보존, git push 스킵 토글, LLM 토큰·비용 추적, OpenAI 429 방어, Reviewer/TestWriter 신뢰성 개선
 
 ---
 
@@ -121,7 +121,8 @@ agent-data/tasks.yaml (수동 정의 또는 Sonnet 자동 생성 후 승인)
     └─► STEP 5: GitWorkflow
             - agent/task-{id} 브랜치 생성 (git worktree 기반, 병렬 안전)
             - workspace 결과물 복사 + 커밋
-            - gh pr create → base branch로 PR
+            - no_push=False(기본): gh pr create → base branch로 PR
+            - no_push=True: 로컬 브랜치·커밋만 생성, push/PR 건너뜀
             - PR body에 테스트 결과 + 리뷰 피드백 포함
 ```
 
@@ -219,8 +220,11 @@ AI_coding_agent/
 | Implementer 재시도 | MAX_RETRIES=2 (TDDPipeline 내부) | 초과 시 오케스트레이터 개입 |
 | 오케스트레이터 개입 | FailureType 분류 → ENV_ERROR 즉시 포기, LOGIC_ERROR만 LLM 분석 | 불필요한 LLM 호출 방지 |
 | 의존성 pre-check | 선행 태스크 DONE이면 스킵, 미완료만 filesystem 확인 | auto_merge 없이도 정상 동작 |
-| 태스크 초안 target_files | Python 파일명으로 자동 보정 (.kt→.py, PascalCase→snake_case) | 크로스 언어 프로젝트 호환 |
+| 태스크 초안 target_files | src/ 접두어 제거 → 슬래시 1개면 1-level 경로 보존(models/user.py 유지) → 2개 이상이면 basename 추출 | 패키지 구조 파괴 방지 + 크로스 언어 호환 |
 | 모델 선택 | 환경 변수로 프로바이더/모델 완전 분리 | claude/openai/glm/ollama 어디든 교체 가능 |
+| git push 스킵 | no_push=True 시 로컬 브랜치·커밋만 생성, push/PR 건너뜀 (UI 토글로 제어) | 원격 공개 없이 로컬 검증 가능 |
+| LLM 토큰·비용 추적 | PipelineMetrics.token_usage 누적 → TaskReport.total_tokens / cost_usd 저장 → 대시보드 MetricCard 표시 | 비용 가시성 확보, 시스템 회의 데이터 |
+| OpenAI 429 방어 | _parse_retry_after + _rate_limit_delay; 서버 권장 시간 + jitter; MAX_RETRIES=6 | 병렬 에이전트 thundering herd 방지 |
 
 ### 2.5.4 E2E 검증 결과 (2026-03-30)
 
@@ -482,7 +486,7 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
   상세 설계: docs/project-document-after_Phase_2.md
 ```
 
-### Phase 3: 멀티 에이전트 + 운영 ✅ 7단계 완료
+### Phase 3: 멀티 에이전트 + 운영 ✅ 7단계 + 신뢰성 강화 완료
 
 ```
 6단계 - 병렬 에이전트 ✅ 완료 (2026-03-31)
@@ -507,7 +511,7 @@ hint: 샌드박스 구현 방식과 에이전트 모델 선택이 미결
   │     GET /api/dashboard/milestones/{filename} — 보고서 본문 (path traversal 방지)
   └── 대시보드 프론트엔드 UI ✅
         frontend/src/components/DashboardPage.tsx
-        메트릭 카드 8개, 태스크 목록 아코디언, 마일스톤 사이드 패널 뷰어
+        메트릭 카드, 태스크 목록 아코디언, 마일스톤 사이드 패널 뷰어
         다크모드 완전 지원
 
 Phase 3 추가 구현 ✅ 완료 (2026-03-31)
@@ -524,19 +528,23 @@ Phase 3 추가 구현 ✅ 완료 (2026-03-31)
   ├── PipelineModelModal ✅
   │     frontend/src/components/PipelineModelModal.tsx
   │     GET /api/models 로 프로바이더별 모델 목록 조회 (claude/openai/glm/ollama 동적 열거)
-  │     파이프라인 실행 전 fast/capable 모델 및 프로바이더 선택
+  │     파이프라인 실행 전 fast/capable 모델, 프로바이더, 병렬 에이전트 수 선택
   ├── 오케스트레이터 개입 로직 ✅
   │     orchestrator/intervention.py — analyze() / generate_report() / save_report()
   │     에이전트 실패 시 LLM이 근본 원인 분석 → RETRY(힌트 주입) or GIVE_UP 결정
   │     max_orchestrator_retries(기본 2회) 초과 시 마크다운 실패 보고서 자동 생성
+  │     CHANGES_REQUESTED는 LOGIC_ERROR로 분류 (ENV_ERROR 오분류 방지)
   ├── MAX_ITER 감지 및 표면화 ✅
   │     ScopedReactLoop 최대 반복 초과 시 failure_reason에 [MAX_ITER] 프리픽스 태깅
   ├── 크로스 언어 프로젝트 지원 강화 ✅
   │     _DRAFT_SYSTEM_PROMPT: Python 구현 원칙 (target_files .py 강제, 언어 중립 수락 기준)
-  │     _sanitize_task_draft: .kt/.java→.py 변환, PascalCase→snake_case, 깊은 경로→파일명 추출
+  │     _sanitize_task_draft / _normalize_target_path:
+  │       src/ 접두어 제거 → 슬래시 1개면 1-level 보존(models/user.py 유지)
+  │       → 2개 이상이면 basename 추출 (.kt→.py, PascalCase→snake_case)
   │     inject_dependency_context fallback: target_files 불일치 시 git diff로 실제 파일 주입
   │     _check_dependency_files: 선행 DONE 태스크 스킵 (auto_merge 없이도 정상 동작)
   │     DockerTestRunner: pytest "N passed" 패턴 인식하여 INTERNALERROR 시에도 통과 보정
+  │     Implementer/Reviewer 프롬프트에 target_files 목록 명시 (경로별 파일 생성 위치 안내)
   ├── Catch-up 머지 ✅
   │     auto_merge=ON으로 재개 시 이전에 완료됐지만 아직 머지 안 된 브랜치를 먼저 처리
   ├── Weekly Report UI ✅
@@ -544,6 +552,27 @@ Phase 3 추가 구현 ✅ 완료 (2026-03-31)
   │     "이번 주 생성" 버튼 → POST /api/reports/weekly → 결과 즉시 뷰어 표시
   └── 운영 품질 개선 ✅
         uvicorn 폴링 로그 억제, Discord TimeoutException 다운그레이드 등
+
+Phase 3 신뢰성 강화 ✅ 완료 (2026-04-15)
+  ├── git push 스킵 토글 ✅
+  │     RunRequest.no_push: bool — True 시 로컬 브랜치·커밋만 생성, push/PR 건너뜀
+  │     TaskDraftPanel UI: 📦 로컬만 / 🚀 push+PR 토글 버튼
+  ├── LLM 토큰·비용 추적 ✅
+  │     PipelineMetrics.token_usage — implementer·reviewer 토큰 누적
+  │     TaskReport: total_tokens / cost_usd 필드 (report.py _MODEL_PRICING 테이블 기반)
+  │     GET /api/dashboard/summary — total_tokens / total_cost_usd 합산 반환
+  │     DashboardPage — 비용 MetricCard 표시
+  ├── OpenAI 429 rate limit 방어 ✅
+  │     llm/openai_client.py: _parse_retry_after (Retry-After 헤더 + "try again in Xs" 파싱)
+  │     _rate_limit_delay: 서버 권장 시간 + uniform(0,1) jitter (thundering herd 방지)
+  │     MAX_RETRIES: 4 → 6, chat() + stream() 모두 적용
+  ├── Reviewer 신뢰성 개선 ✅
+  │     CHANGES_REQUESTED → LOGIC_ERROR 분류 (intervention.py)
+  │     reviewer.md: read_file 결과 해석 규칙 추가
+  │     ScopedReactLoop: Reviewer 역할 _readonly_warn_threshold=None (불필요한 경고 제거)
+  └── TestWriter WRITE_LOOP 재시도 ✅
+        write_deadline 초과 시 WRITE_LOOP 감지 → 재시도 로직 (agents/scoped_loop.py)
+        test_writer.md: WRITE_LOOP 프롬프트 재시도 지침 추가
 
 8단계 - 음성 인터페이스 (선택, 별도)
   ├── STT 입력 (Web Speech API)
@@ -578,4 +607,9 @@ Phase 3 추가 구현 ✅ 완료 (2026-03-31)
 | Discord Message Content Intent | **필수**: Developer Portal → Bot → Privileged Gateway Intents에서 활성화. 미활성 시 REST API가 content를 빈 문자열로 반환하여 모든 명령이 무시됨 | ✅ 확인 완료 |
 | ReactLoop stop_check | ✅ 매 LLM 호출 전 콜백 체크 → 즉시 ABORTED 반환. PauseController.is_stopped와 연동 | 완료 |
 | PauseController 직접 폴링 | ✅ 리스너 스레드 백업으로 직접 Discord API 폴링 (attach_notifier + _poll_discord_for_stop) | 완료 |
-| 429 Rate Limit 처리 | ✅ listen_for_commands/wait_for_reply에서 retry_after 파싱 후 자동 대기 | 완료 |
+| 429 Rate Limit 처리 (Discord) | ✅ listen_for_commands/wait_for_reply에서 retry_after 파싱 후 자동 대기 | 완료 |
+| 429 Rate Limit 처리 (LLM API) | ✅ openai_client.py — _parse_retry_after + _rate_limit_delay, MAX_RETRIES=6 | 완료 |
+| git push 스킵 토글 | ✅ RunRequest.no_push, GitWorkflow.run(no_push), TaskDraftPanel UI 토글 | 완료 |
+| LLM 토큰·비용 추적 | ✅ TaskReport.total_tokens / cost_usd, _MODEL_PRICING 테이블, 대시보드 MetricCard | 완료 |
+| Reviewer CHANGES_REQUESTED 오분류 | ✅ LOGIC_ERROR로 재분류, Reviewer 프롬프트 read_file 해석 규칙 추가 | 완료 |
+| TestWriter WRITE_LOOP | ✅ write_deadline 초과 감지 + 재시도 로직 추가 | 완료 |
