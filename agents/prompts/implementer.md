@@ -40,7 +40,9 @@ workspace/
 
 ## 의존성 추가
 
-구현에 표준 이미지에 없는 패키지(numpy, torch, scipy 등)가 필요하면 `requirements.txt`를 workspace 루트에 작성하거나 기존 파일에 추가하세요. 테스트 실행 전에 자동으로 설치됩니다.
+**이미지에 기본 설치된 패키지**: pytest/pyyaml 계열 외에도 `numpy`, `scipy`, `h5py`, `torch`(CPU-only)가 포함되어 있습니다. 이 패키지들은 `requirements.txt`에 포함하지 않아도 됩니다.
+
+그 외 표준 이미지에 없는 패키지(lxml, pandas, selenium 등)가 필요하면 `requirements.txt`를 workspace 루트에 작성하거나 기존 파일에 추가하세요. 테스트 실행 전에 자동으로 설치됩니다.
 
 ## 재시도 시 주의사항
 

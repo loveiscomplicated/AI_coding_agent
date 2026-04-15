@@ -4,6 +4,13 @@ WORKDIR /workspace
 
 RUN pip install --no-cache-dir pytest pytest-asyncio pytest-cov pyyaml beautifulsoup4 requests
 
+# 과학/ML 계산 공통 패키지 (numpy, scipy, h5py)
+RUN pip install --no-cache-dir numpy scipy h5py
+
+# PyTorch CPU-only (GPU 버전은 ~2.5GB, CPU 버전은 ~230MB)
+# 컨테이너는 --cpus 1 제한으로 GPU를 사용하지 않으므로 CPU 버전으로 충분
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

@@ -90,13 +90,13 @@ workspace/
       sys.exit(0)   # ← 반드시 0 (통과 수가 아님)
   ```
 
-- **표준 이미지에 없는 Python 패키지**(numpy, torch, scipy, lxml, selenium 등)가 필요하면 `requirements.txt`를 workspace 루트에 작성하세요. 테스트 실행 전에 자동으로 설치됩니다. {test_framework}, pyyaml은 이미 설치되어 있으므로 포함하지 않아도 됩니다.
+- **이미지에 기본 설치된 Python 패키지**: {test_framework}, pyyaml, numpy, scipy, h5py, torch(CPU) — `requirements.txt`에 포함하지 않아도 됩니다.
+- **그 외 표준 이미지에 없는 패키지**(lxml, selenium, pandas 등)가 필요하면 `requirements.txt`를 workspace 루트에 작성하세요. 테스트 실행 전에 자동으로 설치됩니다.
 
   ```
-  # requirements.txt 예시
-  numpy
-  torch
-  scipy
+  # requirements.txt 예시 (기본 설치 패키지는 제외)
+  lxml
+  pandas
   ```
 
 - **런타임 설치가 필요한 언어**(Rust, Java, Swift, PHP 등 Docker 이미지에 없을 수 있는 경우)는 `setup.sh`를 workspace 루트에 함께 작성하세요. 이 파일은 테스트 실행 전에 자동으로 실행됩니다.
