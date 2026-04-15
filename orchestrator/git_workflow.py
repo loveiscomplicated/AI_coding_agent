@@ -62,6 +62,7 @@ class GitWorkflow:
         task: Task,
         workspace: WorkspaceManager,
         result: PipelineResult,
+        no_push: bool = False,
     ) -> str:
         """
         파이프라인 결과를 repo 에 반영하고 PR 을 생성한다.
@@ -69,8 +70,11 @@ class GitWorkflow:
         git worktree 를 사용하므로 main repo 의 HEAD 를 변경하지 않는다.
         여러 태스크가 동시에 호출해도 안전하다.
 
+        Args:
+            no_push: True 이면 로컬 브랜치·커밋만 생성하고 push 및 PR 생성을 건너뜀.
+
         Returns:
-            생성된 PR 의 URL 문자열
+            생성된 PR 의 URL 문자열 (no_push=True 이면 빈 문자열)
 
         Raises:
             GitWorkflowError: git / gh 명령 실패 시
@@ -78,7 +82,7 @@ class GitWorkflow:
         branch = task.branch_name
         wt_path = self.repo_path / ".agent-workspace" / "worktrees" / f"wt-{task.id}-{int(time.time())}"
         wt_path.mkdir(parents=True, exist_ok=True)
-        logger.info("[%s] git 워크플로우 시작 (worktree: %s)", task.id, wt_path)
+        logger.info("[%s] git 워크플로우 시작 (worktree: %s, no_push=%s)", task.id, wt_path, no_push)
 
         try:
             self._create_worktree(branch, wt_path)
@@ -86,6 +90,9 @@ class GitWorkflow:
             self._wt_git_checked(wt_path, ["add"] + [str(f) for f in changed])
             message = f"[agent] {task.title} ({task.id})\n\n자동 생성 by AI Coding Agent Pipeline"
             self._wt_git_checked(wt_path, ["commit", "-m", message])
+            if no_push:
+                logger.info("[%s] no_push=True — push/PR 건너뜀 (로컬 브랜치: %s)", task.id, branch)
+                return ""
             self._wt_git_checked(wt_path, ["push", "origin", branch, "--force"])
         finally:
             self._remove_worktree(wt_path)

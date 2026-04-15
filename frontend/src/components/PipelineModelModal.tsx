@@ -140,6 +140,7 @@ interface PipelineModelModalProps {
     modelFast: string,
     providerCapable: string,
     modelCapable: string,
+    agentCount: number,
     roleModels?: RoleOverrides,
   ) => void
   onCancel: () => void
@@ -159,6 +160,7 @@ export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineMode
     return list[list.length - 1]?.id ?? ''
   })
 
+  const [agentCount, setAgentCount] = useState(1)
   const [roleOverrides, setRoleOverrides] = useState<RoleOverrides>({})
   const [showAdvanced, setShowAdvanced] = useState(false)
 
@@ -180,6 +182,7 @@ export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineMode
     onConfirm(
       fastProvider, fastModel,
       capableProvider, capableModel,
+      agentCount,
       Object.keys(roleModels).length > 0 ? roleModels : undefined,
     )
   }
@@ -214,6 +217,22 @@ export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineMode
           onProviderChange={handleCapableProviderChange}
           onModelChange={setCapableModel}
         />
+
+        {/* 병렬 에이전트 수 */}
+        <div className="rounded-xl border border-gray-200 dark:border-zinc-700 p-3 flex items-center justify-between">
+          <div>
+            <p className="text-xs font-semibold text-gray-700 dark:text-zinc-200">병렬 에이전트 수</p>
+            <p className="text-xs text-gray-400 dark:text-zinc-500 mt-0.5">동시에 실행할 태스크 수 (1 = 순차)</p>
+          </div>
+          <input
+            type="number"
+            min={1}
+            max={8}
+            className="w-16 rounded-lg border border-gray-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-sm text-center text-gray-700 dark:text-zinc-200 px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            value={agentCount}
+            onChange={e => setAgentCount(Math.max(1, Math.min(8, parseInt(e.target.value) || 1)))}
+          />
+        </div>
 
         {/* 역할별 모델 설정 */}
         <div className="rounded-xl border border-gray-200 dark:border-zinc-700 overflow-hidden">

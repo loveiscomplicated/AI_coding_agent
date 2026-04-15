@@ -58,6 +58,7 @@ class RunRequest(BaseModel):
     base_branch: str = "main"
     task_id: str | None = None
     no_pr: bool = False
+    no_push: bool = False
     verbose: bool = False
     reports_dir: str | None = None      # None → run_pipeline 기본값 (repo_path/agent-data/reports)
     max_workers: int = 1                # 병렬 에이전트 수 (1=순차)
@@ -141,6 +142,7 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
                 base_branch=body.base_branch,
                 task_id=body.task_id,
                 no_pr=body.no_pr,
+                no_push=body.no_push,
                 verbose=body.verbose,
                 reports_dir=Path(body.reports_dir) if body.reports_dir else None,
                 on_progress=on_progress,

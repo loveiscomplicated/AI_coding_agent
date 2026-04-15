@@ -37,6 +37,7 @@ interface State {
   rootDir: string    // 프로젝트 루트 = repo_path; tasks.yaml은 항상 rootDir/agent-data/tasks.yaml
   baseBranch: string // git base branch
   agentCount: number
+  noPush: boolean   // true: 로컬 커밋만, push/PR 건너뜀
 }
 
 type Action =
@@ -50,6 +51,7 @@ type Action =
   | { type: 'SET_ROOT'; path: string }
   | { type: 'SET_BASE_BRANCH'; branch: string }
   | { type: 'SET_AGENT_COUNT'; count: number }
+  | { type: 'SET_NO_PUSH'; value: boolean }
   | { type: 'SAVING' }
   | { type: 'RUNNING'; jobId: string }
   | { type: 'DONE' }
@@ -210,6 +212,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
     rootDir: '.',
     baseBranch: 'main',
     agentCount: 1,
+    noPush: false,
   })
 
   // 클라이언트 사이드 순환 참조 감지 (Kahn's algorithm)
@@ -351,6 +354,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
   async function handleSaveAndRun(
     providerFast: string, modelFast: string,
     providerCapable: string, modelCapable: string,
+    agentCount: number,
     roleModels?: Record<string, {provider?: string; model?: string}>,
   ) {
     setShowModelModal(false)
@@ -387,7 +391,8 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
           repo_path: state.rootDir === '.' ? '.' : state.rootDir,
           base_branch: state.baseBranch || 'main',
           no_pr: false,
-          max_workers: state.agentCount,
+          no_push: state.noPush,
+          max_workers: agentCount,
           provider_fast: providerFast,
           model_fast: modelFast,
           provider_capable: providerCapable,
@@ -462,7 +467,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
     {showModelModal && (
       <PipelineModelModal
         models={availableModels}
-        onConfirm={(pf, mf, pc, mc, rm) => handleSaveAndRun(pf, mf, pc, mc, rm)}
+        onConfirm={(pf, mf, pc, mc, ac, rm) => handleSaveAndRun(pf, mf, pc, mc, ac, rm)}
         onCancel={() => setShowModelModal(false)}
       />
     )}
@@ -583,6 +588,20 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
               title="병렬 에이전트 수 (1~8)"
             />
           </div>
+          {/* push 건너뜀 토글 */}
+          <button
+            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors ${
+              state.noPush
+                ? 'border-orange-400 bg-orange-50 text-orange-700 dark:border-orange-600 dark:bg-orange-900/20 dark:text-orange-400'
+                : 'border-gray-300 dark:border-zinc-600 text-gray-500 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-zinc-800'
+            }`}
+            onClick={() => dispatch({ type: 'SET_NO_PUSH', value: !state.noPush })}
+            title={state.noPush
+              ? '현재: 로컬 커밋만 (push/PR 건너뜀) — 클릭 시 push + PR 활성화'
+              : '현재: push + PR 생성 — 클릭 시 로컬 커밋만'}
+          >
+            <span>{state.noPush ? '📦 로컬만' : '🚀 push+PR'}</span>
+          </button>
           <button
             className="rounded-lg bg-blue-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
             onClick={() => setShowModelModal(true)}

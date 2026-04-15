@@ -342,6 +342,7 @@ def run_pipeline(
     base_branch: str = "main",
     task_id: str | None = None,
     no_pr: bool = False,
+    no_push: bool = False,
     verbose: bool = False,
     on_progress: object = None,
     reports_dir: Path | None = None,
@@ -613,10 +614,12 @@ def run_pipeline(
                     pr_url = ""
                     if not no_pr:
                         # test_pass / review 결과는 pipeline on_progress 콜백이 이미 emit했음
+                        git_msg = ("브랜치 → 커밋 중… (push/PR 건너뜀)"
+                                   if no_push else "브랜치 → 커밋 → 푸시 → PR 생성 중…")
                         emit({"type": "step", "task_id": task.id, "step": "git",
-                              "message": "브랜치 → 커밋 → 푸시 → PR 생성 중…"})
+                              "message": git_msg})
                         try:
-                            pr_url = git.run(task, ws, result)
+                            pr_url = git.run(task, ws, result, no_push=no_push)
                             task.pr_url = pr_url
                         except GitWorkflowError as e:
                             task.status = TaskStatus.FAILED
@@ -970,6 +973,7 @@ def _run_single_task(
     git: "GitWorkflow",
     repo_path: Path,
     no_pr: bool,
+    no_push: bool,
     notifier,
     save_lock: threading.Lock,
     all_tasks: list[Task],
@@ -1040,10 +1044,12 @@ def _run_single_task(
                       "elapsed": round(elapsed, 1)})
                 _notify(notifier, f"✅ [{task.id}] \"{task.title}\" 완료! (⏱ {elapsed:.0f}s)")
             else:
-                print(_info(f"[{task.id}] 브랜치 → 커밋 → 푸시 → PR ..."))
-                emit({"type": "step", "task_id": task.id, "step": "git", "message": "브랜치 → 커밋 → 푸시 → PR 생성 중…"})
+                git_msg = ("브랜치 → 커밋 중… (push/PR 건너뜀)"
+                           if no_push else "브랜치 → 커밋 → 푸시 → PR 생성 중…")
+                print(_info(f"[{task.id}] {git_msg}"))
+                emit({"type": "step", "task_id": task.id, "step": "git", "message": git_msg})
                 try:
-                    pr_url = git.run(task, ws, result)
+                    pr_url = git.run(task, ws, result, no_push=no_push)
                     task.pr_url = pr_url
                     task.status = TaskStatus.DONE
                     branch = task.branch_name
