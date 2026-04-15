@@ -360,7 +360,7 @@ def run_pipeline(
     pause_controller: "PauseController | None" = None,
     max_workers: int = 1,
     discord_channel_id: int | None = None,
-    max_orchestrator_retries: int = 1,
+    max_orchestrator_retries: int = 2,
     auto_merge: bool = False,
     provider: str = "claude",
     model_fast: str = "claude-haiku-4-5",
@@ -1706,7 +1706,7 @@ def _parse_args() -> argparse.Namespace:
                         metavar="DIR",
                         help="Task Report 저장 디렉토리 (기본값: agent-data/reports)")
     parser.add_argument("--provider", default="claude",
-                        choices=["claude", "openai", "ollama"],
+                        choices=["claude", "openai", "glm", "ollama"],
                         help="LLM 프로바이더 (기본값: claude)")
     parser.add_argument("--model-fast", default="claude-haiku-4-5",
                         metavar="MODEL",

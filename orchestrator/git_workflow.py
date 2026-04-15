@@ -309,6 +309,20 @@ def check_prerequisites(repo_path: str | Path) -> list[str]:
             "https://cli.github.com 에서 설치 후 `gh auth login` 을 실행하세요."
         )
 
+    # 워킹 트리 클린 여부 확인
+    try:
+        r = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_path),
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            issues.append("uncommitted 변경사항이 있습니다. 커밋/스태시 후 다시 실행하세요.")
+    except Exception:
+        # git 자체 문제는 위 검사에서 이미 처리됨
+        pass
+
     return issues
 
 

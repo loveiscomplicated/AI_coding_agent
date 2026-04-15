@@ -420,6 +420,7 @@ class TestRunPipelineArgs:
         from orchestrator.run import run_pipeline
         sig = inspect.signature(run_pipeline)
         assert sig.parameters["provider"].default == "claude"
+        assert sig.parameters["max_orchestrator_retries"].default == 2
 
     def test_parse_args_accepts_provider_flag(self):
         from orchestrator.run import _parse_args
@@ -437,3 +438,26 @@ class TestRunPipelineArgs:
         assert args.provider == "claude"
         assert args.model_fast == "claude-haiku-4-5"
         assert args.model_capable == "claude-sonnet-4-6"
+
+    def test_parse_args_accepts_glm_provider(self):
+        from orchestrator.run import _parse_args
+        with patch("sys.argv", ["run.py", "--tasks", "t.yaml", "--provider", "glm"]):
+            args = _parse_args()
+        assert args.provider == "glm"
+
+
+class TestLLMFactoryLazyImport:
+    def test_create_openai_client_does_not_import_ollama_client(self):
+        import llm as llm_pkg
+
+        class DummyOpenai:
+            def __init__(self, config, **kwargs):
+                self.config = config
+
+        with patch.object(llm_pkg, "OpenaiClient", DummyOpenai):
+            with patch("builtins.__import__") as mock_import:
+                cfg = LLMConfig(model="dummy")
+                client = llm_pkg.create_client("openai", cfg)
+                assert isinstance(client, DummyOpenai)
+                imported = " ".join(str(c.args[0]) for c in mock_import.call_args_list if c.args)
+                assert "ollama_client" not in imported
