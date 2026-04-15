@@ -7,6 +7,7 @@ httpx 호출을 mock하여 실제 Discord API 없이 테스트한다.
 from __future__ import annotations
 
 import os
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -191,3 +192,34 @@ class TestWaitForReply:
 
         assert reply is None
         assert last_id == "500"
+
+
+class TestListenForCommands:
+    def test_warns_once_when_user_messages_have_empty_content(self):
+        notifier = make_notifier()
+        empty_content_resp = make_response(
+            [
+                {"id": "101", "content": "", "author": {"bot": False}},
+                {"id": "102", "content": "   ", "author": {"bot": False}},
+            ]
+        )
+        warning_calls: list[str] = []
+        callback_calls: list[str] = []
+
+        stop_event = threading.Event()
+
+        def _warning_callback():
+            warning_calls.append("warned")
+            stop_event.set()
+
+        with patch("httpx.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value.get.return_value = empty_content_resp
+            with patch("time.sleep"):
+                notifier.listen_for_commands(
+                    callback=lambda content: callback_calls.append(content),
+                    stop_event=stop_event,
+                    empty_content_warning_callback=_warning_callback,
+                )
+
+        assert callback_calls == []
+        assert warning_calls == ["warned"]

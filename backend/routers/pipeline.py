@@ -258,6 +258,11 @@ def control_pipeline(job_id: str, body: ControlRequest) -> dict:
         job = _jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"잡 '{job_id}'를 찾을 수 없습니다.")
+    if job.get("status") != "running":
+        raise HTTPException(
+            status_code=409,
+            detail=f"종료된 잡은 제어할 수 없습니다. status={job.get('status')!r}",
+        )
 
     ctrl: PauseController | None = job.get("pause_ctrl")
     if ctrl is None:

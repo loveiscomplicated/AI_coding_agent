@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from orchestrator.run import _catchup_merge, run_pipeline
+from orchestrator.run import PauseController, _catchup_merge, run_pipeline
 from orchestrator.task import Task, TaskStatus
 
 
@@ -39,6 +39,9 @@ class _PauseCtrlPausedThenStopped:
 
 
 class _PauseCtrlStopped:
+    def attach_notifier(self, notifier, after_message_id=None):
+        return None
+
     @property
     def is_paused(self) -> bool:
         return False
@@ -161,3 +164,109 @@ def test_catchup_merge_emits_and_merges_in_dependency_order(tmp_path):
     assert any(e.get("type") == "catchup_merge_start" for e in events)
     kwargs = mock_auto_merge.call_args.kwargs
     assert kwargs["branches"] == [t1.branch_name, t2.branch_name]
+
+
+def test_pause_controller_handle_command_transitions():
+    ctrl = PauseController()
+
+    assert ctrl.handle_command("멈춰") == "paused"
+    assert ctrl.is_paused is True
+
+    assert ctrl.handle_command("계속") == "resumed"
+    assert ctrl.is_paused is False
+
+    assert ctrl.handle_command("중단") == "stopped"
+    assert ctrl.is_stopped is True
+
+
+def test_pause_controller_direct_poll_detects_stop_keyword():
+    class _NotifierStub:
+        channel_id = 123
+        _headers = {"Authorization": "Bot test"}
+
+        def __init__(self):
+            self.sent: list[str] = []
+
+        def send(self, text: str):
+            self.sent.append(text)
+
+    notifier = _NotifierStub()
+    ctrl = PauseController()
+    ctrl.attach_notifier(notifier, after_message_id="100")
+
+    fake_resp = MagicMock()
+    fake_resp.is_success = True
+    fake_resp.json.return_value = [
+        {"id": "101", "content": "중단", "author": {"bot": False}},
+    ]
+
+    with (
+        patch("orchestrator.run.time.monotonic", return_value=100.0),
+        patch("httpx.Client") as MockClient,
+    ):
+        MockClient.return_value.__enter__.return_value.get.return_value = fake_resp
+        assert ctrl.is_stopped is True
+
+    assert notifier.sent, "중단 감지 후 Discord 확인 메시지를 보내야 함"
+
+
+def test_run_pipeline_restarts_dead_listener_thread(tmp_path):
+    class _NotifierStub:
+        channel_id = 123
+        _headers = {"Authorization": "Bot test"}
+
+        def __init__(self):
+            self.baselines = ["100", "200"]
+            self.listen_calls = 0
+
+        def get_latest_message_id(self):
+            return self.baselines.pop(0) if self.baselines else "200"
+
+        def listen_for_commands(self, **kwargs):
+            self.listen_calls += 1
+
+        def send(self, _text: str):
+            return None
+
+    class _DeadThread:
+        created = 0
+
+        def __init__(self, *args, **kwargs):
+            self._target = kwargs.get("target")
+            self._kwargs = kwargs.get("kwargs", {})
+            _DeadThread.created += 1
+
+        def start(self):
+            # 실제 스레드를 돌리지 않고 타깃은 호출하지 않는다.
+            return None
+
+        def is_alive(self):
+            return False
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tasks = [_task("task-001")]
+    events: list[dict] = []
+    notifier_stub = _NotifierStub()
+
+    with (
+        patch("orchestrator.run.load_tasks", return_value=tasks),
+        patch("orchestrator.run.resolve_execution_groups", return_value=[tasks]),
+        patch("orchestrator.run.create_client", side_effect=_noop_client),
+        patch("orchestrator.run.create_hotline_llms", return_value=(MagicMock(), MagicMock())),
+        patch("orchestrator.run.create_intervention_llms", return_value=(MagicMock(), MagicMock())),
+        patch("orchestrator.run.DockerTestRunner", return_value=MagicMock()),
+        patch("orchestrator.run._ensure_gitignore"),
+        patch("orchestrator.run.DiscordNotifier.from_env", return_value=notifier_stub),
+        patch("orchestrator.run.threading.Thread", new=_DeadThread),
+    ):
+        run_pipeline(
+            tasks_path=tmp_path / "tasks.yaml",
+            repo_path=repo,
+            pause_controller=_PauseCtrlStopped(),
+            on_progress=events.append,
+            discord_channel_id=123,
+        )
+
+    # 최초 시작 1회 + _check_listener_alive 재시작 1회 이상
+    assert _DeadThread.created >= 2

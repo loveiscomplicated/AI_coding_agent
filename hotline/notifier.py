@@ -253,6 +253,7 @@ class DiscordNotifier:
         stop_event: threading.Event | None = None,
         skip_check: Callable[[], bool] | None = None,
         urgent_callback: Callable[[str], bool] | None = None,
+        empty_content_warning_callback: Callable[[], None] | None = None,
     ) -> None:
         """
         Discord 채널을 폴링하며 사용자 메시지 수신 시 callback(content)을 호출한다.
@@ -270,6 +271,7 @@ class DiscordNotifier:
         last_id = after_message_id
         logger.info("[listener] Discord 명령 리스너 시작 (channel=%s, after=%s)", self._channel_id, last_id)
         poll_count = 0
+        intent_warning_sent = False
 
         while not (stop_event and stop_event.is_set()):
             try:
@@ -303,9 +305,13 @@ class DiscordNotifier:
                     user_msgs.sort(key=lambda m: int(m["id"]))
 
                     skipping = skip_check and skip_check()
+                    empty_content_count = 0
 
                     for msg in user_msgs:
-                        content = msg["content"].strip()
+                        content = msg.get("content", "").strip()
+                        if not content:
+                            empty_content_count += 1
+                            continue
                         logger.info("[listener] 사용자 메시지 수신: %r (skip=%s)", content[:100], skipping)
                         try:
                             # urgent_callback은 skip 상태와 무관하게 항상 호출 (중단 등)
@@ -317,6 +323,23 @@ class DiscordNotifier:
                         except Exception as e:
                             # callback/urgent_callback 예외가 리스너 스레드를 죽이지 않도록 보호
                             logger.error("[listener] 콜백 예외 (무시): %s", e, exc_info=True)
+
+                    if empty_content_count > 0 and not intent_warning_sent:
+                        logger.error(
+                            "[listener] 사용자 메시지 %d개에서 content가 비어 있음. "
+                            "Discord Message Content Intent 미활성 가능성이 큽니다.",
+                            empty_content_count,
+                        )
+                        intent_warning_sent = True
+                        if empty_content_warning_callback:
+                            try:
+                                empty_content_warning_callback()
+                            except Exception as e:
+                                logger.error(
+                                    "[listener] empty_content_warning_callback 예외 (무시): %s",
+                                    e,
+                                    exc_info=True,
+                                )
 
                     if messages:
                         last_id = str(max(int(m["id"]) for m in messages))

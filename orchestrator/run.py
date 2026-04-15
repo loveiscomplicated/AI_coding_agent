@@ -532,6 +532,27 @@ def run_pipeline(
             return True
         return False
 
+    def _on_empty_content_warning() -> None:
+        logger.error(
+            "[listener] content 빈 문자열 감지 — Message Content Intent 미활성 가능성이 큼"
+        )
+        emit(
+            {
+                "type": "warn",
+                "message": (
+                    "Discord 메시지 content가 비어 있습니다. "
+                    "Message Content Intent가 비활성화되어 명령이 무시될 수 있습니다."
+                ),
+            }
+        )
+        _notify(
+            notifier,
+            "⚠️ Discord Message Content Intent 미활성 가능성 감지.\n"
+            "사용자 메시지의 content가 비어 명령(멈춰/계속/중단/확정)이 무시될 수 있습니다.\n"
+            "Developer Portal → Bot → Privileged Gateway Intents에서 "
+            "Message Content Intent를 활성화하세요.",
+        )
+
     if notifier:
         # 파이프라인 시작 전 최신 메시지 ID를 기준점으로 사용
         _baseline_id = notifier.get_latest_message_id()
@@ -546,6 +567,7 @@ def run_pipeline(
                 "stop_event": _listener_stop,
                 "skip_check": _is_hotline_active,
                 "urgent_callback": _on_urgent_command,
+                "empty_content_warning_callback": _on_empty_content_warning,
             },
             daemon=True,
             name="discord-command-listener",
@@ -573,6 +595,7 @@ def run_pipeline(
                         "stop_event": _listener_stop,
                         "skip_check": _is_hotline_active,
                         "urgent_callback": _on_urgent_command,
+                        "empty_content_warning_callback": _on_empty_content_warning,
                     },
                     daemon=True,
                     name="discord-command-listener-respawn",
