@@ -32,6 +32,7 @@ except ImportError:
     raise ImportError("dotenv 패키지가 없어요. 실행: uv add python-dotenv")
 
 from .base import BaseLLMClient, LLMConfig, LLMResponse, Message
+from .rate_limiter import estimate_tokens_from_messages, get_bucket
 
 load_dotenv()
 
@@ -136,38 +137,53 @@ class GlmClient(BaseLLMClient):
         if self.config.temperature is not None and self.config.temperature > 0:
             create_kwargs["temperature"] = self.config.temperature
 
-        delay = _BASE_DELAY
-        for attempt in range(_MAX_RETRIES + 1):
-            try:
-                response = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
-                break
-            except (RateLimitError, InternalServerError) as e:
-                if attempt == _MAX_RETRIES:
-                    raise
-                logger.warning(
-                    "GLM API 일시 오류 (시도 %d/%d) — %.0f초 후 재시도: %s",
-                    attempt + 1, _MAX_RETRIES, delay, e,
-                )
-                time.sleep(delay)
-                delay *= 2
-            except APIStatusError as e:
-                # 1213/1214: 메시지 구조 문제 — 재시도해도 동일하게 실패하므로 즉시 raise
-                error_body = getattr(e, "body", {}) or {}
-                glm_code = str((error_body.get("error") or {}).get("code", ""))
-                if glm_code in ("1213", "1214"):
-                    raise
-                # 그 외 400 오류 중 일시적 서버 문제는 재시도
-                if e.status_code == 400 and attempt < _MAX_RETRIES:
+        bucket = get_bucket("glm", self.config.model)
+        estimate = estimate_tokens_from_messages(
+            create_kwargs["messages"], self.config.max_tokens
+        )
+        handle = bucket.reserve(estimate)
+        response = None
+        try:
+            delay = _BASE_DELAY
+            for attempt in range(_MAX_RETRIES + 1):
+                try:
+                    response = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
+                    break
+                except (RateLimitError, InternalServerError) as e:
+                    bucket.poison(delay)
+                    if attempt == _MAX_RETRIES:
+                        raise
                     logger.warning(
-                        "GLM 400 오류 (시도 %d/%d) — %.0f초 후 재시도: %s",
+                        "GLM API 일시 오류 (시도 %d/%d) — %.0f초 후 재시도: %s",
                         attempt + 1, _MAX_RETRIES, delay, e,
                     )
                     time.sleep(delay)
                     delay *= 2
-                else:
-                    raise
+                except APIStatusError as e:
+                    # 1213/1214: 메시지 구조 문제 — 재시도해도 동일하게 실패하므로 즉시 raise
+                    error_body = getattr(e, "body", {}) or {}
+                    glm_code = str((error_body.get("error") or {}).get("code", ""))
+                    if glm_code in ("1213", "1214"):
+                        raise
+                    # 그 외 400 오류 중 일시적 서버 문제는 재시도
+                    if e.status_code == 400 and attempt < _MAX_RETRIES:
+                        logger.warning(
+                            "GLM 400 오류 (시도 %d/%d) — %.0f초 후 재시도: %s",
+                            attempt + 1, _MAX_RETRIES, delay, e,
+                        )
+                        time.sleep(delay)
+                        delay *= 2
+                    else:
+                        raise
+        except Exception:
+            bucket.reconcile(handle, 0)
+            raise
 
-        msg = response.choices[0].message
+        usage_pre = response.usage  # type: ignore[union-attr]
+        actual = (usage_pre.prompt_tokens + usage_pre.completion_tokens) if usage_pre else estimate
+        bucket.reconcile(handle, actual)
+
+        msg = response.choices[0].message  # type: ignore[union-attr]
         blocks: list = []
         if msg.content:
             blocks.append({"type": "text", "text": msg.content})

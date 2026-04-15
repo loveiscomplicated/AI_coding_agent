@@ -33,6 +33,7 @@ except ImportError:
     raise ImportError("dotenv 패키지가 없어요. 실행: uv add python-dotenv")
 
 from .base import BaseLLMClient, LLMConfig, LLMResponse, Message
+from .rate_limiter import estimate_tokens_from_messages, get_bucket
 
 load_dotenv()
 
@@ -60,13 +61,13 @@ def _parse_retry_after(e: RateLimitError) -> float | None:
 def _rate_limit_delay(attempt: int, e: RateLimitError) -> float:
     """재시도 대기 시간을 계산한다.
 
-    - 에러가 권장 대기 시간을 포함하면 그 값 + 소량의 jitter(0~1초)를 사용한다.
-      (병렬 에이전트들이 정확히 같은 시점에 재시도하는 thundering herd 방지)
-    - 권장 시간이 없으면 지수 백오프 + jitter(0~20%)를 사용한다.
+    - 에러가 권장 대기 시간을 포함하면 그 값을 사용한다.
+    - 권장 시간이 없으면 지수 백오프(+소량 jitter).
+    - 동기화는 rate_limiter.poison() 이 담당하므로 여기서는 큰 jitter 를 쓰지 않는다.
     """
     suggested = _parse_retry_after(e)
     if suggested is not None:
-        return suggested + random.uniform(0.0, 1.0)
+        return suggested
     base = _BASE_DELAY * (2 ** attempt)
     return base + random.uniform(0.0, base * 0.2)
 
@@ -166,33 +167,47 @@ class OpenaiClient(BaseLLMClient):
         if self.config.temperature is not None:
             create_kwargs["temperature"] = self.config.temperature
 
-        for attempt in range(_MAX_RETRIES + 1):
-            try:
-                response = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
-                break
-            except RateLimitError as e:
-                if attempt == _MAX_RETRIES:
-                    raise
-                delay = _rate_limit_delay(attempt, e)
-                logger.warning(
-                    "OpenAI RateLimitError (시도 %d/%d) — %.2f초 후 재시도: %s",
-                    attempt + 1, _MAX_RETRIES, delay, e,
-                )
-                time.sleep(delay)
-            except BadRequestError as e:
-                # reasoning 모델(o1/o3)은 temperature 파라미터 자체를 거부함
-                if "temperature" in str(e) and "temperature" in create_kwargs:
-                    logger.warning(
-                        "모델 %s이 temperature를 지원하지 않습니다. temperature 없이 재시도합니다.",
-                        self.config.model,
-                    )
-                    del create_kwargs["temperature"]
-                    # 재시도 (attempt 증가 없이)
+        bucket = get_bucket("openai", self.config.model)
+        estimate = estimate_tokens_from_messages(
+            create_kwargs["messages"], self.config.max_tokens
+        )
+        handle = bucket.reserve(estimate)
+        response = None
+        try:
+            for attempt in range(_MAX_RETRIES + 1):
+                try:
                     response = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
                     break
-                raise
+                except RateLimitError as e:
+                    delay = _rate_limit_delay(attempt, e)
+                    bucket.poison(delay)
+                    if attempt == _MAX_RETRIES:
+                        raise
+                    logger.warning(
+                        "OpenAI RateLimitError (시도 %d/%d) — %.2f초 후 재시도: %s",
+                        attempt + 1, _MAX_RETRIES, delay, e,
+                    )
+                    time.sleep(delay)
+                except BadRequestError as e:
+                    # reasoning 모델(o1/o3)은 temperature 파라미터 자체를 거부함
+                    if "temperature" in str(e) and "temperature" in create_kwargs:
+                        logger.warning(
+                            "모델 %s이 temperature를 지원하지 않습니다. temperature 없이 재시도합니다.",
+                            self.config.model,
+                        )
+                        del create_kwargs["temperature"]
+                        response = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
+                        break
+                    raise
+        except Exception:
+            bucket.reconcile(handle, 0)
+            raise
 
-        msg = response.choices[0].message
+        usage = response.usage  # type: ignore[union-attr]
+        actual = (usage.prompt_tokens + usage.completion_tokens) if usage else estimate
+        bucket.reconcile(handle, actual)
+
+        msg = response.choices[0].message  # type: ignore[union-attr]
         blocks: list = []
         if msg.content:
             blocks.append({"type": "text", "text": msg.content})
@@ -206,10 +221,9 @@ class OpenaiClient(BaseLLMClient):
                 }
             )
 
-        usage = response.usage
         return LLMResponse(
             content=blocks,
-            model=response.model,
+            model=response.model,  # type: ignore[union-attr]
             stop_reason="tool_use" if msg.tool_calls else "end_turn",
             input_tokens=usage.prompt_tokens if usage else 0,
             output_tokens=usage.completion_tokens if usage else 0,
@@ -232,30 +246,42 @@ class OpenaiClient(BaseLLMClient):
         if self.config.temperature is not None:
             create_kwargs["temperature"] = self.config.temperature
 
+        bucket = get_bucket("openai", self.config.model)
+        estimate = estimate_tokens_from_messages(
+            create_kwargs["messages"], self.config.max_tokens
+        )
+        handle = bucket.reserve(estimate)
         stream = None
-        for attempt in range(_MAX_RETRIES + 1):
-            try:
-                stream = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
-                break
-            except RateLimitError as e:
-                if attempt == _MAX_RETRIES:
-                    raise
-                delay = _rate_limit_delay(attempt, e)
-                logger.warning(
-                    "OpenAI RateLimitError/stream (시도 %d/%d) — %.2f초 후 재시도: %s",
-                    attempt + 1, _MAX_RETRIES, delay, e,
-                )
-                time.sleep(delay)
-            except BadRequestError as e:
-                if "temperature" in str(e) and "temperature" in create_kwargs:
-                    logger.warning(
-                        "모델 %s이 temperature를 지원하지 않습니다. temperature 없이 재시도합니다.",
-                        self.config.model,
-                    )
-                    del create_kwargs["temperature"]
+        try:
+            for attempt in range(_MAX_RETRIES + 1):
+                try:
                     stream = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
                     break
-                raise
+                except RateLimitError as e:
+                    delay = _rate_limit_delay(attempt, e)
+                    bucket.poison(delay)
+                    if attempt == _MAX_RETRIES:
+                        raise
+                    logger.warning(
+                        "OpenAI RateLimitError/stream (시도 %d/%d) — %.2f초 후 재시도: %s",
+                        attempt + 1, _MAX_RETRIES, delay, e,
+                    )
+                    time.sleep(delay)
+                except BadRequestError as e:
+                    if "temperature" in str(e) and "temperature" in create_kwargs:
+                        logger.warning(
+                            "모델 %s이 temperature를 지원하지 않습니다. temperature 없이 재시도합니다.",
+                            self.config.model,
+                        )
+                        del create_kwargs["temperature"]
+                        stream = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
+                        break
+                    raise
+        except Exception:
+            bucket.reconcile(handle, 0)
+            raise
+        # 스트리밍은 usage 를 내려주지 않으므로 예약(estimate) 을 그대로 유지한다.
+        bucket.reconcile(handle, estimate)
         for chunk in stream:  # type: ignore[union-attr]
             delta = chunk.choices[0].delta.content  # type: ignore[union-attr]
             if delta:

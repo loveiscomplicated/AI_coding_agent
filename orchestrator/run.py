@@ -1512,8 +1512,36 @@ def _ask_continue(
 
 # ── CLI 진입점 ────────────────────────────────────────────────────────────────
 
+def _apply_rate_limit_overrides(args: argparse.Namespace) -> None:
+    """--tpm-limit / --rate-limit-safety-ratio 를 rate_limiter 가 읽는 env 로 주입.
+
+    LLM 클라이언트가 생성되기 전에 호출해야 한다.
+    """
+    import os as _os
+    import re as _re
+
+    if getattr(args, "rate_limit_safety_ratio", None) is not None:
+        _os.environ["LLM_RATE_LIMIT_SAFETY_RATIO"] = str(args.rate_limit_safety_ratio)
+
+    for spec in getattr(args, "tpm_limit", []) or []:
+        # 형식: provider:model=TPM
+        try:
+            left, tpm_str = spec.split("=", 1)
+            provider, model = left.split(":", 1)
+            tpm = int(tpm_str)
+        except ValueError:
+            print(_fail(f"--tpm-limit 형식 오류: '{spec}' (provider:model=TPM)"))
+            continue
+        sanitized = _re.sub(r"[^A-Z0-9]+", "_",
+                            f"{provider}_{model}".upper()).strip("_")
+        _os.environ[f"LLM_TPM_{sanitized}"] = str(tpm)
+        print(f"rate_limiter: TPM override {provider}/{model} → {tpm}")
+
+
 def main() -> int:
     args = _parse_args()
+
+    _apply_rate_limit_overrides(args)
 
     tasks_path = Path(args.tasks)
     repo_path = Path(args.repo).resolve()
@@ -1723,6 +1751,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--parallel", "-p", type=int, default=1,
                         metavar="N",
                         help="그룹 내 태스크 병렬 실행 수 (기본값: 1 = 순차)")
+    parser.add_argument("--tpm-limit", action="append", default=[],
+                        metavar="PROVIDER:MODEL=TPM",
+                        help="클라이언트 측 TPM 한도 override. 예: "
+                             "--tpm-limit openai:gpt-4.1=20000. 여러 번 지정 가능.")
+    parser.add_argument("--rate-limit-safety-ratio", type=float, default=None,
+                        metavar="RATIO",
+                        help="공식 한도의 몇 %%까지 쓸지 (0.1~1.0, 기본 0.85).")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="DEBUG 로그 출력")
     parser.add_argument("--reports-dir", default="agent-data/reports",

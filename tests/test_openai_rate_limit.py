@@ -37,12 +37,14 @@ def test_parse_retry_after_returns_none_without_hint():
     assert _parse_retry_after(err) is None
 
 
-def test_rate_limit_delay_uses_suggested_value_plus_jitter(monkeypatch):
+def test_rate_limit_delay_uses_suggested_value_directly(monkeypatch):
+    # rate_limiter.poison() 이 공통 해제 시각을 담당하므로 suggested 값에
+    # 더 이상 jitter 를 더하지 않는다.
     err = _FakeRateLimitError("Please try again in 1s")
     monkeypatch.setattr("llm.openai_client.random.uniform", lambda a, b: 0.4)
 
     delay = _rate_limit_delay(2, err)
-    assert delay == 1.4
+    assert delay == 1.0
 
 
 def test_rate_limit_delay_uses_backoff_when_suggestion_missing(monkeypatch):
