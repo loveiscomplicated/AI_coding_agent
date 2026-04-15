@@ -23,6 +23,8 @@ interface Summary {
     total_retries: number
     avg_elapsed_seconds: number
     first_try_rate: number
+    total_tokens: number
+    total_cost_usd: number
   }
   milestone_count: number
 }
@@ -42,6 +44,8 @@ interface DashboardTask {
     reviewer_verdict: string
     time_elapsed_seconds: number
     completed_at: string
+    total_tokens: number
+    cost_usd: number
   } | null
 }
 
@@ -581,7 +585,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
     }
   }
 
-  async function resumePipeline(providerFast: string, modelFast: string, providerCapable: string, modelCapable: string, roleModels?: Record<string, {provider?: string; model?: string}>) {
+  async function resumePipeline(providerFast: string, modelFast: string, providerCapable: string, modelCapable: string, agentCount: number, roleModels?: Record<string, {provider?: string; model?: string}>) {
     if (!project) return
     setShowResumeModal(false)
     setResuming(true)
@@ -594,6 +598,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
           repo_path: project.rootDir,
           base_branch: project.baseBranch ?? 'main',
           no_pr: false,
+          max_workers: agentCount,
           discord_channel_id: project.discordChannelId ?? null,
           auto_merge: autoMerge,
           provider_fast: providerFast,
@@ -1001,6 +1006,11 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
                   <MetricCard label="총 재시도 횟수" value={m.total_retries} />
                   <MetricCard label="마일스톤 보고서" value={summary?.milestone_count ?? 0} />
                   <MetricCard
+                    label="총 LLM 비용"
+                    value={m.total_cost_usd > 0 ? `$${m.total_cost_usd.toFixed(4)}` : '—'}
+                    sub={m.total_tokens > 0 ? `${(m.total_tokens / 1000).toFixed(1)}K 토큰` : undefined}
+                  />
+                  <MetricCard
                     label="태스크 상태"
                     value={
                       Object.entries(summary?.task_status ?? {})
@@ -1084,6 +1094,11 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
                             {task.report && (
                               <span className="text-xs text-gray-400 dark:text-zinc-500">
                                 {task.report.time_elapsed_seconds}s
+                              </span>
+                            )}
+                            {task.report && task.report.cost_usd > 0 && (
+                              <span className="text-xs text-emerald-600 dark:text-emerald-400 font-mono">
+                                ${task.report.cost_usd.toFixed(4)}
                               </span>
                             )}
                             {task.pr_url && (

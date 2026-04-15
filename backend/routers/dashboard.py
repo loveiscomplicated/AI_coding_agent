@@ -62,6 +62,8 @@ def get_dashboard_summary(
     )
     first_try = sum(1 for r in reports if r.test_pass_first_try)
     first_try_rate = round(first_try / completed * 100) if completed else 0
+    total_tokens = sum(r.total_tokens for r in reports)
+    total_cost_usd = round(sum(r.cost_usd for r in reports), 4)
 
     milestone_count = len(load_milestone_reports(milestones_dir=milestones_dir))
 
@@ -77,6 +79,8 @@ def get_dashboard_summary(
             "total_retries": total_retries,
             "avg_elapsed_seconds": avg_elapsed,
             "first_try_rate": first_try_rate,
+            "total_tokens": total_tokens,
+            "total_cost_usd": total_cost_usd,
         },
         "milestone_count": milestone_count,
     }
@@ -115,6 +119,8 @@ def get_dashboard_tasks(
                 "reviewer_verdict": report.reviewer_verdict if report else "",
                 "time_elapsed_seconds": report.time_elapsed_seconds if report else 0,
                 "completed_at": report.completed_at if report else "",
+                "total_tokens": report.total_tokens if report else 0,
+                "cost_usd": report.cost_usd if report else 0.0,
             } if report else None,
         })
 

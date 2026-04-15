@@ -61,6 +61,9 @@ class _FakePipelineResult:
         self.failure_reason = failure_reason
         self.test_result = test_result
         self.review = review
+        from orchestrator.pipeline import PipelineMetrics
+        self.metrics = PipelineMetrics()
+        self.models_used = {}
 
 
 # ── TaskReport 직렬화 ─────────────────────────────────────────────────────────

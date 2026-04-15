@@ -24,6 +24,48 @@ logger = logging.getLogger(__name__)
 
 _REPORTS_DIR = Path("agent-data/reports")
 
+# ── LLM 모델별 단가 ($/1M tokens): {model_key: (input_rate, output_rate)} ──────
+_MODEL_PRICING: dict[str, tuple[float, float]] = {
+    # Anthropic Claude
+    "claude-haiku-4-5": (0.80, 4.00),
+    "claude-sonnet-4-5": (3.00, 15.00),
+    "claude-sonnet-4-6": (3.00, 15.00),
+    "claude-opus-4": (15.00, 75.00),
+    # OpenAI
+    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4.1": (2.00, 8.00),
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4o": (2.50, 10.00),
+    # Zhipu GLM
+    "glm-4-flash": (0.10, 0.10),
+    "glm-4-plus": (0.70, 0.70),
+}
+
+
+def _model_rate(model_id: str) -> tuple[float, float]:
+    """model_id (예: 'anthropic/claude-haiku-4-5-20251001')에서 단가를 반환한다."""
+    lm = model_id.lower()
+    for key, rates in _MODEL_PRICING.items():
+        if key in lm:
+            return rates
+    return (0.0, 0.0)
+
+
+def _calculate_cost(
+    token_usage: dict,
+    models_used: dict[str, str] | None,
+) -> float:
+    """역할별 토큰 사용량과 모델 정보로 총 USD 비용을 계산한다."""
+    if not models_used:
+        return 0.0
+    total = 0.0
+    for role, usage in token_usage.items():
+        inp, out = usage if isinstance(usage, (tuple, list)) and len(usage) == 2 else (0, 0)
+        model = models_used.get(role, "")
+        rate_in, rate_out = _model_rate(model)
+        total += (inp * rate_in + out * rate_out) / 1_000_000
+    return round(total, 6)
+
 
 @dataclass
 class TaskReport:
@@ -178,12 +220,17 @@ def build_report(
             pass
 
     m = result.metrics
+    _mu = models_used or result.models_used or {}
+    _total_tokens = sum(inp + out for inp, out in m.token_usage.values())
+    _cost_usd = _calculate_cost(m.token_usage, _mu)
     return TaskReport(
         task_id=task.id,
         title=task.title,
         status="COMPLETED" if result.succeeded else "FAILED",
         completed_at=datetime.now(timezone.utc).isoformat(),
         retry_count=task.retry_count,
+        total_tokens=_total_tokens,
+        cost_usd=_cost_usd,
         test_count=test_count,
         test_pass_first_try=(task.retry_count == 0 and result.succeeded),
         reviewer_verdict=reviewer_verdict,
@@ -204,7 +251,7 @@ def build_report(
         review_retries=m.review_retries,
         dep_files_injected=m.dep_files_injected,
         failed_stage=m.failed_stage,
-        models_used=models_used,
+        models_used=_mu or None,
     )
 
 

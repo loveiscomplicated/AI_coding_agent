@@ -92,6 +92,8 @@ class PipelineMetrics:
     review_retries: int = 0                 # Reviewer 피드백 후 재구현 횟수
     dep_files_injected: int = 0             # 선행 태스크에서 주입된 파일 수
     failed_stage: str = ""                  # 실패 시 단계: "test_writing" | "implementing" | "testing" | "reviewing"
+    # 역할별 토큰 사용량 {role: (input_tokens, output_tokens)}
+    token_usage: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -460,6 +462,7 @@ class TDDPipeline:
                     on_progress=_agent_p, pause_ctrl=pause_ctrl,
                     enriched_desc=enriched_desc,
                 )
+                _accumulate_tokens(metrics, "implementer", impl_scoped)
                 if not impl_scoped.succeeded:
                     if _is_write_loop(impl_scoped) and attempt < self.max_retries - 1:
                         # 탐색 루프 감지 — 에러 컨텍스트를 남기고 다음 retry로 넘긴다
@@ -523,6 +526,7 @@ class TDDPipeline:
             task.status = TaskStatus.REVIEWING
             _p({"type": "step", "step": "reviewing", "message": "Reviewer: 코드 검토 중…"})
             review_scoped = self._run_reviewer(task, workspace, docker_result, on_progress=_agent_p, pause_ctrl=pause_ctrl)
+            _accumulate_tokens(metrics, "reviewer", review_scoped)
             # MAX_ITER로 종료된 경우 파싱 전에 명시적 오류 메시지로 교체
             if review_scoped.loop_result and not review_scoped.loop_result.succeeded:
                 from llm.base import StopReason as _SR
@@ -1219,6 +1223,17 @@ def _is_write_loop(scoped: ScopedResult) -> bool:
     return (
         scoped.loop_result is not None
         and scoped.loop_result.stop_reason == StopReason.WRITE_LOOP
+    )
+
+
+def _accumulate_tokens(metrics: PipelineMetrics, role: str, scoped: ScopedResult) -> None:
+    """ScopedResult 의 토큰 사용량을 metrics.token_usage 에 누적한다."""
+    if scoped.loop_result is None:
+        return
+    prev_in, prev_out = metrics.token_usage.get(role, (0, 0))
+    metrics.token_usage[role] = (
+        prev_in + (scoped.loop_result.total_input_tokens or 0),
+        prev_out + (scoped.loop_result.total_output_tokens or 0),
     )
 
 
