@@ -142,7 +142,7 @@ class TDDPipeline:
         max_iterations: int = 20,
         reviewer_max_iterations: int = 8,
         implementer_write_deadline: int = 8,
-        test_writer_write_deadline: int = 7,
+        test_writer_write_deadline: int = 5,
         # 역할별 모델 오버라이드 (None이면 agent_llm/implementer_llm 사용)
         role_models: dict[str, RoleModelConfig] | None = None,
         provider: str | None = None,

@@ -167,8 +167,10 @@ class ScopedReactLoop(ReactLoop):
                 self._consecutive_readonly >= self._readonly_warn_threshold):
             warning = (
                 f"\n\n⚠️ [SYSTEM WARNING] 읽기 전용 도구를 {self._consecutive_readonly}회 연속 호출했습니다. "
-                f"탐색을 멈추고 반드시 write_file 또는 edit_file을 호출하여 코드를 작성하세요. "
-                f"필요한 정보가 부족해도 현재 가진 정보로 최선의 코드를 작성하세요."
+                f"지금 즉시 write_file 도구를 호출하세요. "
+                f"탐색에서 오류가 발생하거나 파일을 찾지 못해도 태스크 설명에서 파일명과 내용을 직접 추론하여 작성하세요. "
+                f"다음 도구 호출은 반드시 write_file 또는 edit_file이어야 합니다. "
+                f"읽기 전용 도구를 계속 호출하면 작업이 강제 종료됩니다."
             )
             logger.warning(
                 "[readonly_guard] 읽기 전용 도구 %d회 연속 — 경고 주입",
