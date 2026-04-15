@@ -116,6 +116,9 @@ case "$TEST_FRAMEWORK" in
   # tests/test_*.py 를 직접 python으로 실행한다.
   # 각 파일은 성공 시 exit 0, 실패 시 exit 1 을 반환하는 규약을 따른다.
   python)
+    if [ -f /workspace/requirements.txt ]; then
+        pip install --no-cache-dir -q -r /workspace/requirements.txt
+    fi
     PYTHONPATH="/workspace/src:/workspace:${PYTHONPATH:-}"
     export PYTHONPATH
     FAILED=0

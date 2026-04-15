@@ -77,7 +77,7 @@ class DockerTestRunner:
 
     - workspace_dir 를 /workspace 로 읽기 전용 마운트
     - 컨테이너는 실행 후 자동 삭제 (--rm)
-    - 네트워크 차단 (--network none) 및 리소스 제한 유지
+    - 메모리/CPU 리소스 제한 유지 (pip install을 위해 네트워크는 허용)
     - 언어별 이미지(agent-runner-{language})를 자동 선택
     - 이미지가 없으면 Dockerfile.{language}로 자동 빌드
     """
@@ -192,7 +192,6 @@ class DockerTestRunner:
         # Docker 실행 커맨드 조립
         docker_cmd = [
             "docker", "run", "--rm",
-            "--network", "none",            # 네트워크 차단
             "--memory", "512m",             # 메모리 제한
             "--cpus", "1",
             "-v", f"{workspace_dir}:/workspace:ro",
