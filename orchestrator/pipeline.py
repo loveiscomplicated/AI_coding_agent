@@ -140,6 +140,7 @@ class TDDPipeline:
         max_iterations: int = 20,
         reviewer_max_iterations: int = 8,
         implementer_write_deadline: int = 8,
+        test_writer_write_deadline: int = 7,
         # 역할별 모델 오버라이드 (None이면 agent_llm/implementer_llm 사용)
         role_models: dict[str, RoleModelConfig] | None = None,
         provider: str | None = None,
@@ -156,6 +157,7 @@ class TDDPipeline:
         self.max_iterations = max_iterations
         self.reviewer_max_iterations = reviewer_max_iterations
         self.implementer_write_deadline = implementer_write_deadline
+        self.test_writer_write_deadline = test_writer_write_deadline
         self.role_models = role_models
         self.provider = provider
         self.model_fast = model_fast
@@ -334,10 +336,31 @@ class TDDPipeline:
         task.status = TaskStatus.WRITING_TESTS
         _p({"type": "step", "step": "test_writing", "message": "TestWriter: 테스트 작성 중…"})
         test_scoped = self._run_test_writer(task, workspace, on_progress=_agent_p, pause_ctrl=pause_ctrl, enriched_desc=enriched_desc)
+        _accumulate_tokens(metrics, "test_writer", test_scoped)
         if not test_scoped.succeeded:
-            prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
-            metrics.failed_stage = "test_writing"
-            return PipelineResult.failed(task, f"{prefix}TestWriter 실패: {test_scoped.answer}", metrics=metrics)
+            if _is_write_loop(test_scoped):
+                # 탐색만 하고 write_file 미호출 — retry=True로 재시도
+                logger.warning("[%s] TestWriter WRITE_LOOP — 재시도", task.id)
+                _p({"type": "step", "step": "write_loop_retry",
+                    "message": "탐색 루프 감지 — TestWriter 재시도…"})
+                test_scoped = self._run_test_writer(
+                    task, workspace, retry=True,
+                    on_progress=_agent_p, pause_ctrl=pause_ctrl,
+                    enriched_desc=enriched_desc,
+                )
+                _accumulate_tokens(metrics, "test_writer", test_scoped)
+                if not test_scoped.succeeded:
+                    prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
+                    metrics.failed_stage = "test_writing"
+                    return PipelineResult.failed(
+                        task,
+                        f"{prefix}TestWriter 실패 (탐색 루프 후 재시도도 실패): {test_scoped.answer}",
+                        metrics=metrics,
+                    )
+            else:
+                prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
+                metrics.failed_stage = "test_writing"
+                return PipelineResult.failed(task, f"{prefix}TestWriter 실패: {test_scoped.answer}", metrics=metrics)
 
         test_files = workspace.list_test_files()
         if not test_files:
@@ -574,6 +597,7 @@ class TDDPipeline:
             workspace_dir=workspace.path,
             max_iterations=self.max_iterations,
             on_progress=on_progress,
+            write_deadline=self.test_writer_write_deadline,
             stop_check=stop_check,
         )
         prompt = _build_test_writer_prompt(
