@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -202,6 +203,46 @@ class AnalysisResult:
     should_retry: bool
     hint: str          # RETRY일 때 힌트, GIVE_UP일 때 이유
     raw: str
+    token_usage: tuple[int, int, int, int] = (0, 0, 0, 0)
+    call_log: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class ReportGenerationResult:
+    text: str
+    token_usage: tuple[int, int, int, int] = (0, 0, 0, 0)
+    call_log: list[dict] = field(default_factory=list)
+
+
+def _usage_from_response(
+    response,
+    iteration: int = 1,
+) -> tuple[tuple[int, int, int, int], list[dict]]:
+    """LLMResponse에서 intervention 토큰/로그 메타데이터를 추출한다."""
+    if response is None:
+        return (0, 0, 0, 0), []
+
+    input_tokens = getattr(response, "input_tokens", 0) or 0
+    output_tokens = getattr(response, "output_tokens", 0) or 0
+    cached_read_tokens = getattr(response, "cached_read_tokens", 0) or 0
+    cached_write_tokens = getattr(response, "cached_write_tokens", 0) or 0
+    content = getattr(response, "content", None) or []
+    tool_names = [
+        block.get("name", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    ]
+    call_log = [{
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "iteration": iteration,
+        "model": getattr(response, "model", ""),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_read_tokens": cached_read_tokens,
+        "cached_write_tokens": cached_write_tokens,
+        "tool_calls": tool_names,
+    }]
+    return (input_tokens, output_tokens, cached_read_tokens, cached_write_tokens), call_log
 
 
 def _extract_text(response) -> str:
@@ -283,6 +324,8 @@ id: {task.id}
         logger.error("오케스트레이터 분석 LLM 호출 실패: %s", e)
         return AnalysisResult(should_retry=False, hint=str(e), raw="")
 
+    token_usage, call_log = _usage_from_response(response)
+
     raw_stripped = raw.strip()
 
     # RETRY: ... 파싱
@@ -290,21 +333,39 @@ id: {task.id}
     if retry_match:
         hint = retry_match.group(1).strip()
         logger.info("[%s] 오케스트레이터 → RETRY 결정 (힌트: %s…)", task.id, hint[:80])
-        return AnalysisResult(should_retry=True, hint=hint, raw=raw)
+        return AnalysisResult(
+            should_retry=True,
+            hint=hint,
+            raw=raw,
+            token_usage=token_usage,
+            call_log=call_log,
+        )
 
     # GIVE_UP: ... 파싱
     giveup_match = re.match(r"^GIVE_UP\s*:\s*(.+)", raw_stripped, re.IGNORECASE | re.DOTALL)
     if giveup_match:
         reason = giveup_match.group(1).strip()
         logger.warning("[%s] 오케스트레이터 → GIVE_UP: %s", task.id, reason[:120])
-        return AnalysisResult(should_retry=False, hint=reason, raw=raw)
+        return AnalysisResult(
+            should_retry=False,
+            hint=reason,
+            raw=raw,
+            token_usage=token_usage,
+            call_log=call_log,
+        )
 
     # 형식 불명확 → 보수적으로 포기
     logger.warning("[%s] 오케스트레이터 응답 형식 불명확, 포기 처리:\n%s", task.id, raw[:300])
-    return AnalysisResult(should_retry=False, hint="오케스트레이터 응답 파싱 실패", raw=raw)
+    return AnalysisResult(
+        should_retry=False,
+        hint="오케스트레이터 응답 파싱 실패",
+        raw=raw,
+        token_usage=token_usage,
+        call_log=call_log,
+    )
 
 
-def generate_report(
+def generate_report_with_metrics(
     task: Task,
     failure_reason: str,
     attempts: int,
@@ -312,16 +373,18 @@ def generate_report(
     orchestrator_model: str = "",
     coding_agent_model: str = "",
     models_used: dict[str, str] | None = None,
-) -> str:
+) -> ReportGenerationResult:
     """
     최종 실패 보고서를 LLM으로 생성한다.
 
     Returns:
-        마크다운 형식의 보고서 문자열
+        생성된 보고서와 LLM 메타데이터
     """
     if _report_llm is None:
         logger.error("intervention.set_llm()이 호출되지 않았습니다.")
-        return f"# 보고서 생성 실패\n\nLLM 미초기화\n\n## 최종 실패 원인\n{failure_reason}"
+        return ReportGenerationResult(
+            text=f"# 보고서 생성 실패\n\nLLM 미초기화\n\n## 최종 실패 원인\n{failure_reason}"
+        )
 
     hints_text = "\n".join(
         f"  시도 {i+1}: {h[:300]}" for i, h in enumerate(hints_tried)
@@ -352,9 +415,11 @@ id: {task.id}
     try:
         response = _report_llm.chat([Message(role="user", content=user_msg)])
         report_body = _extract_text(response) or "보고서 생성 실패"
+        token_usage, call_log = _usage_from_response(response)
     except Exception as e:
         logger.error("오케스트레이터 보고서 생성 LLM 호출 실패: %s", e)
         report_body = f"# 보고서 생성 실패\n\n오류: {e}\n\n## 최종 실패 원인\n{failure_reason}"
+        token_usage, call_log = (0, 0, 0, 0), []
 
     role_labels = {
         "test_writer": "테스트 작성 에이전트",
@@ -376,7 +441,32 @@ id: {task.id}
         f"|------|------|\n"
         + rows
     )
-    return report_body + model_section
+    return ReportGenerationResult(
+        text=report_body + model_section,
+        token_usage=token_usage,
+        call_log=call_log,
+    )
+
+
+def generate_report(
+    task: Task,
+    failure_reason: str,
+    attempts: int,
+    hints_tried: list[str],
+    orchestrator_model: str = "",
+    coding_agent_model: str = "",
+    models_used: dict[str, str] | None = None,
+) -> str:
+    """기존 API 호환용 래퍼: 보고서 본문만 반환한다."""
+    return generate_report_with_metrics(
+        task,
+        failure_reason,
+        attempts,
+        hints_tried,
+        orchestrator_model=orchestrator_model,
+        coding_agent_model=coding_agent_model,
+        models_used=models_used,
+    ).text
 
 
 def save_report(report_text: str, task_id: str, reports_dir: Path) -> Path:
@@ -385,5 +475,3 @@ def save_report(report_text: str, task_id: str, reports_dir: Path) -> Path:
     path = reports_dir / f"{task_id}_orchestrator_report.md"
     path.write_text(report_text, encoding="utf-8")
     return path
-
-

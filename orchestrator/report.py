@@ -60,7 +60,10 @@ def _calculate_cost(
         return 0.0
     total = 0.0
     for role, usage in token_usage.items():
-        inp, out = usage if isinstance(usage, (tuple, list)) and len(usage) == 2 else (0, 0)
+        if isinstance(usage, (tuple, list)) and len(usage) >= 2:
+            inp, out = usage[0], usage[1]
+        else:
+            inp, out = 0, 0
         model = models_used.get(role, "")
         rate_in, rate_out = _model_rate(model)
         total += (inp * rate_in + out * rate_out) / 1_000_000
@@ -109,8 +112,42 @@ def build_report(
 
     m = result.metrics
     _mu = models_used or result.models_used or {}
-    _total_tokens = sum(inp + out for inp, out in m.token_usage.values())
+
+    # 4-tuple 호환 집계: (input, output, cached_read, cached_write)
+    _total_input = 0
+    _total_output = 0
+    _total_cached_read = 0
+    _total_cached_write = 0
+    _token_usage: dict[str, dict[str, int]] = {}
+    for _role, _t in m.token_usage.items():
+        if isinstance(_t, (tuple, list)):
+            _inp = _t[0] if len(_t) > 0 else 0
+            _out = _t[1] if len(_t) > 1 else 0
+            _cr = _t[2] if len(_t) > 2 else 0
+            _cw = _t[3] if len(_t) > 3 else 0
+        else:
+            _inp, _out, _cr, _cw = 0, 0, 0, 0
+        _total_input += _inp
+        _total_output += _out
+        _total_cached_read += _cr
+        _total_cached_write += _cw
+        _token_usage[_role] = {
+            "input": _inp, "output": _out,
+            "cached_read": _cr, "cached_write": _cw,
+        }
+
+    _total_tokens = _total_input + _total_output + _total_cached_read
+    _cache_hit_rate = (
+        round(_total_cached_read / (_total_input + _total_cached_read), 4)
+        if (_total_input + _total_cached_read) > 0 else 0.0
+    )
     _cost_usd = _calculate_cost(m.token_usage, _mu)
+
+    # JSONL per-call 로그 저장
+    if m.call_logs:
+        from core.token_log import write_call_log
+        for _log_role, _entries in m.call_logs.items():
+            write_call_log(task.id, _log_role, _entries)
     return TaskReport(
         task_id=task.id,
         title=task.title,
@@ -140,6 +177,10 @@ def build_report(
         dep_files_injected=m.dep_files_injected,
         failed_stage=m.failed_stage,
         models_used=_mu or None,
+        total_cached_read_tokens=_total_cached_read,
+        total_cached_write_tokens=_total_cached_write,
+        cache_hit_rate=_cache_hit_rate,
+        token_usage=_token_usage or None,
     )
 
 

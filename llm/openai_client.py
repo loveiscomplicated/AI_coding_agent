@@ -221,12 +221,18 @@ class OpenaiClient(BaseLLMClient):
                 }
             )
 
+        _cached_read = 0
+        if usage and hasattr(usage, "prompt_tokens_details") and usage.prompt_tokens_details:
+            _cached_read = getattr(usage.prompt_tokens_details, "cached_tokens", 0) or 0
+
         return LLMResponse(
             content=blocks,
             model=response.model,  # type: ignore[union-attr]
             stop_reason="tool_use" if msg.tool_calls else "end_turn",
             input_tokens=usage.prompt_tokens if usage else 0,
             output_tokens=usage.completion_tokens if usage else 0,
+            cached_read_tokens=_cached_read,
+            cached_write_tokens=0,
         )
 
     def stream(self, messages: list[Message], **kwargs) -> Generator[str, None, None]:

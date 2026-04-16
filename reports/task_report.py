@@ -40,6 +40,17 @@ class TaskReport:
     dep_files_injected: int = 0
     failed_stage: str = ""
     models_used: dict[str, str] | None = None
+    total_cached_read_tokens: int = 0
+    total_cached_write_tokens: int = 0
+    cache_hit_rate: float = 0.0
+    token_usage: dict[str, dict[str, int]] | None = None
+    token_usage_detail: dict[str, dict[str, int]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.token_usage is None and self.token_usage_detail is not None:
+            self.token_usage = self.token_usage_detail
+        elif self.token_usage_detail is None and self.token_usage is not None:
+            self.token_usage_detail = self.token_usage
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -63,6 +74,9 @@ class TaskReport:
                 "review_retries": self.review_retries,
                 "dep_files_injected": self.dep_files_injected,
                 "failed_stage": self.failed_stage,
+                "total_cached_read_tokens": self.total_cached_read_tokens,
+                "total_cached_write_tokens": self.total_cached_write_tokens,
+                "cache_hit_rate": self.cache_hit_rate,
             },
             "pipeline_result": {
                 "test_output_summary": self.test_output_summary,
@@ -80,6 +94,8 @@ class TaskReport:
             }
         if self.models_used is not None:
             d["models_used"] = self.models_used
+        if self.token_usage is not None:
+            d["token_usage"] = self.token_usage
         return d
 
     @classmethod
@@ -107,6 +123,10 @@ class TaskReport:
             review_retries=m.get("review_retries", 0),
             dep_files_injected=m.get("dep_files_injected", 0),
             failed_stage=m.get("failed_stage", ""),
+            total_cached_read_tokens=m.get("total_cached_read_tokens", 0),
+            total_cached_write_tokens=m.get("total_cached_write_tokens", 0),
+            cache_hit_rate=m.get("cache_hit_rate", 0.0),
+            token_usage=data.get("token_usage", data.get("token_usage_detail")),
             test_output_summary=p.get("test_output_summary", ""),
             reviewer_feedback=p.get("reviewer_feedback", ""),
             pr_number=p.get("pr_number"),

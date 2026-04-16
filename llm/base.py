@@ -42,6 +42,9 @@ class LLMResponse:
     stop_reason: str | None = None  # "end_turn" | "tool_use" | "max_tokens" etc.
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_read_tokens: int = 0      # 캐시 hit (Anthropic: cache_read_input_tokens,
+                                     #           OpenAI: prompt_tokens_details.cached_tokens)
+    cached_write_tokens: int = 0     # 캐시 생성 (Anthropic: cache_creation_input_tokens)
 
     def __str__(self):
         return str(self.content)

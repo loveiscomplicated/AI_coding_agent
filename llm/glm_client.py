@@ -179,15 +179,20 @@ class GlmClient(BaseLLMClient):
             bucket.reconcile(handle, 0)
             raise
 
-        usage_pre = response.usage  # type: ignore[union-attr]
-        actual = (usage_pre.prompt_tokens + usage_pre.completion_tokens) if usage_pre else estimate
+        usage_pre = getattr(response, "usage", None)
+        prompt_tokens_pre = getattr(usage_pre, "prompt_tokens", 0) or 0
+        completion_tokens_pre = getattr(usage_pre, "completion_tokens", 0) or 0
+        actual = (prompt_tokens_pre + completion_tokens_pre) if usage_pre else estimate
         bucket.reconcile(handle, actual)
 
-        msg = response.choices[0].message  # type: ignore[union-attr]
+        choices = getattr(response, "choices", None) or []
+        msg = getattr(choices[0], "message", None) if choices else None
         blocks: list = []
-        if msg.content:
-            blocks.append({"type": "text", "text": msg.content})
-        for tc in msg.tool_calls or []:
+        msg_content = getattr(msg, "content", None)
+        if msg_content:
+            blocks.append({"type": "text", "text": msg_content})
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        for tc in tool_calls:
             blocks.append(
                 {
                     "type": "tool_use",
@@ -197,13 +202,20 @@ class GlmClient(BaseLLMClient):
                 }
             )
 
-        usage = response.usage
+        usage = getattr(response, "usage", None)
+        _cached_read = 0
+        prompt_details = getattr(usage, "prompt_tokens_details", None)
+        if prompt_details:
+            _cached_read = getattr(prompt_details, "cached_tokens", 0) or 0
+
         return LLMResponse(
             content=blocks,
-            model=response.model,
-            stop_reason="tool_use" if msg.tool_calls else "end_turn",
-            input_tokens=usage.prompt_tokens if usage else 0,
-            output_tokens=usage.completion_tokens if usage else 0,
+            model=getattr(response, "model", self.config.model),
+            stop_reason="tool_use" if tool_calls else "end_turn",
+            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            cached_read_tokens=_cached_read,
+            cached_write_tokens=0,
         )
 
     def stream(self, messages: list[Message], **kwargs) -> Generator[str, None, None]:

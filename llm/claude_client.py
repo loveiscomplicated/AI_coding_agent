@@ -134,6 +134,8 @@ class ClaudeClient(BaseLLMClient):
                         stop_reason=response.stop_reason,
                         input_tokens=response.usage.input_tokens,
                         output_tokens=response.usage.output_tokens,
+                        cached_read_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+                        cached_write_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
                     )
                 except (anthropic.RateLimitError, anthropic.InternalServerError) as e:
                     bucket.poison(delay)

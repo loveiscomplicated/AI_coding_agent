@@ -19,7 +19,15 @@ ANTHROPIC_API_KEY가 .env에 존재해야 함.
 import sys
 import os
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+if os.environ.get("RUN_LLM_INTEGRATION_TESTS") != "1":
+    pytest.skip(
+        "실 LLM 연결이 필요한 수동 통합 테스트이므로 기본 pytest 스위트에서는 건너뜁니다.",
+        allow_module_level=True,
+    )
 
 from llm import create_client, LLMConfig, BaseLLMClient
 from core.loop import ReactLoop

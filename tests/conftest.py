@@ -1,5 +1,15 @@
-import pytest
+import sys
+from datetime import datetime
 from pathlib import Path
+
+import pytest
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from reports.task_report import TaskReport
 
 
 # ── structure.updater 테스트용 fixture ───────────────────────────────────────
@@ -180,3 +190,94 @@ def egg_doneness():
         else:
             return {'name': '터짐', 'emoji': '💥💀'}
     return _egg_doneness
+
+
+@pytest.fixture
+def sample_completed_report() -> TaskReport:
+    return TaskReport(
+        task_id="task-001",
+        title="데이터 수집",
+        status="COMPLETED",
+        completed_at="2026-01-01T10:00:00+00:00",
+        retry_count=0,
+        time_elapsed_seconds=120.0,
+        test_count=5,
+        test_pass_first_try=True,
+        reviewer_verdict="APPROVED",
+    )
+
+
+@pytest.fixture
+def sample_failed_report() -> TaskReport:
+    return TaskReport(
+        task_id="task-002",
+        title="데이터 처리",
+        status="FAILED",
+        completed_at="2026-01-01T11:00:00+00:00",
+        retry_count=2,
+        time_elapsed_seconds=300.0,
+        test_count=3,
+        test_pass_first_try=False,
+        reviewer_verdict="CHANGES_REQUESTED",
+        failure_reasons=["테스트 실패"],
+    )
+
+
+@pytest.fixture
+def sample_reports_list(
+    sample_completed_report: TaskReport,
+    sample_failed_report: TaskReport,
+) -> list[TaskReport]:
+    return [
+        sample_completed_report,
+        TaskReport(
+            task_id="task-003",
+            title="API 연동",
+            status="COMPLETED",
+            completed_at="2026-01-02T10:00:00+00:00",
+            retry_count=1,
+            time_elapsed_seconds=180.0,
+            test_count=4,
+            test_pass_first_try=False,
+            reviewer_verdict="APPROVED",
+        ),
+        sample_failed_report,
+        TaskReport(
+            task_id="task-004",
+            title="배치 최적화",
+            status="COMPLETED",
+            completed_at="2026-01-03T10:00:00+00:00",
+            retry_count=0,
+            time_elapsed_seconds=240.0,
+            test_count=6,
+            test_pass_first_try=True,
+            reviewer_verdict="APPROVED",
+        ),
+    ]
+
+
+@pytest.fixture
+def reports_with_various_times() -> list[TaskReport]:
+    return [
+        TaskReport(
+            task_id="task-early",
+            title="초기 작업",
+            status="COMPLETED",
+            completed_at=datetime(2024, 1, 15, 10, 0, 0),
+            time_elapsed_seconds=60.0,
+        ),
+        TaskReport(
+            task_id="task-middle",
+            title="중간 작업",
+            status="COMPLETED",
+            completed_at=datetime(2024, 1, 15, 12, 0, 0),
+            time_elapsed_seconds=90.0,
+        ),
+        TaskReport(
+            task_id="task-late",
+            title="후기 작업",
+            status="FAILED",
+            completed_at=datetime(2024, 1, 15, 14, 0, 0),
+            time_elapsed_seconds=120.0,
+        ),
+    ]

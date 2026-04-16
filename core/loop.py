@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 
 from typing import Any, Callable
@@ -120,6 +121,9 @@ class LoopResult:
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     heal_events: list[HealEvent] = field(default_factory=list)  # 자가 수정 이벤트 기록
+    total_cached_read_tokens: int = 0
+    total_cached_write_tokens: int = 0
+    call_log: list[dict] = field(default_factory=list)  # per-call 토큰 기록
 
     @property
     def succeeded(self) -> bool:
@@ -210,6 +214,9 @@ class ReactLoop:
         heal_events: list[HealEvent] = []
         total_input_tokens: int = 0
         total_output_tokens: int = 0
+        total_cached_read_tokens: int = 0
+        total_cached_write_tokens: int = 0
+        call_log: list[dict] = []
         _consecutive_missing_tool_use = 0  # tool_use 블록 없이 연속 발생 횟수
         _write_tool_used = False  # 루프 동안 쓰기 도구가 호출되었는지 추적
         _nudge_attempted = False  # 코드블록 감지 → 도구 사용 유도를 이미 시도했는지
@@ -227,6 +234,9 @@ class ReactLoop:
                     total_input_tokens=total_input_tokens,
                     total_output_tokens=total_output_tokens,
                     heal_events=heal_events,
+                    total_cached_read_tokens=total_cached_read_tokens,
+                    total_cached_write_tokens=total_cached_write_tokens,
+                    call_log=call_log,
                 )
 
             t0 = time.perf_counter()
@@ -246,6 +256,9 @@ class ReactLoop:
                     iterations=iterations,
                     messages=messages,
                     heal_events=heal_events,
+                    total_cached_read_tokens=total_cached_read_tokens,
+                    total_cached_write_tokens=total_cached_write_tokens,
+                    call_log=call_log,
                 )
 
             # 토큰 누적 (LLMResponse 에 input_tokens/output_tokens 가 있을 때)
@@ -253,6 +266,30 @@ class ReactLoop:
                 total_input_tokens += response.input_tokens or 0
             if hasattr(response, "output_tokens"):
                 total_output_tokens += response.output_tokens or 0
+            _cached_read_tokens = getattr(response, "cached_read_tokens", 0) or 0
+            _cached_write_tokens = getattr(response, "cached_write_tokens", 0) or 0
+            _input_tokens = getattr(response, "input_tokens", 0) or 0
+            _output_tokens = getattr(response, "output_tokens", 0) or 0
+            total_cached_read_tokens += _cached_read_tokens
+            total_cached_write_tokens += _cached_write_tokens
+
+            # per-call 로그 기록
+            _tool_names = [
+                b.name if hasattr(b, "name") else b.get("name", "")
+                for b in (response.content or [])
+                if (hasattr(b, "type") and getattr(b, "type") == "tool_use")
+                or (isinstance(b, dict) and b.get("type") == "tool_use")
+            ]
+            call_log.append({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "iteration": i + 1,
+                "model": getattr(response, "model", ""),
+                "input_tokens": _input_tokens,
+                "output_tokens": _output_tokens,
+                "cached_read_tokens": _cached_read_tokens,
+                "cached_write_tokens": _cached_write_tokens,
+                "tool_calls": _tool_names,
+            })
 
             # ── 종료 조건: 도구 없이 텍스트만 반환 ───────────────────────────
             if response.stop_reason == "end_turn":
@@ -297,6 +334,9 @@ class ReactLoop:
                             messages=messages,
                             total_input_tokens=total_input_tokens,
                             total_output_tokens=total_output_tokens,
+                            total_cached_read_tokens=total_cached_read_tokens,
+                            total_cached_write_tokens=total_cached_write_tokens,
+                            call_log=call_log,
                         )
                 logger.debug("루프 종료 — end_turn (총 %d회 반복)", i + 1)
                 return LoopResult(
@@ -307,6 +347,9 @@ class ReactLoop:
                     total_input_tokens=total_input_tokens,
                     total_output_tokens=total_output_tokens,
                     heal_events=heal_events,
+                    total_cached_read_tokens=total_cached_read_tokens,
+                    total_cached_write_tokens=total_cached_write_tokens,
+                    call_log=call_log,
                 )
 
             # ── Act: tool_use 블록 수집 ───────────────────────────────────────
@@ -326,6 +369,9 @@ class ReactLoop:
                         messages=messages,
                         total_input_tokens=total_input_tokens,
                         total_output_tokens=total_output_tokens,
+                        total_cached_read_tokens=total_cached_read_tokens,
+                        total_cached_write_tokens=total_cached_write_tokens,
+                        call_log=call_log,
                     )
                 # 재시도 힌트 전달
                 logger.warning(
@@ -528,6 +574,9 @@ class ReactLoop:
                     total_input_tokens=total_input_tokens,
                     total_output_tokens=total_output_tokens,
                     heal_events=heal_events,
+                    total_cached_read_tokens=total_cached_read_tokens,
+                    total_cached_write_tokens=total_cached_write_tokens,
+                    call_log=call_log,
                 )
 
             if hard_stop:
@@ -539,6 +588,9 @@ class ReactLoop:
                     total_input_tokens=total_input_tokens,
                     total_output_tokens=total_output_tokens,
                     heal_events=heal_events,
+                    total_cached_read_tokens=total_cached_read_tokens,
+                    total_cached_write_tokens=total_cached_write_tokens,
+                    call_log=call_log,
                 )
 
         # ── 최대 반복 초과 ────────────────────────────────────────────────────
@@ -551,6 +603,9 @@ class ReactLoop:
             total_input_tokens=total_input_tokens,
             total_output_tokens=total_output_tokens,
             heal_events=heal_events,
+            total_cached_read_tokens=total_cached_read_tokens,
+            total_cached_write_tokens=total_cached_write_tokens,
+            call_log=call_log,
         )
 
     # ── 내부 헬퍼 ─────────────────────────────────────────────────────────────

@@ -257,6 +257,8 @@ class OllamaClient(BaseLLMClient):
             ),
             input_tokens=response.get("prompt_eval_count", 0),
             output_tokens=response.get("eval_count", 0),
+            cached_read_tokens=0,
+            cached_write_tokens=0,
         )
 
     def stream(self, messages: list[Message], **kwargs) -> Generator[str, None, None]:

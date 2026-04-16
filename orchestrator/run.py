@@ -45,9 +45,8 @@ from orchestrator.git_workflow import GitWorkflow, GitWorkflowError, check_prere
 from orchestrator.merge_agent import MergeAgent
 from orchestrator.milestone import generate_milestone_report
 from orchestrator.intervention import (
-    analyze as orch_analyze,
     classify_and_analyze as orch_classify_and_analyze,
-    generate_report as orch_report,
+    generate_report_with_metrics as orch_report_with_metrics,
     save_report as orch_save_report,
     set_llm as _set_intervention_llm,
     set_model_config as _set_intervention_model_config,
@@ -73,6 +72,25 @@ def _ok(msg: str)   -> str: return f"{_GREEN}✓{_RESET} {msg}"
 def _fail(msg: str) -> str: return f"{_RED}✗{_RESET} {msg}"
 def _warn(msg: str) -> str: return f"{_YELLOW}⚠{_RESET} {msg}"
 def _info(msg: str) -> str: return f"{_CYAN}→{_RESET} {msg}"
+
+
+def _accumulate_external_tokens(metrics, role: str, token_usage: tuple[int, int, int, int], call_log: list[dict]) -> None:
+    """ReactLoop 밖 단일 LLM 호출의 토큰/로그를 PipelineMetrics에 누적한다."""
+    prev = metrics.token_usage.get(role, (0, 0, 0, 0))
+    if len(prev) == 2:
+        prev = (*prev, 0, 0)
+    metrics.token_usage[role] = (
+        prev[0] + (token_usage[0] or 0),
+        prev[1] + (token_usage[1] or 0),
+        prev[2] + (token_usage[2] or 0),
+        prev[3] + (token_usage[3] or 0),
+    )
+    if call_log:
+        start = len(metrics.call_logs.get(role, []))
+        normalized = []
+        for idx, entry in enumerate(call_log, start=1):
+            normalized.append({**entry, "iteration": start + idx})
+        metrics.call_logs.setdefault(role, []).extend(normalized)
 
 
 # ── 위상 정렬 ─────────────────────────────────────────────────────────────────
@@ -742,6 +760,14 @@ def run_pipeline(
                         previous_hints=hints_tried,
                         role_models=role_models,
                     )
+                    _accumulate_external_tokens(
+                        result.metrics,
+                        "intervention",
+                        analysis.token_usage,
+                        analysis.call_log,
+                    )
+                    if analysis.call_log:
+                        result.models_used["intervention"] = analysis.call_log[-1].get("model", "")
 
                     # orch_analyze 완료 후 중단 체크 (분석 중 중단 명령 수신 가능)
                     if pause_ctrl.is_stopped:
@@ -804,12 +830,21 @@ def run_pipeline(
                             f"오케스트레이터 {orch_attempt + 1}회 시도 후 최종 실패\n"
                             f"보고서 생성 중…")
 
-                    orch_report_text = orch_report(
+                    report_result = orch_report_with_metrics(
                         task, failure_reason, orch_attempt + 1, hints_tried,
                         orchestrator_model=model_capable,
                         coding_agent_model=model_fast,
                         models_used=result.models_used or None,
                     )
+                    _accumulate_external_tokens(
+                        result.metrics,
+                        "intervention",
+                        report_result.token_usage,
+                        report_result.call_log,
+                    )
+                    if report_result.call_log:
+                        result.models_used["intervention"] = report_result.call_log[-1].get("model", "")
+                    orch_report_text = report_result.text
                     report_path = orch_save_report(orch_report_text, task.id, reports_dir)
                     logger.warning(
                         "[%s] 오케스트레이터 보고서 저장 완료: %s", task.id, report_path,

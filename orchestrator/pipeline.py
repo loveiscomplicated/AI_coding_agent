@@ -92,8 +92,9 @@ class PipelineMetrics:
     review_retries: int = 0                 # Reviewer 피드백 후 재구현 횟수
     dep_files_injected: int = 0             # 선행 태스크에서 주입된 파일 수
     failed_stage: str = ""                  # 실패 시 단계: "test_writing" | "implementing" | "testing" | "reviewing"
-    # 역할별 토큰 사용량 {role: (input_tokens, output_tokens)}
+    # 역할별 토큰 사용량 {role: (input_tokens, output_tokens, cached_read, cached_write)}
     token_usage: dict = field(default_factory=dict)
+    call_logs: dict = field(default_factory=dict)  # {role: [call_log entries]}
 
 
 @dataclass
@@ -370,6 +371,7 @@ class TDDPipeline:
             logger.warning("[%s] TestWriter 파일 미생성 — 재시도", task.id)
             _p({"type": "step", "step": "test_writing_retry", "message": "TestWriter: 파일 미생성 — 재시도 중…"})
             test_scoped = self._run_test_writer(task, workspace, retry=True, on_progress=_agent_p, pause_ctrl=pause_ctrl, enriched_desc=enriched_desc)
+            _accumulate_tokens(metrics, "test_writer", test_scoped)
             if not test_scoped.succeeded:
                 prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
                 metrics.failed_stage = "test_writing"
@@ -405,6 +407,7 @@ class TDDPipeline:
                 pause_ctrl=pause_ctrl,
                 enriched_desc=enriched_desc,
             )
+            _accumulate_tokens(metrics, "test_writer", test_scoped)
             if not test_scoped.succeeded:
                 prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
                 metrics.failed_stage = "test_writing"
@@ -1230,11 +1233,19 @@ def _accumulate_tokens(metrics: PipelineMetrics, role: str, scoped: ScopedResult
     """ScopedResult 의 토큰 사용량을 metrics.token_usage 에 누적한다."""
     if scoped.loop_result is None:
         return
-    prev_in, prev_out = metrics.token_usage.get(role, (0, 0))
+    prev = metrics.token_usage.get(role, (0, 0, 0, 0))
+    # 하위 호환: 기존 2-tuple 데이터 처리
+    if len(prev) == 2:
+        prev = (*prev, 0, 0)
+    lr = scoped.loop_result
     metrics.token_usage[role] = (
-        prev_in + (scoped.loop_result.total_input_tokens or 0),
-        prev_out + (scoped.loop_result.total_output_tokens or 0),
+        prev[0] + (lr.total_input_tokens or 0),
+        prev[1] + (lr.total_output_tokens or 0),
+        prev[2] + (lr.total_cached_read_tokens or 0),
+        prev[3] + (lr.total_cached_write_tokens or 0),
     )
+    if lr.call_log:
+        metrics.call_logs.setdefault(role, []).extend(lr.call_log)
 
 
 # ── 리뷰 파싱 ─────────────────────────────────────────────────────────────────

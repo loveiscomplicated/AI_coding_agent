@@ -1,7 +1,8 @@
 import pytest
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+
+webdriver = pytest.importorskip("selenium.webdriver")
+Service = pytest.importorskip("selenium.webdriver.chrome.service").Service
+ChromeDriverManager = pytest.importorskip("webdriver_manager.chrome").ChromeDriverManager
 
 
 @pytest.fixture
