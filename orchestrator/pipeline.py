@@ -46,7 +46,7 @@ from docker.runner import DockerTestRunner, RunResult, _detect_runtime
 from llm import LLMConfig, create_client
 from llm.base import Message, StopReason
 from orchestrator.task import Task, TaskStatus, LANGUAGE_TEST_FRAMEWORK_MAP
-from orchestrator.workspace import WorkspaceManager
+from orchestrator.workspace import WorkspaceManager, strip_src_prefix
 from tools.hotline_tools import register_workspace_context_dir, unregister_workspace_context_dir
 
 logger = logging.getLogger(__name__)
@@ -329,8 +329,10 @@ class TDDPipeline:
         # 선행 태스크 주입 파일 수 기록
         dep_artifact = workspace.path / "context" / "dependency_artifacts.md"
         if dep_artifact.exists():
-            # src/ 에 주입된 파일 수를 세기 (원래 target_files 외 추가분)
-            original_targets = set(task.target_files)
+            # src/ 에 주입된 파일 수를 세기 (원래 target_files 외 추가분).
+            # _copy_target_files() 가 선행 'src/' 한 단계를 떼고 배치하므로
+            # 비교 시 양쪽 모두 같은 규약(src_dir 기준 상대 경로)으로 정규화한다.
+            original_targets = {strip_src_prefix(f) for f in task.target_files}
             all_src = set(workspace.list_src_files())
             metrics.dep_files_injected = len(
                 [f for f in all_src if f.removeprefix("src/") not in original_targets]
@@ -759,10 +761,11 @@ def _context_hint(workspace: WorkspaceManager) -> str:
 def _python_import_path(f: str) -> str:
     """target_file 경로에서 Python import 경로를 생성한다.
 
-    models/user.py → models.user
-    user.py        → user
+    src/auth.py        → auth          (workspace src_dir 가 PYTHONPATH 이므로 'src/' 제거)
+    src/models/user.py → models.user
+    user.py            → user
     """
-    p = Path(f)
+    p = Path(strip_src_prefix(f))
     parts = [part.replace("-", "_") for part in p.with_suffix("").parts]
     return ".".join(parts)
 
@@ -770,10 +773,11 @@ def _python_import_path(f: str) -> str:
 def _node_require_path(f: str) -> str:
     """target_file 경로에서 Node.js require 경로를 생성한다.
 
-    models/user.js → ../src/models/user
-    user.js        → ../src/user
+    src/foo.js         → ../src/foo
+    models/user.js     → ../src/models/user
+    user.js            → ../src/user
     """
-    return f"../src/{Path(f).with_suffix('')}"
+    return f"../src/{Path(strip_src_prefix(f)).with_suffix('')}"
 
 
 def _test_lang_rules(task: Task) -> str:
@@ -828,7 +832,7 @@ try {{
 """
     else:
         import_examples = "\n".join(
-            f"  from {_python_import_path(f)} import ...  # src/{f}"
+            f"  from {_python_import_path(f)} import ...  # src/{strip_src_prefix(f)}"
             for f in impl_files
         )
         return f"""## 테스트 작성 규칙
@@ -945,10 +949,19 @@ def _build_test_writer_prompt(
 
 
 def _format_target_files(target_files: list[str]) -> str:
-    """target_files 목록을 프롬프트용 파일 경로 목록으로 포맷한다."""
+    """target_files 목록을 워크스페이스 루트 기준 경로로 포맷한다.
+
+    workspace 의 ``src_dir`` 자체가 'src/' 코드 루트이므로, target_file 의 선행
+    'src/' 한 단계는 ``src_dir`` 가 흡수한다. 따라서 프롬프트에는
+    ``src/`` 를 한 번만 붙여 워크스페이스 루트 기준 실제 파일 위치를 노출한다.
+
+      'src/foo.py'           → 'src/foo.py'
+      'models/user.py'       → 'src/models/user.py'
+      'app/src/main/foo.kt'  → 'src/app/src/main/foo.kt'
+    """
     if not target_files:
         return "(target_files 없음 — tests/ 를 참고해 적절한 위치에 생성하세요)"
-    return "\n".join(f"- `src/{f}`" for f in target_files)
+    return "\n".join(f"- `src/{strip_src_prefix(f)}`" for f in target_files)
 
 
 def _build_implementer_prompt(
