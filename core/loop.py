@@ -20,6 +20,7 @@ core/loop.py — ReAct 루프 (Reason → Act → Observe → Heal → Replan)
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -37,6 +38,7 @@ from tools.registry import (
 import re
 
 from llm.base import Message, LLMResponse, BaseLLMClient, StopReason
+from core.compactor import compact_history, estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +172,13 @@ class ReactLoop:
         enable_healing: bool = True,     # [Module 1] False → 기존 에러 동작 완벽 보존
         verification_gate=None,          # [Module 4] VerificationGate | None
         context_pruner=None,             # [Module 3] SemanticContextPruner | None
+        # ── 시맨틱 auto-compaction ──────────────────────────────────────────
+        compaction_enabled: bool = True,
+        compaction_threshold_tokens: int = 30000,
+        fast_client_for_compaction=None,
+        compaction_keep_first_n: int = 2,
+        compaction_keep_last_n: int = 4,
+        compaction_cooldown_iters: int = 2,   # 연쇄 compaction 방지
     ):
         self.llm: BaseLLMClient = llm
         self.max_iterations = max_iterations
@@ -187,6 +196,16 @@ class ReactLoop:
         self.enable_healing = enable_healing
         self.verification_gate = verification_gate
         self.context_pruner = context_pruner
+        # compaction
+        _env_disable = os.environ.get("DISABLE_COMPACTION", "").strip() == "1"
+        self.compaction_enabled = bool(compaction_enabled) and not _env_disable
+        self.compaction_threshold_tokens = int(compaction_threshold_tokens)
+        self.fast_client_for_compaction = fast_client_for_compaction
+        self.compaction_keep_first_n = int(compaction_keep_first_n)
+        self.compaction_keep_last_n = int(compaction_keep_last_n)
+        self.compaction_cooldown_iters = int(compaction_cooldown_iters)
+        # run 별로 리셋되는 쿨다운 상태 (_maybe_compact 에서만 수정)
+        self._last_compaction_iter: int | None = None
         self.TOOLS_SCHEMA = self.get_tools_schema()
 
     # ── 공개 인터페이스 ────────────────────────────────────────────────────────
@@ -221,6 +240,8 @@ class ReactLoop:
         _write_tool_used = False  # 루프 동안 쓰기 도구가 호출되었는지 추적
         _nudge_attempted = False  # 코드블록 감지 → 도구 사용 유도를 이미 시도했는지
         _heal_tracker = HealAttemptTracker()  # [Module 1] 도구별 힐 시도 횟수
+        # run 시작 시 쿨다운 상태 초기화 — 이전 run 의 상태 누수 방지
+        self._last_compaction_iter = None
 
         for i in range(self.max_iterations):
             # ── 중단 체크: LLM 호출 전 ────────────────────────────────────────
@@ -523,11 +544,17 @@ class ReactLoop:
                     )
                 )
 
-            # [Module 3] 시맨틱 컨텍스트 pruner 또는 기존 슬라이딩 윈도우
+            # [Module 3] 시맨틱 컨텍스트 pruner 우선.
+            # 없으면 compaction (기본) 또는 슬라이딩 윈도우(킬스위치 시) 적용.
             if self.context_pruner is not None:
                 messages = self.context_pruner.fit(messages)
+            elif self.compaction_enabled:
+                messages = self._maybe_compact(
+                    messages, iteration=i + 1, call_log=call_log
+                )
             else:
-                # 슬라이딩 윈도우: 초기 태스크 메시지 + 최근 history_window 쌍만 유지
+                # DISABLE_COMPACTION=1 또는 compaction_enabled=False 인 경우:
+                # 히스토리가 무제한 증가하지 않도록 기존 슬라이딩 윈도우 fallback.
                 messages = _trim_history(messages, self.history_window)
 
             elapsed = (time.perf_counter() - t0) * 1000
@@ -609,6 +636,90 @@ class ReactLoop:
         )
 
     # ── 내부 헬퍼 ─────────────────────────────────────────────────────────────
+
+    def _maybe_compact(
+        self,
+        messages: list[Message],
+        iteration: int,
+        call_log: list[dict],
+    ) -> list[Message]:
+        """
+        메시지 총 추정 토큰이 임계치를 초과하면 compact_history()를 호출해
+        가운데 구간을 요약 메시지 하나로 대체한다.
+
+        쿨다운: 직전 compaction 이후 self.compaction_cooldown_iters 회 반복이
+        지날 때까지 재호출하지 않는다 (연쇄 compaction 방지).
+
+        Returns:
+            압축된(혹은 원본 그대로) messages 리스트.
+        """
+        # 쿨다운 체크 — 직전 compaction 후 N 회 반복이 지나기 전에는 재호출 금지.
+        if self._last_compaction_iter is not None:
+            gap = iteration - self._last_compaction_iter
+            if gap < self.compaction_cooldown_iters:
+                logger.debug(
+                    "[compaction] iter=%d: 쿨다운 중 (직전 iter=%d, gap=%d < %d)",
+                    iteration, self._last_compaction_iter,
+                    gap, self.compaction_cooldown_iters,
+                )
+                return messages
+
+        estimated = sum(estimate_tokens(m) for m in messages)
+        if estimated <= self.compaction_threshold_tokens:
+            return messages
+
+        client = self.fast_client_for_compaction or self.llm
+        result = compact_history(
+            messages,
+            llm_client=client,
+            keep_first_n=self.compaction_keep_first_n,
+            keep_last_n=self.compaction_keep_last_n,
+        )
+        if result is None:
+            return messages
+
+        start, end = result.dropped_range
+        new_messages = messages[:start] + [result.summary_message] + messages[end:]
+
+        gross_savings = (
+            result.dropped_tokens_estimate - result.summary_tokens_estimate
+        )
+        compaction_cost = result.input_tokens_used + result.output_tokens_used
+        net_savings = gross_savings - compaction_cost  # 호출 비용까지 제한 실질 절감
+        logger.info(
+            "[compaction] iter=%d: dropped %d messages (~%d tokens) → 1 summary "
+            "(~%d tokens). gross savings: %d tokens. "
+            "compaction cost: %d in + %d out = %d tokens. net savings: %d tokens.",
+            iteration,
+            result.dropped_message_count,
+            result.dropped_tokens_estimate,
+            result.summary_tokens_estimate,
+            gross_savings,
+            result.input_tokens_used,
+            result.output_tokens_used,
+            compaction_cost,
+            net_savings,
+        )
+
+        # 쿨다운 타이머 업데이트
+        self._last_compaction_iter = iteration
+
+        # call_log 에 compaction 엔트리 추가 (관찰성)
+        call_log.append({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "iteration": iteration,
+            "event": "compaction",
+            "dropped_messages": result.dropped_message_count,
+            "dropped_tokens_estimate": result.dropped_tokens_estimate,
+            "summary_tokens_estimate": result.summary_tokens_estimate,
+            "gross_tokens_saved": gross_savings,
+            "compaction_cost_tokens": compaction_cost,
+            "net_tokens_saved": net_savings,
+            "input_tokens": result.input_tokens_used,
+            "output_tokens": result.output_tokens_used,
+        })
+
+        return new_messages
 
     def _execute_tool_with_transient_retry(
         self, tc: ToolCall, max_retries: int = 2
@@ -763,8 +874,11 @@ def _truncate_tool_result(content: str, max_chars: int) -> str:
 
 def _trim_history(messages: list[Message], window: int) -> list[Message]:
     """
-    초기 태스크 메시지(messages[0])를 유지하고,
-    최근 window 턴만 남긴다.
+    보호 prefix(system + 첫 user 태스크)를 유지하고, 최근 window 턴만 남긴다.
+
+    현재 build_messages 레이아웃은 [system, user(task), assistant, user, ...] 이므로
+    messages[0] 와 messages[1] 을 모두 보존해야 캐시 prefix 와 태스크 컨텍스트가
+    살아남는다. system 이 없으면 첫 user 만 보존.
 
     한 턴 = (assistant 메시지, user 메시지) 쌍. 쌍을 원자 단위로 취급하므로
     assistant(tool_calls)와 그에 대응하는 user(tool_results)가 분리되지 않는다.
@@ -772,21 +886,34 @@ def _trim_history(messages: list[Message], window: int) -> list[Message]:
 
     window=0이면 트리밍하지 않는다.
     """
-    if window <= 0:
+    if window <= 0 or not messages:
         return messages
 
-    # messages[0]은 초기 user(task). 이후 메시지를 (assistant, user) 쌍으로 묶는다.
+    # ── 보호 prefix 산출: [system?, first_user?] ─────────────────────────────
+    head_end = 0
+    if messages[0].role == "system":
+        head_end = 1
+    if head_end < len(messages) and messages[head_end].role == "user":
+        head_end += 1
+    # 이 시점에 messages[:head_end] 는 반드시 보존한다.
+
+    head = messages[:head_end]
+    tail = messages[head_end:]
+
+    # ── tail 을 (assistant, user) 쌍으로 묶어 최근 window 만 유지 ───────────
     turns: list[tuple[int, int | None]] = []
-    i = 1
-    while i < len(messages):
-        if messages[i].role == "assistant":
-            if i + 1 < len(messages) and messages[i + 1].role == "user":
+    i = 0
+    while i < len(tail):
+        if tail[i].role == "assistant":
+            if i + 1 < len(tail) and tail[i + 1].role == "user":
                 turns.append((i, i + 1))
                 i += 2
             else:
                 turns.append((i, None))
                 i += 1
         else:
+            # 쌍 바깥의 고립된 user 메시지(heal prompt 등)는 다음 assistant 까지
+            # 스킵 — 어차피 드롭 대상이 되어도 안전하다.
             i += 1
 
     if len(turns) <= window:
@@ -795,8 +922,8 @@ def _trim_history(messages: list[Message], window: int) -> list[Message]:
     dropped = len(turns) - window
     logger.debug("히스토리 트리밍: %d턴 드롭 (window=%d)", dropped, window)
     kept = turns[-window:]
-    start_idx = kept[0][0]
-    return [messages[0]] + messages[start_idx:]
+    start_idx_in_tail = kept[0][0]
+    return head + tail[start_idx_in_tail:]
 
 
 def _is_fatal_error(error_message: str) -> bool:
