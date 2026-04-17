@@ -12,6 +12,7 @@ base.py의 BaseLLMClient를 구현함.
     GEMINI_API_KEY  (또는 GOOGLE_API_KEY)
 """
 
+import base64
 import json
 import logging
 import os
@@ -86,6 +87,26 @@ def _openai_tools_to_gemini(tools: list[dict]) -> list[dict]:
 
 # ── Message → Gemini Contents 변환 ────────────────────────────────────────────
 
+# Gemini 3 계열(thinking 모델)은 Part.function_call/text 에 thought_signature 가
+# 붙어 오며, 같은 대화를 이어갈 때 이 signature 를 그대로 되돌려 보내지 않으면
+# 400 INVALID_ARGUMENT 가 발생한다.
+# 정규화된 block 안에 base64 문자열 형태로 보관했다가 재주입한다.
+_SIG_KEY = "_gemini_thought_signature"
+
+
+def _decode_sig(value: object) -> bytes | None:
+    """block 에 저장된 base64 문자열(혹은 raw bytes) → bytes 복원."""
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return base64.b64decode(value)
+        except (ValueError, TypeError):
+            return None
+    return None
+
 
 def _to_gemini_contents(messages: list[Message]) -> list[dict]:
     """
@@ -94,6 +115,9 @@ def _to_gemini_contents(messages: list[Message]) -> list[dict]:
     - system 메시지는 건너뜀 (GenerateContentConfig.system_instruction 으로 전달)
     - assistant → role="model": text → Part(text), tool_use → Part(function_call)
     - user     → role="user" : text → Part(text), tool_result → Part(function_response)
+
+    block 에 `_gemini_thought_signature` 가 있으면 같은 Part 에 thought_signature
+    를 주입해 Gemini 3 thinking 모델의 무결성 검사를 통과시킨다.
     """
     contents: list[dict] = []
     tool_name_by_id: dict[str, str] = {}  # tool_use_id → 함수명 복원용
@@ -111,8 +135,12 @@ def _to_gemini_contents(messages: list[Message]) -> list[dict]:
             parts: list[dict] = []
             for b in msg.content:
                 btype = b.get("type")
+                sig = _decode_sig(b.get(_SIG_KEY))
                 if btype == "text" and b.get("text"):
-                    parts.append({"text": b["text"]})
+                    part: dict = {"text": b["text"]}
+                    if sig is not None:
+                        part["thought_signature"] = sig
+                    parts.append(part)
                 elif btype == "tool_use":
                     tool_name_by_id[b["id"]] = b["name"]
                     fc: dict = {
@@ -121,7 +149,10 @@ def _to_gemini_contents(messages: list[Message]) -> list[dict]:
                     }
                     if b.get("id"):
                         fc["id"] = b["id"]
-                    parts.append({"function_call": fc})
+                    part = {"function_call": fc}
+                    if sig is not None:
+                        part["thought_signature"] = sig
+                    parts.append(part)
             if parts:
                 contents.append({"role": "model", "parts": parts})
 
@@ -263,8 +294,18 @@ class GeminiClient(BaseLLMClient):
             for idx, p in enumerate(parts):
                 text = getattr(p, "text", None)
                 fc = getattr(p, "function_call", None)
+                raw_sig = getattr(p, "thought_signature", None)
+                sig_b64 = (
+                    base64.b64encode(raw_sig).decode("ascii")
+                    if isinstance(raw_sig, (bytes, bytearray)) and raw_sig
+                    else None
+                )
                 if text:
-                    blocks.append({"type": "text", "text": text})
+                    block: dict = {"type": "text", "text": text}
+                    if sig_b64 and not fc:
+                        # text-only Part 의 signature 는 text block 에 보관
+                        block[_SIG_KEY] = sig_b64
+                    blocks.append(block)
                 if fc:
                     has_tool_use = True
                     fc_id = getattr(fc, "id", None) or f"call_{idx}_{getattr(fc, 'name', '')}"
@@ -277,14 +318,15 @@ class GeminiClient(BaseLLMClient):
                             fc_args = {}
                     if not isinstance(fc_args, dict):
                         fc_args = dict(fc_args)
-                    blocks.append(
-                        {
-                            "type": "tool_use",
-                            "id": fc_id,
-                            "name": fc_name,
-                            "input": fc_args,
-                        }
-                    )
+                    block = {
+                        "type": "tool_use",
+                        "id": fc_id,
+                        "name": fc_name,
+                        "input": fc_args,
+                    }
+                    if sig_b64:
+                        block[_SIG_KEY] = sig_b64
+                    blocks.append(block)
 
         model_name = (
             getattr(response, "model_version", None)
