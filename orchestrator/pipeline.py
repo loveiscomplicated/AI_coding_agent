@@ -71,7 +71,7 @@ class _StopRequested(BaseException):
 class ReviewResult:
     """Reviewer 에이전트 출력 파싱 결과."""
 
-    verdict: str   # "APPROVED" | "CHANGES_REQUESTED"
+    verdict: str   # "APPROVED" | "CHANGES_REQUESTED" | "ERROR"
     summary: str
     details: str
     raw: str       # 원문 (PR body 에 그대로 포함)
@@ -79,6 +79,11 @@ class ReviewResult:
     @property
     def approved(self) -> bool:
         return self.verdict == "APPROVED"
+
+    @property
+    def is_error(self) -> bool:
+        """Reviewer LLM 실패 등 인프라 에러로 판정이 불가했던 경우."""
+        return self.verdict == "ERROR"
 
 
 @dataclass
@@ -530,7 +535,10 @@ class TDDPipeline:
             _p({"type": "step", "step": "reviewing", "message": "Reviewer: 코드 검토 중…"})
             review_scoped = self._run_reviewer(task, workspace, docker_result, on_progress=_agent_p, pause_ctrl=pause_ctrl)
             _accumulate_tokens(metrics, "reviewer", review_scoped)
-            # MAX_ITER로 종료된 경우 파싱 전에 명시적 오류 메시지로 교체
+            # 종료 원인별 전처리:
+            #   - MAX_ITER  → CHANGES_REQUESTED 로 교체 (정상적 판정 실패)
+            #   - LLM_ERROR → 파싱 건너뛰고 ERROR verdict 로 직접 생성
+            review: ReviewResult | None = None
             if review_scoped.loop_result and not review_scoped.loop_result.succeeded:
                 from llm.base import StopReason as _SR
                 if review_scoped.loop_result.stop_reason == _SR.MAX_ITER:
@@ -540,8 +548,33 @@ class TDDPipeline:
                         workspace_files=review_scoped.workspace_files,
                         loop_result=review_scoped.loop_result,
                     )
-            review = _parse_review(review_scoped.answer)
+                elif review_scoped.loop_result.stop_reason == _SR.LLM_ERROR:
+                    review = ReviewResult(
+                        verdict="ERROR",
+                        summary="Reviewer LLM 호출 실패",
+                        details=(review_scoped.answer or "(응답 없음)")[:1000],
+                        raw=review_scoped.answer or "",
+                    )
+            if review is None:
+                review = _parse_review(review_scoped.answer)
             logger.info("[%s] 리뷰 결과: %s — %s", task.id, review.verdict, review.summary)
+
+            # ── Reviewer 인프라 장애: 재시도 없이 즉시 실패 ─────────────────────
+            if review.is_error:
+                err_detail = review.details or review.summary or "(상세 없음)"
+                logger.error(
+                    "[%s] Reviewer 인프라 장애 — Implementer 재실행 없이 실패 처리\n  %s",
+                    task.id, err_detail[:300],
+                )
+                _p({"type": "step", "step": "review_error",
+                    "message": f"Reviewer 호출 실패 — {err_detail[:200]}"})
+                metrics.review_retries = review_attempt
+                metrics.failed_stage = "reviewing"
+                return PipelineResult.failed(
+                    task,
+                    f"[REVIEWER_INFRA_ERROR] Reviewer 실행 실패: {err_detail[:500]}",
+                    metrics=metrics,
+                )
 
             if review.approved:
                 _p({"type": "step", "step": "review_approved",
@@ -1251,6 +1284,9 @@ def _accumulate_tokens(metrics: PipelineMetrics, role: str, scoped: ScopedResult
 # ── 리뷰 파싱 ─────────────────────────────────────────────────────────────────
 
 
+_LLM_ERROR_PREFIX = "LLM 호출 중 오류가 발생했습니다"
+
+
 def _parse_review(raw: str) -> ReviewResult:
     """
     Reviewer 에이전트 출력에서 VERDICT / SUMMARY / DETAILS 를 추출한다.
@@ -1261,12 +1297,30 @@ def _parse_review(raw: str) -> ReviewResult:
         DETAILS:
         ...
 
-    파싱 실패 시 CHANGES_REQUESTED 로 보수적 기본값을 사용한다.
+    파싱 규칙:
+        - VERDICT / APPROVED / CHANGES_REQUESTED 중 어느 것도 발견되지 않으면
+          `verdict="ERROR"` 를 반환한다.  (이전에는 조용히 CHANGES_REQUESTED 로
+          퇴하는 바람에 LLM 장애가 코드 반려로 오인되어 Implementer 재실행을
+          유발했다.)
+        - Reviewer LoopResult 가 LLM_ERROR 로 끝나 `"LLM 호출 중 오류가 발생했습니다: ..."`
+          문자열이 들어오는 경우도 동일하게 ERROR 로 분류한다.
     """
-    verdict = "CHANGES_REQUESTED"
+    verdict = ""
     summary = ""
     details_lines: list[str] = []
     in_details = False
+
+    stripped_raw = (raw or "").strip()
+
+    # 빈 출력 또는 LLM 호출 실패 sentinel → 즉시 ERROR
+    if not stripped_raw or stripped_raw.startswith(_LLM_ERROR_PREFIX):
+        logger.warning("Reviewer 출력이 비었거나 LLM 호출 실패 — verdict=ERROR")
+        return ReviewResult(
+            verdict="ERROR",
+            summary="Reviewer LLM 호출 실패",
+            details=stripped_raw or "(응답 없음)",
+            raw=raw,
+        )
 
     for line in raw.splitlines():
         stripped = line.strip()
@@ -1291,9 +1345,23 @@ def _parse_review(raw: str) -> ReviewResult:
         elif in_details:
             details_lines.append(line)
 
-    # VERDICT 를 못 찾으면 텍스트에서 키워드로 추론
-    if not any(kw in raw.upper() for kw in ("APPROVED", "CHANGES_REQUESTED")):
-        logger.warning("Reviewer 출력에서 VERDICT 를 찾지 못했습니다.")
+    # 명시적 VERDICT 를 못 찾으면 텍스트에서 키워드로 추론
+    if not verdict:
+        upper = raw.upper()
+        if "APPROVED" in upper and "CHANGES_REQUESTED" not in upper:
+            verdict = "APPROVED"
+        elif "CHANGES_REQUESTED" in upper:
+            verdict = "CHANGES_REQUESTED"
+        else:
+            logger.warning(
+                "Reviewer 출력에서 VERDICT 를 찾지 못했습니다 — verdict=ERROR 처리"
+            )
+            return ReviewResult(
+                verdict="ERROR",
+                summary="Reviewer 응답에서 VERDICT 를 찾을 수 없음",
+                details=stripped_raw[:500],
+                raw=raw,
+            )
 
     return ReviewResult(
         verdict=verdict,

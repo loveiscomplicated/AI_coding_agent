@@ -32,14 +32,22 @@ class FailureType(Enum):
     UNSUPPORTED_LANGUAGE = "unsupported_language"
     DEPENDENCY_MISSING = "dependency_missing"
     MAX_ITER_EXCEEDED = "max_iter_exceeded"
+    REVIEWER_INFRA_ERROR = "reviewer_infra_error"
     LOGIC_ERROR = "logic_error"
 
 
 def classify_failure(failure_reason: str, test_stdout: str = "") -> FailureType:
     """LLM 호출 없이 문자열 패턴으로 실패 유형을 분류한다."""
+    lower_reason = failure_reason.lower()
+
+    # Reviewer 인프라 장애(LLM 호출 실패 / 파싱 불가)는 코드 문제가 아니므로
+    # LOGIC_ERROR 와 구분한다. Implementer 를 다시 돌리는 건 토큰 낭비.
+    if "[reviewer_infra_error]" in lower_reason:
+        return FailureType.REVIEWER_INFRA_ERROR
+
     # Reviewer 거부는 test_stdout 내용(pytest 수집 오류 등)과 무관하게 LOGIC_ERROR로 처리.
     # test_stdout에 섞인 ModuleNotFoundError 등으로 ENV_ERROR로 오분류되는 것을 방지.
-    if "reviewer changes_requested" in failure_reason.lower():
+    if "reviewer changes_requested" in lower_reason:
         return FailureType.LOGIC_ERROR
 
     combined = f"{failure_reason}\n{test_stdout}".lower()
@@ -79,6 +87,17 @@ def classify_and_analyze(
         reason = f"[{ft.value}] 재시도 불가 — {failure_reason[:200]}"
         logger.warning("[%s] 즉시 GIVE_UP: %s", task.id, reason[:120])
         return AnalysisResult(should_retry=False, hint=reason, raw=f"[fast-path] {ft.value}")
+
+    if ft == FailureType.REVIEWER_INFRA_ERROR:
+        # 코드가 아니라 Reviewer LLM 자체가 실패한 경우.
+        # Implementer 재실행은 토큰 낭비이므로 GIVE_UP, 사용자에게 원인 통보.
+        reason = (
+            "[reviewer_infra_error] Reviewer 모델 호출 자체가 실패했습니다. "
+            "모델 설정(API 키·모델명·SDK 호환성)을 확인한 뒤 재실행하세요.\n"
+            f"상세: {failure_reason[:300]}"
+        )
+        logger.warning("[%s] Reviewer 인프라 장애 → GIVE_UP", task.id)
+        return AnalysisResult(should_retry=False, hint=reason, raw="[fast-path] reviewer_infra_error")
 
     if ft == FailureType.MAX_ITER_EXCEEDED:
         if attempt >= 2:  # 이미 1회 이상 재시도했으면 포기

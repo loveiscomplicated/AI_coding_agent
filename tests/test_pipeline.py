@@ -97,8 +97,32 @@ class TestParseReview:
         assert r.verdict == "CHANGES_REQUESTED"
         assert r.approved is False
 
-    def test_defaults_to_changes_requested_on_missing_verdict(self):
+    def test_missing_verdict_yields_error(self):
+        # VERDICT / APPROVED / CHANGES_REQUESTED 키워드가 전혀 없으면
+        # Reviewer 인프라 장애로 판정 (이전에는 CHANGES_REQUESTED 로 퇴했으나
+        # LLM 실패와 코드 반려를 혼동하는 문제가 있어 ERROR 로 분리).
         r = _parse_review("아무 형식도 없는 텍스트")
+        assert r.verdict == "ERROR"
+        assert r.is_error is True
+        assert r.approved is False
+
+    def test_empty_output_yields_error(self):
+        r = _parse_review("")
+        assert r.verdict == "ERROR"
+        assert r.is_error is True
+
+    def test_llm_error_sentinel_yields_error(self):
+        r = _parse_review("LLM 호출 중 오류가 발생했습니다: 400 INVALID_ARGUMENT")
+        assert r.verdict == "ERROR"
+        assert r.is_error is True
+
+    def test_keyword_fallback_recognizes_approved(self):
+        # 형식은 안 맞아도 APPROVED 라는 단어만 있으면 승인 처리.
+        r = _parse_review("코드가 완벽합니다. APPROVED.")
+        assert r.verdict == "APPROVED"
+
+    def test_keyword_fallback_recognizes_changes_requested(self):
+        r = _parse_review("리뷰 결과 CHANGES_REQUESTED 가 필요합니다.")
         assert r.verdict == "CHANGES_REQUESTED"
 
     def test_case_insensitive_verdict(self):
