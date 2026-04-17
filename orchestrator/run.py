@@ -191,13 +191,16 @@ class PauseController:
         self._notifier = None
         self._discord_cursor: str | None = None
         self._last_poll_time: float = 0.0
+        self._discord_error_tracker = None  # attach_notifier 시 생성
 
     # ── Discord 직접 폴링 (리스너 스레드 백업) ────────────────────────────────
 
     def attach_notifier(self, notifier, after_message_id: str | None = None) -> None:
         """Discord notifier를 연결하여 is_stopped 호출 시 직접 폴링을 활성화한다."""
+        from hotline.notifier import _TransientErrorTracker
         self._notifier = notifier
         self._discord_cursor = after_message_id
+        self._discord_error_tracker = _TransientErrorTracker("PauseController")
 
     def _poll_discord_for_stop(self) -> bool:
         """
@@ -213,8 +216,8 @@ class PauseController:
             return False
         self._last_poll_time = now
 
+        import httpx
         try:
-            import httpx
             url = f"https://discord.com/api/v10/channels/{self._notifier.channel_id}/messages"
             params: dict = {"limit": 10}
             if self._discord_cursor:
@@ -222,7 +225,24 @@ class PauseController:
             with httpx.Client(timeout=5.0) as client:
                 resp = client.get(url, headers=self._notifier._headers, params=params)
                 if not resp.is_success:
+                    status = resp.status_code
+                    if self._discord_error_tracker is not None and (
+                        status == 429 or 500 <= status < 600
+                    ):
+                        self._discord_error_tracker.record_failure(
+                            f"HTTP {status} body={resp.text[:200]}"
+                        )
+                    else:
+                        # 4xx auth/설정 문제 — 즉시 WARNING
+                        logger.warning(
+                            "[PauseController] Discord API 오류 (status=%d, body=%s)",
+                            status, resp.text[:200],
+                        )
                     return False
+
+                if self._discord_error_tracker is not None:
+                    self._discord_error_tracker.record_success()
+
                 messages = resp.json()
                 if not messages:
                     return False
@@ -246,9 +266,19 @@ class PauseController:
                         except Exception:
                             pass
                         return True
+        except httpx.TimeoutException as e:
+            if self._discord_error_tracker is not None:
+                self._discord_error_tracker.record_failure(f"timeout: {e}")
+            else:
+                logger.debug("[PauseController] 폴링 타임아웃: %s", e)
+        except httpx.HTTPError as e:
+            if self._discord_error_tracker is not None:
+                self._discord_error_tracker.record_failure(f"HTTPError: {e}")
+            else:
+                logger.debug("[PauseController] HTTP 오류: %s", e)
         except Exception as e:
-            # 폴링 실패는 무시 — 다음 호출에서 재시도
-            logger.warning("[PauseController] Discord 직접 폴링 오류 (무시): %s", e)
+            # 예상치 못한 예외 — 상위로 전파하지 않되, 진단을 위해 기록
+            logger.error("[PauseController] Discord 직접 폴링 예외 (무시): %s", e, exc_info=True)
         return False
 
     # ── 상태 변경 (리스너 스레드 호출) ────────────────────────────────────────

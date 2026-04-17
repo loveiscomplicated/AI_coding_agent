@@ -29,6 +29,45 @@ _POLL_INTERVAL = 1   # 초
 _DEFAULT_TIMEOUT = 300  # 초 (5분)
 
 
+class _TransientErrorTracker:
+    """
+    연속된 트랜지언트 오류 (5xx / timeout / connection) 를 조용히 묵살하다가,
+    threshold 회 연속 실패 시 딱 한 번 WARNING 을 찍고, 복구 시 INFO 를 찍는다.
+
+    Discord 리스너/폴러는 매 초 호출되므로, 일시적 네트워크 블립마다
+    WARNING 이 찍히면 로그가 오염된다. 장애 상태 전환만 기록한다.
+    """
+
+    def __init__(self, label: str, threshold: int = 10) -> None:
+        self._label = label
+        self._threshold = threshold
+        self._streak = 0
+        self._alerted = False
+
+    def record_failure(self, exc_or_msg: object) -> None:
+        self._streak += 1
+        if self._streak == self._threshold and not self._alerted:
+            logger.warning(
+                "[%s] 연속 %d회 트랜지언트 오류 — 폴링 계속 시도 중: %s",
+                self._label, self._streak, exc_or_msg,
+            )
+            self._alerted = True
+        else:
+            logger.debug(
+                "[%s] 트랜지언트 오류 #%d (무시): %s",
+                self._label, self._streak, exc_or_msg,
+            )
+
+    def record_success(self) -> None:
+        if self._alerted:
+            logger.info(
+                "[%s] 폴링 복구 — %d회 연속 실패 후 정상화",
+                self._label, self._streak,
+            )
+        self._streak = 0
+        self._alerted = False
+
+
 class DiscordNotifier:
     def __init__(self, token: str, guild_id: int, channel_id: int | None = None) -> None:
         self._guild_id = guild_id
@@ -272,6 +311,7 @@ class DiscordNotifier:
         logger.info("[listener] Discord 명령 리스너 시작 (channel=%s, after=%s)", self._channel_id, last_id)
         poll_count = 0
         intent_warning_sent = False
+        transient_tracker = _TransientErrorTracker("listener")
 
         while not (stop_event and stop_event.is_set()):
             try:
@@ -282,20 +322,32 @@ class DiscordNotifier:
                     resp = client.get(url, headers=self._headers, params=params)
 
                     if not resp.is_success:
-                        logger.warning(
-                            "[listener] Discord API 오류 (status=%d, body=%s)",
-                            resp.status_code, resp.text[:200],
-                        )
-                        # 429 Rate Limit: retry_after 만큼 대기
-                        if resp.status_code == 429:
+                        status = resp.status_code
+                        # 429 Rate Limit: retry_after 만큼 대기 (트랜지언트로 간주)
+                        if status == 429:
+                            transient_tracker.record_failure(f"HTTP 429 rate limit")
                             try:
                                 retry_after = resp.json().get("retry_after", 1)
                                 time.sleep(float(retry_after))
                             except Exception:
                                 time.sleep(_POLL_INTERVAL)
-                        else:
+                            continue
+                        # 5xx: 서버 측 일시 장애 → 트랜지언트 경로
+                        if 500 <= status < 600:
+                            transient_tracker.record_failure(
+                                f"HTTP {status} body={resp.text[:200]}"
+                            )
                             time.sleep(_POLL_INTERVAL)
+                            continue
+                        # 4xx (auth/설정 문제) — 즉시 WARNING
+                        logger.warning(
+                            "[listener] Discord API 오류 (status=%d, body=%s)",
+                            status, resp.text[:200],
+                        )
+                        time.sleep(_POLL_INTERVAL)
                         continue
+
+                    transient_tracker.record_success()
 
                     messages = resp.json()
                     user_msgs = [
@@ -345,9 +397,10 @@ class DiscordNotifier:
                         last_id = str(max(int(m["id"]) for m in messages))
 
             except httpx.TimeoutException as e:
-                logger.debug("[listener] 폴링 타임아웃 (무시): %s", e)
+                transient_tracker.record_failure(f"timeout: {e}")
             except httpx.HTTPError as e:
-                logger.warning("[listener] HTTP 오류: %s", e)
+                # 연결 실패/네트워크 블립 등 전송 계층 오류도 트랜지언트로 간주
+                transient_tracker.record_failure(f"HTTPError: {e}")
             except Exception as e:
                 # JSON 파싱 오류, KeyError 등 예상치 못한 예외로 스레드가 죽는 것을 방지
                 logger.error("[listener] 예상치 못한 예외 (리스너 계속 실행): %s", e, exc_info=True)
