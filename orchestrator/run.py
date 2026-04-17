@@ -1724,9 +1724,13 @@ def main() -> int:
                 executor.submit(
                     _run_single_task,
                     task, pipeline, git, repo_path,
-                    args.no_pr, None,  # notifier=None (CLI에서는 Discord 미사용)
-                    save_lock, all_tasks, tasks_path,
-                    reports_dir,
+                    no_pr=args.no_pr,
+                    no_push=None,
+                    notifier=None,  # CLI에서는 Discord 미사용
+                    save_lock=save_lock,
+                    all_tasks=all_tasks,
+                    tasks_path=tasks_path,
+                    reports_dir=reports_dir,
                 ): task
                 for task in group
             }
