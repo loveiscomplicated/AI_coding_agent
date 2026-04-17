@@ -40,6 +40,8 @@ _DRAFT_SYSTEM_PROMPT = """\
 당신은 소프트웨어 개발 태스크를 설계하는 전문가입니다.
 
 프로젝트 컨텍스트 문서를 읽고 구현 태스크 목록을 생성하세요.
+생성된 태스크는 별도의 에이전트(TestWriter, Implementer, Reviewer)가 소비합니다.
+이 에이전트들은 프로젝트 맥락을 모르므로, description에 모든 필요한 맥락을 담아야 합니다.
 
 [규칙]
 - 태스크 하나 = 파일 3개 이하. target_files가 4개 이상 필요하면 반드시 여러 태스크로 분할할 것
@@ -52,6 +54,50 @@ _DRAFT_SYSTEM_PROMPT = """\
 - task_type: "backend" 또는 "frontend" 중 하나
   - "frontend": HTML/CSS/JS/React/Vue 등 브라우저에서 실행되는 UI 코드. 멀티 에이전트 파이프라인이 실행하지 않으므로 수락 기준을 자동으로 검증할 수 없음. 이 경우에도 태스크를 생성하되, task_type을 "frontend"로 설정할 것.
   - "backend": 서버, CLI, 라이브러리, 테스트, 인프라 등 나머지 모든 것
+
+[description 작성 규칙 — 매우 중요]
+각 태스크의 description은 다음 4개 섹션을 반드시 포함해야 합니다.
+각 섹션은 "### 섹션명" 형태의 Markdown 헤더로 구분하세요.
+
+1. **### 목적과 배경**
+   이 태스크가 왜 필요한지, 프로젝트 전체에서 어떤 역할인지 2-3문장으로 설명.
+   "무엇을 만드는지"가 아니라 "왜 만드는지"를 먼저 설명하세요.
+   컨텍스트 문서에 관련 결정이 있다면 채택된 핵심만 발췌하세요 (폐기된 대안 제외).
+   "컨텍스트 문서에 따르면..." 같은 메타 참조 대신 내용 자체를 직접 쓰세요.
+
+2. **### 기술 요구사항**
+   구체적인 구현 스펙. 입출력 형식, 데이터 구조, 인터페이스 제약, 알고리즘.
+   acceptance_criteria와 내용이 겹쳐도 괜찮습니다. criteria는 "무엇이 통과해야 하는지"를
+   테스트 가능한 체크리스트로, 여기는 "왜 그런 제약이 있는지"를 구현자가 이해할 수 있는
+   산문 형태로 쓰세요.
+
+3. **### 인접 컨텍스트**
+   - 이 태스크의 결과를 사용하는 후속 태스크: task id + 제목 (역참조)
+   - 이 태스크가 의존하는 선행 태스크의 산출물: task id + 산출물 개요 (정참조)
+   - 프로젝트에 이미 존재하는 관련 파일이 있다면 경로
+   후속 태스크가 없으면 "후속 태스크 없음"으로 명시하세요.
+
+4. **### 비고려 항목**
+   이 태스크에서 의도적으로 다루지 않는 것을 명시하세요.
+   이것이 없으면 에이전트가 범위 밖 기능까지 구현하려 합니다.
+
+   [근거 제약 — 환각 방지]
+   비고려 항목은 다음 세 가지 근거 중 하나에 정확히 대응되는 내용만 적으세요:
+   (a) context_doc에 명시된 연기/보류 결정 (예: "v2에서 한다", "다음 스프린트")
+   (b) 이미 다른 태스크(선행/후속)에 배정된 책임
+   (c) 이 태스크의 target_files·acceptance_criteria가 자명하게 다루지 않는 인접 영역
+   근거 없이 만들어낸 제외 문장은 쓰지 마세요 — Reviewer가 그 문장을 근거로
+   잘못된 생략을 정당화할 수 있습니다.
+   적을 근거가 하나도 없으면 "명시적 비범위 없음."이라고만 쓰고 추측하지 마세요.
+   예: "DB 연동은 이 태스크의 범위가 아님 (task-015에서 처리)."  ← (b) 근거
+   예: "인증/권한은 context_doc의 '인증은 Phase 2' 결정에 따라 제외."   ← (a) 근거
+
+[description 길이 가이드라인]
+- 목표 400~800자(한국어 기준).
+- 200자 미만이면 에이전트가 맥락 부족으로 잘못된 방향으로 갈 위험이 큽니다.
+- 1000자 초과 시 요약하세요.
+- 회의 대화 원문이나 장황한 설명을 복사하지 말고, 결정 사항만 산문으로 발췌하세요.
+- 코드 블록을 강제하지 마세요 — 산문이 더 낫습니다.
 
 [language 필드 (필수)]
 각 태스크에 `language` 필드를 반드시 포함한다.
@@ -98,8 +144,11 @@ _DRAFT_SYSTEM_PROMPT = """\
 하나의 태스크가 import해야 하는 '아직 존재하지 않는 모듈'이 2개를 초과하면 분할한다.
 
 [출력 형식]
-다음 JSON만 출력하세요. 마크다운 코드블록, 설명 텍스트 없이 순수 JSON만:
-{"tasks": [{"id": "task-001", "title": "...", "description": "...", "acceptance_criteria": ["..."], "target_files": ["Coordinate.kt", "Place.kt"], "depends_on": [], "task_type": "backend", "language": "kotlin"}]}
+다음 JSON만 출력하세요. 마크다운 코드블록, 설명 텍스트 없이 순수 JSON만.
+description 필드는 위의 4개 섹션(### 목적과 배경 / ### 기술 요구사항 / ### 인접 컨텍스트 / ### 비고려 항목)을
+모두 포함한 긴 문자열이어야 합니다. JSON 문자열 내 개행은 "\\n"으로 이스케이프하세요.
+
+{"tasks": [{"id": "task-001", "title": "...", "description": "### 목적과 배경\\n...\\n\\n### 기술 요구사항\\n...\\n\\n### 인접 컨텍스트\\n...\\n\\n### 비고려 항목\\n...", "acceptance_criteria": ["..."], "target_files": ["Coordinate.kt", "Place.kt"], "depends_on": [], "task_type": "backend", "language": "kotlin"}]}
 """
 
 router = APIRouter()
@@ -133,6 +182,49 @@ def _normalize_target_path(fpath: str) -> str:
     return fpath.rsplit("/", 1)[-1]
 
 
+_DESCRIPTION_MIN_LENGTH = 100
+
+# 4개 섹션 각각에 대한 한·영 헤더 별칭.
+# 매칭은 Markdown 헤더(#으로 시작하는 줄)에서만 수행한다 — 본문에 키워드만 등장하는
+# 경우는 섹션으로 인정하지 않는다 (헤더로 구분되지 않으면 에이전트가 파싱하기 어려움).
+# 별칭은 소문자·공백 정규화 후 '포함' 매칭한다.
+_DESCRIPTION_SECTION_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("목적과 배경", ("목적과 배경", "목적/배경", "목적", "배경",
+                     "purpose and background", "purpose", "background")),
+    ("기술 요구사항", ("기술 요구사항", "기술 요구", "요구사항",
+                       "technical requirements", "requirements", "specification")),
+    ("인접 컨텍스트", ("인접 컨텍스트", "인접", "컨텍스트",
+                       "adjacent context", "related context", "context")),
+    ("비고려 항목", ("비고려 항목", "비고려", "비범위",
+                     "out of scope", "out-of-scope", "not in scope", "non-goals")),
+)
+
+_MARKDOWN_HEADER_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
+
+
+def _extract_markdown_headers(description: str) -> list[str]:
+    """description의 Markdown 헤더 텍스트를 소문자·공백 정규화하여 반환한다."""
+    return [
+        re.sub(r"\s+", " ", match.group(1)).strip().lower()
+        for match in _MARKDOWN_HEADER_PATTERN.finditer(description)
+    ]
+
+
+def _find_missing_sections(description: str) -> list[str]:
+    """4개 섹션 중 헤더로 나타나지 않은 섹션의 한국어 라벨 목록을 반환한다."""
+    headers = _extract_markdown_headers(description)
+    missing: list[str] = []
+    for label, aliases in _DESCRIPTION_SECTION_SPEC:
+        found = any(
+            alias.lower() in header
+            for header in headers
+            for alias in aliases
+        )
+        if not found:
+            missing.append(label)
+    return missing
+
+
 def _sanitize_task_draft(task: dict, warnings: list[str]) -> None:
     """LLM이 생성한 태스크 초안의 target_files 깊은 경로를 정리한다.
 
@@ -140,6 +232,8 @@ def _sanitize_task_draft(task: dict, warnings: list[str]) -> None:
       - 깊은 패키지 경로(app/src/main/...) → 파일명만 추출
     경고만:
       - target_files 보정이 발생한 경우 원래 경로를 warnings에 기록
+      - description이 100자 미만
+      - description에 권장 섹션(목적/기술 요구/인접/비고려) 누락
     """
     target_files = task.get("target_files") or []
     sanitized_files: list[str] = []
@@ -169,6 +263,21 @@ def _sanitize_task_draft(task: dict, warnings: list[str]) -> None:
             seen.add(f)
             deduped.append(f)
     task["target_files"] = deduped
+
+    # description 품질 경고 (실패는 아님 — LLM이 간결하게 잘 쓸 수도 있으므로)
+    task_id = task.get("id", "(id 없음)")
+    description = task.get("description", "") or ""
+    if len(description) < _DESCRIPTION_MIN_LENGTH:
+        warnings.append(
+            f"{task_id}: description이 {_DESCRIPTION_MIN_LENGTH}자 미만입니다. "
+            "목적과 배경, 기술 요구사항, 인접 컨텍스트, 비고려 항목이 포함되어야 합니다."
+        )
+
+    missing = _find_missing_sections(description)
+    if missing:
+        warnings.append(
+            f"{task_id}: description에 권장 섹션이 누락됨 (Markdown 헤더 기준): {missing}"
+        )
 
 
 def _run_draft(job_id: str, context_doc: str) -> None:

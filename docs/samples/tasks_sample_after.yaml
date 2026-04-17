@@ -1,0 +1,142 @@
+# ────────────────────────────────────────────────────────────────────────────
+# tasks_sample_after.yaml — `_DRAFT_SYSTEM_PROMPT` 강화 이후 예상 출력 형식 예시
+#
+# 주의: 이 파일은 실 LLM 호출 결과가 아니다. `data/tasks.yaml`의 task-001~task-004
+# 원문에 이미 담긴 정보만으로 4섹션 구조를 재구성한 예시이며, 원문에 근거 없는
+# 세부사항(직렬화 정책, 스프린트 일정, 패키지 배치 근거 등)은 의도적으로 제외했다.
+# 새 프롬프트의 "비고려 항목 근거 제약" 조항이 이런 환각성 제외사항을 금지한다.
+# ────────────────────────────────────────────────────────────────────────────
+tasks:
+- id: task-001
+  title: 도메인 모델 정의 — 좌표, 장소, 경로
+  description: |
+    ### 목적과 배경
+    이 세 타입은 후속 태스크가 인자·반환으로 직접 사용한다. MapService 인터페이스
+    정의가 searchPlace(...): Result<List<Place>>, getWalkingRoute(...): Result<Route>,
+    distanceToRoute(current: Coordinate, route: Route): Double로 세 타입을 모두 쓰며
+    (data/tasks.yaml task-003 설명), RouteDeviationDetector가 현재 GPS 좌표와
+    Route.waypoints 간 거리를 계산한다 (data/tasks.yaml task-004 설명).
+
+    ### 기술 요구사항
+    - Coordinate(latitude: Double, longitude: Double) — 유효 범위(-90~90, -180~180) 벗어나면
+      IllegalArgumentException.
+    - Place(name: String, coordinate: Coordinate, poiId: String) — 세 필드를 가진다.
+    - Route(origin: Place, destination: Place, waypoints: List<Coordinate>,
+      totalDistanceMeters: Double) — waypoints가 빈 리스트면 예외.
+    - 세 타입 모두 Kotlin data class로 정의하여 equals·hashCode·copy 기본 구현을 활용.
+
+    ### 인접 컨텍스트
+    - 선행 태스크: 없음.
+    - 후속 태스크:
+      - task-002 — 이 세 모델에 대한 단위 테스트.
+      - task-003 — MapService 인터페이스가 세 타입을 입출력으로 소비.
+      - task-004 — RouteDeviationDetector가 Route·Coordinate를 소비.
+
+    ### 비고려 항목
+    - 단위 테스트는 task-002가 전담하므로 이 태스크에서 작성하지 않는다.
+    - MapService 인터페이스·어댑터 구현체는 task-003 이후에서 다룬다.
+    - 그 외 명시적 비범위 없음.
+  acceptance_criteria:
+  - Coordinate는 latitude, longitude 필드를 가지며 유효 범위를 벗어날 경우 예외를 던진다
+  - Place는 name, coordinate, poiId 필드를 가진다
+  - Route는 waypoints가 빈 리스트이면 예외를 던진다
+  - 모든 모델은 equals/hashCode/copy가 올바르게 동작한다
+  target_files:
+  - Coordinate.kt
+  - Place.kt
+  - Route.kt
+  test_framework: junit
+  depends_on: []
+  task_type: backend
+  language: kotlin
+  status: pending
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
+
+- id: task-002
+  title: 도메인 모델 단위 테스트
+  description: |
+    ### 목적과 배경
+    task-001에서 정의한 Coordinate·Place·Route는 앱의 모든 레이어가 기반으로 삼는 값
+    객체다. 검증 규칙과 동등성 비교 계약이 리팩터링 과정에서 깨지지 않도록 회귀 방지
+    테스트를 고정한다.
+
+    ### 기술 요구사항
+    - Coordinate 유효 범위 초과 시 예외 발생을 테스트한다.
+    - 동일 값 Coordinate 두 인스턴스가 equals로 같다고 판정되는지 확인한다.
+    - Route 생성 시 waypoints가 빈 리스트이면 예외가 발생함을 확인한다.
+    - Route.copy()로 destination만 변경한 새 인스턴스가 원본과 다른 객체임을 확인한다.
+
+    ### 인접 컨텍스트
+    - 선행 태스크: task-001 (Coordinate, Place, Route 정의).
+    - 후속 태스크 없음 — 이 테스트는 task-001 산출물의 회귀 방지 가드.
+
+    ### 비고려 항목
+    - 상위 레이어 통합 테스트는 이 태스크의 범위가 아니다 — MapService 구현체가 생긴
+      이후(task-003 이후) 별도 태스크에서 다룬다.
+    - 그 외 명시적 비범위 없음.
+  acceptance_criteria:
+  - Coordinate 유효 범위 초과 시 예외가 발생하는 것을 확인한다
+  - 동일한 값의 Coordinate 두 인스턴스가 equals로 같다고 판정된다
+  - Route 생성 시 waypoints가 빈 리스트이면 예외가 발생하는 것을 확인한다
+  - Route.copy()로 destination만 변경한 새 인스턴스가 원본과 다른 객체임을 확인한다
+  target_files:
+  - CoordinateTest.kt
+  - PlaceTest.kt
+  - RouteTest.kt
+  test_framework: junit
+  depends_on:
+  - task-001
+  task_type: backend
+  language: kotlin
+  status: pending
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
+
+- id: task-003
+  title: MapService 인터페이스 및 결과 래퍼 정의
+  description: |
+    ### 목적과 배경
+    task-003 원문("어댑터 패턴의 핵심인 MapService 인터페이스를 정의한다")에 따라
+    어댑터 패턴의 계약만 확정하는 태스크다. 구체 구현은 별도 태스크(task-007
+    KakaoMapService)가 이 인터페이스를 구현한다.
+
+    ### 기술 요구사항
+    - MapService는 interface로 선언.
+    - searchPlace(query: String): Result<List<Place>> — suspend 함수.
+    - getWalkingRoute(origin: Coordinate, destination: Coordinate): Result<Route>
+      — suspend 함수.
+    - distanceToRoute(current: Coordinate, route: Route): Double — suspend가 아닌 순수 함수.
+    - MapResult는 sealed class. Success<T>(data: T) / Failure(error: Throwable) 서브클래스.
+
+    ### 인접 컨텍스트
+    - 선행 태스크: task-001 (Coordinate, Place, Route).
+    - 후속 태스크:
+      - task-004 — RouteDeviationDetector가 distanceToRoute 계약을 사용.
+      - task-007 — KakaoMapService가 이 인터페이스를 구현 (depends_on=[task-003]).
+
+    ### 비고려 항목
+    - 어댑터 구현체 작성은 task-007이 담당하므로 이 태스크에서 수행하지 않는다.
+    - 그 외 명시적 비범위 없음.
+  acceptance_criteria:
+  - MapService는 interface로 선언되며 searchPlace, getWalkingRoute, distanceToRoute 세 메서드 시그니처를 포함한다
+  - MapResult sealed class는 Success와 Failure 두 서브클래스를 가진다
+  - distanceToRoute는 순수 함수로 선언된다
+  - searchPlace와 getWalkingRoute는 suspend 함수로 선언된다
+  target_files:
+  - MapService.kt
+  - MapResult.kt
+  test_framework: junit
+  depends_on:
+  - task-001
+  task_type: backend
+  language: kotlin
+  status: pending
+  retry_count: 0
+  last_error: ''
+  pr_url: ''
+  failure_reason: ''
