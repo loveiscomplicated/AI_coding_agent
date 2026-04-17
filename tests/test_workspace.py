@@ -57,12 +57,55 @@ class TestWorkspaceCreation:
             ws.cleanup()
 
     def test_copies_target_file(self, simple_task, repo_with_files):
+        """target_files 의 선행 'src/' 는 workspace.src_dir 가 흡수하므로
+        파일은 src_dir 바로 아래에 놓인다 (src/src/ 중첩 X).
+        """
         ws = WorkspaceManager(simple_task, repo_with_files, base_dir=repo_with_files / "workspaces")
         ws.create()
         try:
-            dest = ws.src_dir / "src" / "auth.py"
+            dest = ws.src_dir / "auth.py"
             assert dest.exists()
             assert "login" in dest.read_text()
+            # 회귀 가드: 중첩된 src/src/ 경로는 생성되지 않아야 한다
+            assert not (ws.src_dir / "src" / "auth.py").exists()
+        finally:
+            ws.cleanup()
+
+    def test_strips_src_prefix_for_python_target(self, tmp_path):
+        """target_files=['src/foo.py'] → workspace 안 실제 파일은 src/foo.py
+        (중첩된 src/src/foo.py 가 아니어야 한다).
+        """
+        task = Task(
+            id="x", title="t", description="d",
+            acceptance_criteria=["c"],
+            target_files=["src/foo.py", "src/models/user.py"],
+        )
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        try:
+            assert (ws.src_dir / "foo.py").exists()
+            assert (ws.src_dir / "models" / "user.py").exists()
+            assert not (ws.src_dir / "src" / "foo.py").exists()
+            # missing_or_empty_target_files 도 같은 경로 해석을 사용해야 한다
+            (ws.src_dir / "foo.py").write_text("x = 1\n")
+            (ws.src_dir / "models" / "user.py").write_text("y = 2\n")
+            assert ws.missing_or_empty_target_files() == []
+        finally:
+            ws.cleanup()
+
+    def test_preserves_paths_without_src_prefix(self, tmp_path):
+        """선행 'src/' 가 없는 경로 (예: Kotlin 의 app/src/main/...) 는 그대로 유지.
+        한 단계만 떼므로, src/ 안의 다른 src/ 같은 의도된 중첩은 보존된다.
+        """
+        task = Task(
+            id="x", title="t", description="d",
+            acceptance_criteria=["c"],
+            target_files=["app/src/main/Foo.kt"],
+        )
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        try:
+            assert (ws.src_dir / "app" / "src" / "main" / "Foo.kt").exists()
         finally:
             ws.cleanup()
 

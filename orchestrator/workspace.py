@@ -35,6 +35,19 @@ from orchestrator.task import Task, TaskStatus
 
 logger = logging.getLogger(__name__)
 
+
+def strip_src_prefix(rel_path: str) -> str:
+    """target_file 경로의 선행 'src/' 한 단계를 제거한다.
+
+    워크스페이스의 ``src_dir`` 자체가 이미 레포의 ``src/`` 코드 루트를
+    대표하기 때문에, ``src/foo.py`` 같은 target_file 은
+    ``src_dir/foo.py`` 에 놓여야 한다 (``src_dir/src/foo.py`` 가 아니라).
+
+    선행 prefix 가 없는 경로(예: Kotlin 의 ``app/src/main/...``)는 그대로 반환.
+    """
+    prefix = "src/"
+    return rel_path[len(prefix):] if rel_path.startswith(prefix) else rel_path
+
 class WorkspaceManager:
     """
     태스크 실행용 격리 워크스페이스.
@@ -155,8 +168,15 @@ class WorkspaceManager:
         task.target_files 를 repo_path 기준 상대 경로로 workspace/src/ 에 복사.
 
         예) target_files = ["src/auth.py", "src/models/user.py"]
-            → workspace/src/auth.py
+            → workspace/src/auth.py            (선행 'src/' 한 단계 제거)
             → workspace/src/models/user.py
+
+            target_files = ["app/src/main/foo.kt"]
+            → workspace/src/app/src/main/foo.kt   (선행 'src/' 가 없으면 그대로)
+
+        선행 'src/' 한 단계를 떼어내는 이유: workspace 의 ``src_dir`` 자체가
+        이미 레포 ``src/`` 코드 루트를 대표하므로 한 번 더 붙이면 ``src/src/`` 가
+        되어 import 경로·프롬프트 모두에서 혼란을 일으킨다.
 
         repo 에 파일이 아직 없으면 (신규 생성 태스크) **빈 파일을 선주입** 한다.
         이유: Implementer 가 탐색(list/read)으로 시간 낭비하지 않고 즉시
@@ -165,7 +185,7 @@ class WorkspaceManager:
         """
         for rel_path in self.task.target_files:
             src = self.repo_path / rel_path
-            dest = self.src_dir / rel_path
+            dest = self.src_dir / strip_src_prefix(rel_path)
             dest.parent.mkdir(parents=True, exist_ok=True)
 
             if src.exists():
@@ -185,7 +205,7 @@ class WorkspaceManager:
         """
         missing: list[str] = []
         for rel_path in self.task.target_files:
-            dest = self.src_dir / rel_path
+            dest = self.src_dir / strip_src_prefix(rel_path)
             if not dest.exists():
                 missing.append(rel_path)
                 continue
@@ -281,8 +301,8 @@ class WorkspaceManager:
                 if content is None:
                     continue
 
-                # workspace/src/ 에 복사
-                dest = self.src_dir / rel_path
+                # workspace/src/ 에 복사 (선행 'src/' 한 단계 제거)
+                dest = self.src_dir / strip_src_prefix(rel_path)
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text(content, encoding="utf-8")
                 copied_files.append(rel_path)
@@ -304,7 +324,7 @@ class WorkspaceManager:
                     content = self._read_from_branch(branch, rel_path)
                     if content is None:
                         continue
-                    dest = self.src_dir / rel_path
+                    dest = self.src_dir / strip_src_prefix(rel_path)
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_text(content, encoding="utf-8")
                     copied_files.append(rel_path)

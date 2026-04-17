@@ -59,9 +59,13 @@ def workspace(tmp_path, task):
     # 테스트 파일이 있는 것처럼 만들어 줌
     (ws.tests_dir / "test_auth.py").write_text("def test_login():\n    assert True\n")
     # target_file 가드 충족: 구현이 이미 이루어진 상태로 시뮬레이션
-    # (MockLoop 가 실제로 쓰기를 수행하지 않으므로 선주입한 빈 스켈레톤을 채워둠)
+    # (MockLoop 가 실제로 쓰기를 수행하지 않으므로 선주입한 빈 스켈레톤을 채워둠).
+    # _copy_target_files() 가 선행 'src/' 한 단계를 떼고 배치하므로 같은 규칙을 따른다.
+    from orchestrator.workspace import strip_src_prefix
     for rel_path in task.target_files:
-        (ws.src_dir / rel_path).write_text("# placeholder impl for pipeline test\n")
+        (ws.src_dir / strip_src_prefix(rel_path)).write_text(
+            "# placeholder impl for pipeline test\n"
+        )
     return ws
 
 
