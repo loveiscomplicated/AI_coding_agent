@@ -963,6 +963,21 @@ def _build_implementer_prompt(
 
     desc = description_override if description_override is not None else task.description
 
+    design_notes_path = workspace.path / "context" / "test_design_notes.md"
+    design_notes_section = ""
+    if design_notes_path.exists():
+        content = design_notes_path.read_text(encoding="utf-8")
+        if len(content) > 4000:
+            content = content[:4000] + "\n...(truncated)"
+        design_notes_section = f"""
+## 테스트 설계 노트 (TestWriter 작성)
+
+{content}
+
+위 노트를 먼저 읽고 의도를 파악한 뒤 구현하세요.
+테스트 파일(`tests/`)은 노트만으로 부족할 때 직접 `read_file` 로 확인하세요.
+"""
+
     base = f"""## 태스크
 
 **{task.title}**
@@ -985,7 +1000,7 @@ def _build_implementer_prompt(
 
 - 위 경로들은 **이미 빈 파일로 존재**합니다 (신규 생성 태스크의 경우). 파일 존재 여부를 확인하기 위해 `list_directory`/`read_file` 을 반복 호출하지 말고, **곧바로 `write_file` 로 내용을 작성**하세요.
 - 기존 내용이 있는 파일을 수정하는 태스크라면 `read_file` 로 한 번만 확인 후 `edit_file` 로 수정하세요.
-
+{design_notes_section}
 `tests/` 에 있는 테스트를 먼저 읽고,
 `src/` 에 테스트를 **모두** 통과하는 구현을 작성하세요.
 """

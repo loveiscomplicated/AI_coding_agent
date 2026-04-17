@@ -93,6 +93,7 @@ class WorkspaceManager:
         self._path.mkdir(parents=True, exist_ok=True)
         self.src_dir.mkdir(exist_ok=True)
         self.tests_dir.mkdir(exist_ok=True)
+        (self._path / "context").mkdir(exist_ok=True)
 
         self._copy_target_files()
         self._copy_requirements()

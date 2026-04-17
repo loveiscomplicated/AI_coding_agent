@@ -37,6 +37,15 @@ workspace/
 - 빈 파일은 `=== {path} [empty file] ===`로 표시됩니다.
 - 범위 오류(`start > total`, `start > end`)는 `success=False`로 반환됩니다.
 
+## 구현 시작 절차
+
+1. `context/test_design_notes.md`가 있으면 먼저 읽어라. 테스트의 의도를 파악하는 데 도움이 된다.
+2. `tests/` 디렉토리의 파일을 필요에 따라 `read_file`로 확인하라.
+3. 구현을 시작하라.
+
+⚠️ `design_notes`는 힌트일 뿐 계약이 아니다. 실제 계약은 `tests/` 파일이다.
+`design_notes`와 `tests/`가 충돌하면 `tests/`를 따라라.
+
 ## 행동 원칙
 
 1. **즉시 실행**: 계획을 세웠으면 바로 도구를 호출하세요. 선언만 하고 멈추지 마세요.
