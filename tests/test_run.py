@@ -7,9 +7,15 @@ run_pipeline() 통합 테스트는 DockerRunner / LLM 의존성 때문에 별도
 
 from __future__ import annotations
 
+import threading
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
 import pytest
 
-from orchestrator.run import resolve_execution_groups
+from orchestrator import run as run_module
+from orchestrator.pipeline import PipelineMetrics, PipelineResult
+from orchestrator.run import _run_single_task, resolve_execution_groups
 from orchestrator.task import Task, TaskStatus
 
 
@@ -143,3 +149,129 @@ class TestResolveExecutionGroups:
                     assert dep in seen, f"{task.id}의 의존성 {dep}이 아직 처리되지 않음"
             for task in group:
                 seen.add(task.id)
+
+
+# ── _run_single_task --no-pr 성공 경로 ────────────────────────────────────────
+
+
+class _FakeWorkspace:
+    """WorkspaceManager 의 최소 컨텍스트 매니저 stub."""
+
+    def __init__(self, *_, **__):
+        self.path = Path("/tmp/fake-ws")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return None
+
+    def inject_dependency_context(self, dep_tasks):
+        return None
+
+
+class TestRunSingleTaskNoPr:
+    """--no-pr 성공 경로에서 _run_single_task 가 예외 없이 (True, "") 를 반환해야 한다.
+
+    회귀 방지: 이전에 run.py 의 executor.submit() 호출이 positional 인자
+    정렬을 잘못 맞춰서 save_lock 자리에 list(all_tasks) 가 들어갔고,
+    그 결과 `with save_lock:` 이
+    `'list' object does not support the context manager protocol` 로 터졌다.
+    """
+
+    def _invoke_via_main_loop(self, tmp_path, monkeypatch):
+        """run.py:main() 의 태스크 루프를 그대로 재사용해서 호출 경로 자체를 검증."""
+        task = make_task("task-001")
+        all_tasks = [task]
+        tasks_path = tmp_path / "tasks.yaml"
+        tasks_path.write_text("tasks: []\n")
+        reports_dir = tmp_path / "reports"
+
+        pipeline_result = PipelineResult(
+            task=task, succeeded=True, metrics=PipelineMetrics()
+        )
+
+        # 무거운 의존성을 전부 stub
+        monkeypatch.setattr(run_module, "WorkspaceManager", _FakeWorkspace)
+        monkeypatch.setattr(run_module, "build_report",
+                            lambda *a, **kw: {"task_id": task.id})
+        monkeypatch.setattr(run_module, "save_report",
+                            lambda *a, **kw: reports_dir / f"{task.id}.yaml")
+        monkeypatch.setattr(run_module, "save_tasks", lambda *a, **kw: None)
+
+        pipeline = MagicMock()
+        pipeline.run.return_value = pipeline_result
+
+        save_lock = threading.Lock()
+
+        # executor.submit 와 동일한 호출 패턴 — 호출 부 (run.py:main 안)에서
+        # 인자 정렬이 어긋나면 여기서 같은 예외가 재현돼야 한다.
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                _run_single_task,
+                task, pipeline, MagicMock(), tmp_path,
+                no_pr=True,
+                no_push=None,
+                notifier=None,
+                save_lock=save_lock,
+                all_tasks=all_tasks,
+                tasks_path=tasks_path,
+                reports_dir=reports_dir,
+            )
+            return task, future.result()
+
+    def test_no_pr_success_returns_without_exception(self, tmp_path, monkeypatch):
+        task, (succeeded, branch) = self._invoke_via_main_loop(tmp_path, monkeypatch)
+        assert succeeded is True
+        assert branch == ""
+        assert task.status == TaskStatus.DONE
+
+    def test_run_single_task_signature_matches_call_site(self):
+        """_run_single_task 의 kwarg 이름이 호출 부 (run.py:main) 와 일치해야 한다.
+
+        positional 호출로 어긋났던 과거 회귀를 막기 위해 kwarg 계약을 고정.
+        """
+        import inspect
+
+        sig = inspect.signature(_run_single_task)
+        params = sig.parameters
+        # 호출 부에서 쓰는 kwarg 이름들
+        expected_kwargs = {
+            "no_pr", "no_push", "notifier",
+            "save_lock", "all_tasks", "tasks_path", "reports_dir",
+        }
+        missing = expected_kwargs - set(params.keys())
+        assert not missing, f"_run_single_task 시그니처에서 누락: {missing}"
+
+    def test_executor_submit_passes_run_single_task_by_kwargs(self):
+        """run.py:main() 의 executor.submit(_run_single_task, ...) 는 반드시
+        save_lock/all_tasks/tasks_path 를 keyword 로 넘겨야 한다.
+
+        과거에 positional 로 넘기면서 인자 정렬이 어긋나 list 가 save_lock
+        자리로 들어가 'list' object does not support the context manager
+        protocol 예외가 났었다. 이 회귀를 막기 위해 호출 형태를 AST 로 고정.
+        """
+        import ast
+
+        source = Path(run_module.__file__).read_text()
+        tree = ast.parse(source)
+
+        found = False
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "submit"
+                    and node.args
+                    and isinstance(node.args[0], ast.Name)
+                    and node.args[0].id == "_run_single_task"):
+                continue
+            found = True
+            kwarg_names = {kw.arg for kw in node.keywords}
+            for required in ("save_lock", "all_tasks", "tasks_path"):
+                assert required in kwarg_names, (
+                    f"executor.submit(_run_single_task) 는 {required} 를 "
+                    f"keyword 인자로 전달해야 한다 (현재 keywords={kwarg_names})"
+                )
+        assert found, "run.py 에서 executor.submit(_run_single_task, ...) 호출을 찾지 못함"
