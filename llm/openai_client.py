@@ -7,6 +7,32 @@ base.py의 BaseLLMClient를 구현함.
 사전 준비:
     uv add openai
     uv add python-dotenv
+
+----------------------------------------------------------------------
+OpenAI Prompt Caching 를 위한 messages 배열 레이아웃
+----------------------------------------------------------------------
+
+OpenAI 의 자동 prompt caching 은 "앞에서부터 완전히 동일한 prefix" 가
+1024 토큰 이상 연속될 때 활성화된다 (hit 은 128 토큰 단위로 증가).
+prefix 한 글자만 달라져도 cached_tokens = 0 이 된다.
+
+이 클라이언트는 다음 레이아웃을 가정하고 prefix 안정성을 최대화한다:
+
+    messages[0]   system       — self.config.system_prompt (파이프라인 단위 불변)
+    messages[1]   user         — 첫 태스크 기술 (루프 내 불변)
+    messages[2..] assistant /  — 각 iteration 의 tool_calls / tool_results 턴
+                  tool         (가변)
+
+앞 [0]~[1] 이 캐싱되어 재사용된다. `core.loop._trim_history()` 가
+[2..] 를 슬라이딩 윈도우로 잘라도 [0]~[1] 은 그대로이므로
+캐시가 계속 유효하다.
+
+determinism 규칙 (_to_openai_messages):
+  - dict 키 순서는 항상 role → content → tool_calls → tool_call_id 순으로 고정
+  - content 는 입력 원본을 보존 (strip() 등 전처리 금지)
+  - tool_call 의 arguments 는 json.dumps(sort_keys=True) 로 canonicalize
+    → 의미상 동일한 input({'a':1,'b':2} vs {'b':2,'a':1})이 같은 bytes 로 직렬화됨
+  - 따라서 동일 의미의 입력 Message 들은 항상 byte-identical 한 JSON 을 생성
 """
 
 import json
@@ -79,13 +105,21 @@ def _to_openai_messages(messages: list[Message]) -> list[dict]:
     - system 메시지는 건너뜀 (chat()에서 별도로 추가)
     - assistant 메시지의 tool_use 블록 → tool_calls 필드
     - user 메시지의 tool_result 블록 → role="tool" 메시지
+
+    Determinism (prompt caching prefix 안정화):
+      - dict 키 삽입 순서 고정: role → content → tool_calls → tool_call_id
+      - content 는 원본 그대로 유지 (strip() / normalize 금지)
+      - tool_calls 배열 내부도 id → type → function 순서로 고정
+      - tool_call arguments 는 sort_keys=True 로 canonicalize
+        (의미상 동일한 입력이 삽입 순서에 관계없이 같은 bytes 로 직렬화되도록)
     """
-    result = []
+    result: list[dict] = []
     for msg in messages:
         if msg.role == "system":
             continue
 
         if isinstance(msg.content, str):
+            # key order: role, content
             result.append({"role": msg.role, "content": msg.content})
             continue
 
@@ -98,12 +132,15 @@ def _to_openai_messages(messages: list[Message]) -> list[dict]:
                     "type": "function",
                     "function": {
                         "name": b["name"],
-                        "arguments": json.dumps(b["input"]),
+                        # sort_keys=True: 의미상 동일한 input 이 삽입 순서에 관계없이
+                        # 같은 문자열로 직렬화 → prompt caching prefix 안정화
+                        "arguments": json.dumps(b["input"], sort_keys=True),
                     },
                 }
                 for b in msg.content
                 if b.get("type") == "tool_use"
             ]
+            # key order: role, content, tool_calls (tool_calls는 있을 때만 뒤에 append)
             entry: dict = {
                 "role": "assistant",
                 "content": "\n".join(text_parts) or "",
@@ -116,13 +153,12 @@ def _to_openai_messages(messages: list[Message]) -> list[dict]:
             tool_results = [b for b in msg.content if b.get("type") == "tool_result"]
             if tool_results:
                 for tr in tool_results:
-                    result.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tr["tool_use_id"],
-                            "content": tr["content"],
-                        }
-                    )
+                    # key order: role, content, tool_call_id
+                    result.append({
+                        "role": "tool",
+                        "content": tr["content"],
+                        "tool_call_id": tr["tool_use_id"],
+                    })
             else:
                 text = "\n".join(b.get("text", "") for b in msg.content)
                 result.append({"role": "user", "content": text})

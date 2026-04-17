@@ -8,6 +8,29 @@ base.py의 BaseLLMClient를 구현함.
 사전 준비:
     uv add openai
     uv add python-dotenv
+
+----------------------------------------------------------------------
+GLM (Zhipu Z.ai) Context Caching 용 messages 배열 레이아웃
+----------------------------------------------------------------------
+
+Z.ai 도 동일한 prefix 기반 context caching 을 제공한다 (반복되는 prefix
+토큰을 더 싼 단가로 청구). 따라서 openai_client.py 와 동일한 결정성
+규칙을 따른다:
+
+    messages[0]   system       — self.config.system_prompt (파이프라인 단위 불변)
+    messages[1]   user         — 첫 태스크 기술 (루프 내 불변)
+    messages[2..] assistant /  — tool_calls / tool_results 턴 (가변)
+                  tool
+
+GLM 특이 사항 (검토 필요):
+  - 본 클라이언트는 기존부터 assistant 메시지에서 tool_calls 가 있을 때
+    content 키를 생략해왔다. Z.ai 공식 문서로는 이것이 필수 제약인지
+    명확히 확인되지 않았으며, 현재 코드의 기존 동작을 보존하기 위한 것이다.
+    추후 공식 스키마로 검증하여 필요 없다면 openai_client 와 동일한 형태로
+    통일할 것 (분기는 입력의 결정적 함수이므로 prefix 안정성 자체는 유지됨).
+
+determinism 규칙은 openai_client 와 동일 (role → content → tool_calls →
+tool_call_id 순, 원본 content 보존, tool_call arguments 는 sort_keys=True).
 """
 
 import json
@@ -44,13 +67,23 @@ def _to_openai_messages(messages: list[Message]) -> list[dict]:
     - system 메시지는 건너뜀 (chat()에서 별도로 추가)
     - assistant 메시지의 tool_use 블록 → tool_calls 필드
     - user 메시지의 tool_result 블록 → role="tool" 메시지
+
+    Determinism (prompt caching prefix 안정화):
+      - dict 키 삽입 순서 고정: role → content → tool_calls → tool_call_id
+      - content 는 원본 그대로 유지 (strip() / normalize 금지)
+      - tool_call arguments 는 sort_keys=True 로 canonicalize
+      - tool_calls 가 있는 assistant 메시지에서 content 키는 생략(기존 동작 보존)
+        — Z.ai 공식 스키마 상 필수 제약인지 확인되지 않았으므로 주석을
+        사실처럼 박아두지 않는다. 분기 자체는 입력의 결정적 함수이므로
+        prefix 안정성은 유지된다.
     """
-    result = []
+    result: list[dict] = []
     for msg in messages:
         if msg.role == "system":
             continue
 
         if isinstance(msg.content, str):
+            # key order: role, content
             result.append({"role": msg.role, "content": msg.content})
             continue
 
@@ -63,32 +96,33 @@ def _to_openai_messages(messages: list[Message]) -> list[dict]:
                     "type": "function",
                     "function": {
                         "name": b["name"],
-                        "arguments": json.dumps(b["input"]),
+                        # sort_keys=True: canonicalization (prompt caching prefix 안정화)
+                        "arguments": json.dumps(b["input"], sort_keys=True),
                     },
                 }
                 for b in msg.content
                 if b.get("type") == "tool_use"
             ]
-            text_content = "\n".join(text_parts) or None
-            entry: dict = {"role": "assistant"}
+            # 기존 동작 보존: tool_calls 가 있으면 content 키를 생략.
+            # (Z.ai API 가 실제로 공존을 금지하는지는 공식 스키마로 재확인 필요 — 주석 참조)
             if tool_calls:
-                # GLM은 tool_calls와 content 공존을 허용하지 않음 → content 생략
-                entry["tool_calls"] = tool_calls
+                # key order: role, tool_calls
+                entry: dict = {"role": "assistant", "tool_calls": tool_calls}
             else:
-                entry["content"] = text_content or ""
+                # key order: role, content
+                entry = {"role": "assistant", "content": "\n".join(text_parts) or ""}
             result.append(entry)
 
         elif msg.role == "user":
             tool_results = [b for b in msg.content if b.get("type") == "tool_result"]
             if tool_results:
                 for tr in tool_results:
-                    result.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tr["tool_use_id"],
-                            "content": tr["content"],
-                        }
-                    )
+                    # key order: role, content, tool_call_id
+                    result.append({
+                        "role": "tool",
+                        "content": tr["content"],
+                        "tool_call_id": tr["tool_use_id"],
+                    })
             else:
                 text = "\n".join(b.get("text", "") for b in msg.content)
                 result.append({"role": "user", "content": text})
