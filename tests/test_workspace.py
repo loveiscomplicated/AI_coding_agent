@@ -74,16 +74,56 @@ class TestWorkspaceCreation:
         finally:
             ws.cleanup()
 
-    def test_skips_missing_target_file_without_error(self, tmp_path):
+    def test_creates_empty_skeleton_for_missing_target_file(self, tmp_path):
+        """신규 파일 태스크: repo 에 없는 target_file 은 빈 스켈레톤으로 선주입."""
         task = Task(
             id="x", title="t", description="d",
             acceptance_criteria=["c"],
-            target_files=["nonexistent.py"],
+            target_files=["new_module.py", "sub/nested.py"],
         )
         ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
-        ws.create()  # should not raise
+        ws.create()
         try:
-            assert ws.src_dir.exists()
+            assert (ws.src_dir / "new_module.py").exists()
+            assert (ws.src_dir / "new_module.py").stat().st_size == 0
+            assert (ws.src_dir / "sub" / "nested.py").exists()
+            assert (ws.src_dir / "sub" / "nested.py").stat().st_size == 0
+        finally:
+            ws.cleanup()
+
+    def test_missing_or_empty_target_files_detects_skeleton(self, tmp_path):
+        """Implementer 가 아무 것도 안 쓰면 skeleton 그대로 → 전부 missing 반환."""
+        task = Task(
+            id="x", title="t", description="d",
+            acceptance_criteria=["c"],
+            target_files=["a.py", "b.py"],
+        )
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        try:
+            # 초기 상태: 둘 다 빈 스켈레톤
+            assert ws.missing_or_empty_target_files() == ["a.py", "b.py"]
+            # a.py 만 내용 채움
+            (ws.src_dir / "a.py").write_text("x = 1\n")
+            assert ws.missing_or_empty_target_files() == ["b.py"]
+            # b.py 도 채움
+            (ws.src_dir / "b.py").write_text("y = 2\n")
+            assert ws.missing_or_empty_target_files() == []
+        finally:
+            ws.cleanup()
+
+    def test_missing_or_empty_detects_deleted_target(self, tmp_path):
+        """Implementer 가 실수로 파일을 삭제한 경우도 missing 으로 잡힌다."""
+        task = Task(
+            id="x", title="t", description="d",
+            acceptance_criteria=["c"],
+            target_files=["a.py"],
+        )
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        try:
+            (ws.src_dir / "a.py").unlink()
+            assert ws.missing_or_empty_target_files() == ["a.py"]
         finally:
             ws.cleanup()
 

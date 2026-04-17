@@ -62,6 +62,11 @@ def classify_failure(failure_reason: str, test_stdout: str = "") -> FailureType:
         return FailureType.ENV_ERROR
     if "[max_iter]" in combined:
         return FailureType.MAX_ITER_EXCEEDED
+    # [TARGET_MISSING] — Implementer 가 target_files 를 채우지 않고 종료한 경우.
+    # WRITE_LOOP 와 같은 '쓰기 미수행' 계열이므로 MAX_ITER_EXCEEDED 로 묶어
+    # "바로 write_file 호출하라" 고정 힌트를 재사용한다.
+    if "[target_missing]" in combined:
+        return FailureType.MAX_ITER_EXCEEDED
     return FailureType.LOGIC_ERROR
 
 

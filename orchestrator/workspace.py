@@ -156,18 +156,44 @@ class WorkspaceManager:
         예) target_files = ["src/auth.py", "src/models/user.py"]
             → workspace/src/auth.py
             → workspace/src/models/user.py
+
+        repo 에 파일이 아직 없으면 (신규 생성 태스크) **빈 파일을 선주입** 한다.
+        이유: Implementer 가 탐색(list/read)으로 시간 낭비하지 않고 즉시
+        write/edit 로 접근하도록 유도하기 위함. 빈 파일 그대로 방치되면
+        이후 엄격 가드(pipeline) 가 `[TARGET_MISSING]` 으로 차단한다.
         """
         for rel_path in self.task.target_files:
             src = self.repo_path / rel_path
-            if not src.exists():
-                logger.warning("target_file 없음 (건너뜀): %s", src)
-                continue
-
-            # workspace/src/ 아래에 동일한 상대 경로로 저장
             dest = self.src_dir / rel_path
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest)
-            logger.debug("복사: %s → %s", src, dest)
+
+            if src.exists():
+                shutil.copy2(src, dest)
+                logger.debug("복사: %s → %s", src, dest)
+            else:
+                # 신규 파일 → 빈 스켈레톤 생성
+                dest.touch()
+                logger.info("target_file 스켈레톤 생성(빈 파일): %s", dest)
+
+    def missing_or_empty_target_files(self) -> list[str]:
+        """
+        task.target_files 중 workspace/src/ 에 존재하지 않거나 빈 파일인 경로를
+        repo 기준 상대 경로로 반환한다. Implementer 완료 후 엄격 가드용.
+
+        반환값이 비어 있으면 모든 target_file 이 '실제 내용을 가진' 상태.
+        """
+        missing: list[str] = []
+        for rel_path in self.task.target_files:
+            dest = self.src_dir / rel_path
+            if not dest.exists():
+                missing.append(rel_path)
+                continue
+            try:
+                if dest.stat().st_size == 0:
+                    missing.append(rel_path)
+            except OSError:
+                missing.append(rel_path)
+        return missing
 
     def _copy_requirements(self) -> None:
         """repo 루트의 requirements.txt 가 있으면 workspace 루트에 복사."""

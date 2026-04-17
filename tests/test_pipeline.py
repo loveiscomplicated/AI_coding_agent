@@ -58,6 +58,10 @@ def workspace(tmp_path, task):
     ws.create()
     # 테스트 파일이 있는 것처럼 만들어 줌
     (ws.tests_dir / "test_auth.py").write_text("def test_login():\n    assert True\n")
+    # target_file 가드 충족: 구현이 이미 이루어진 상태로 시뮬레이션
+    # (MockLoop 가 실제로 쓰기를 수행하지 않으므로 선주입한 빈 스켈레톤을 채워둠)
+    for rel_path in task.target_files:
+        (ws.src_dir / rel_path).write_text("# placeholder impl for pipeline test\n")
     return ws
 
 
@@ -300,6 +304,44 @@ class TestTDDPipelineFailurePaths:
         assert result.succeeded is False
         assert "Implementer" in result.failure_reason or "실패" in result.failure_reason
         mock_runner.run.assert_not_called()
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_fails_when_implementer_skips_target_files(self, MockLoop, task, tmp_path):
+        """Implementer 가 'succeeded=True' 로 끝나도 target_file 을 안 쓰면 가드에 걸린다."""
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        (ws.tests_dir / "test_auth.py").write_text("def test_login():\n    assert True\n")
+        # 주의: target_file 을 채우지 않는다 → 빈 스켈레톤 그대로
+
+        MockLoop.return_value.run.return_value = _ok_scoped("했다고 주장하지만 실제로 쓰지 않음")
+        mock_runner = MagicMock()
+
+        pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner, max_retries=2)
+        result = pipeline.run(task, ws)
+        ws.cleanup()
+
+        assert result.succeeded is False
+        assert "[TARGET_MISSING]" in result.failure_reason
+        # Docker 는 한 번도 실행되지 않아야 한다 (가드가 사전 차단)
+        mock_runner.run.assert_not_called()
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_target_gate_retries_before_failing(self, MockLoop, task, tmp_path):
+        """가드 실패 시 impl_retries 루프에서 재시도를 먼저 시도한다."""
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        (ws.tests_dir / "test_auth.py").write_text("def test_login():\n    assert True\n")
+
+        MockLoop.return_value.run.return_value = _ok_scoped("주장만 함")
+        mock_runner = MagicMock()
+
+        pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner, max_retries=3)
+        pipeline.run(task, ws)
+        ws.cleanup()
+
+        # Implementer 가 max_retries 만큼 재호출되어야 한다
+        # (TestWriter 1 + Implementer 3 = 총 4회 ScopedReactLoop 호출 이상)
+        assert MockLoop.return_value.run.call_count >= 4
 
     @patch("orchestrator.pipeline.ScopedReactLoop")
     def test_fails_after_max_retries(self, MockLoop, task, workspace):

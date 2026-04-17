@@ -490,6 +490,41 @@ class TDDPipeline:
                     metrics.impl_retries = attempt
                     return PipelineResult.failed(task, f"{prefix}Implementer 실패: {impl_scoped.answer}", metrics=metrics)
 
+                # ── Step 2.5: target_file 엄격 가드 ───────────────────────────
+                # Implementer 가 "성공" 으로 끝났더라도 실제로 target_files 를
+                # 채우지 않았을 수 있다 (빈 스켈레톤 그대로, 또는 삭제).
+                # 후속 태스크가 이 파일 존재를 전제로 실행되므로 강제 체크한다.
+                missing_targets = workspace.missing_or_empty_target_files()
+                if missing_targets:
+                    if attempt < self.max_retries - 1:
+                        task.retry_count = attempt + 1
+                        target_list = ", ".join(missing_targets)
+                        task.last_error = (
+                            f"[TARGET_MISSING] 다음 target_file 들이 누락되거나 "
+                            f"빈 파일 상태입니다: {target_list}\n"
+                            f"write_file 로 해당 경로에 실제 구현을 작성하세요. "
+                            f"탐색(list/read) 은 최소화하고 즉시 쓰기 도구를 호출하세요."
+                        )
+                        logger.warning(
+                            "[%s] target_file 미작성 — retry %d/%d: %s",
+                            task.id, task.retry_count, self.max_retries, target_list,
+                        )
+                        _p({"type": "step", "step": "target_missing_retry",
+                            "message": (
+                                f"target_file 미작성 ({target_list}) — "
+                                f"재시도 {task.retry_count}/{self.max_retries}"
+                            )})
+                        continue
+                    # 마지막 시도였다면 즉시 실패
+                    metrics.failed_stage = "implementing"
+                    metrics.impl_retries = attempt
+                    return PipelineResult.failed(
+                        task,
+                        f"[TARGET_MISSING] Implementer 가 target_files 를 작성하지 않았습니다: "
+                        f"{', '.join(missing_targets)}",
+                        metrics=metrics,
+                    )
+
                 task.status = TaskStatus.RUNNING_TESTS
                 _p({"type": "step", "step": "docker_running", "message": "Docker 테스트 실행 중…"})
                 docker_result = self.test_runner.run(
@@ -947,6 +982,9 @@ def _build_implementer_prompt(
 다음 경로에 구현 파일을 작성하세요 (workspace `src/` 기준):
 
 {_format_target_files(task.target_files)}
+
+- 위 경로들은 **이미 빈 파일로 존재**합니다 (신규 생성 태스크의 경우). 파일 존재 여부를 확인하기 위해 `list_directory`/`read_file` 을 반복 호출하지 말고, **곧바로 `write_file` 로 내용을 작성**하세요.
+- 기존 내용이 있는 파일을 수정하는 태스크라면 `read_file` 로 한 번만 확인 후 `edit_file` 로 수정하세요.
 
 `tests/` 에 있는 테스트를 먼저 읽고,
 `src/` 에 테스트를 **모두** 통과하는 구현을 작성하세요.
