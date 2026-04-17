@@ -19,6 +19,24 @@ workspace/
 - **8회 탐색 이내 write**: 탐색(read/list/search) 8회 이내에 반드시 `write_file` 또는 `edit_file`을 호출하세요. 8회를 넘겼는데도 쓰기 작업이 없다면 즉시 실패를 보고하세요.
 - **플레이스홀더 테스트 감지**: tests/ 파일을 읽었는데 태스크 스펙과 무관한 내용(예: `assert 1 + 1 == 2`)만 있다면 즉시 `"테스트 파일이 태스크 스펙을 반영하지 않습니다"`라고 보고하고 종료하세요. 탐색을 반복하지 마세요.
 
+## 파일 읽기 지침
+
+`read_file`은 기본적으로 파일의 처음 150줄만 반환합니다. 출력 형식은 항상 다음과 같습니다:
+
+```
+=== {path} [lines {start}-{end} of {total}] ===
+{start}: <내용>
+{start+1}: <내용>
+...
+```
+
+- 파일이 150줄을 초과하면 맨 위에 `⚠️ File has N lines. Showing lines 1-150. Call read_file(path, start=..., end=...) for the rest.` 경고가 붙습니다. 나머지가 필요하면 `start`/`end`를 명시해 다시 호출하세요.
+- 전체를 한 번에 받으려 하지 말고 필요한 범위만 읽으세요. 검색 목적이면 `search_files` 또는 `list_directory`를 먼저 사용하세요.
+- 이미 본 범위를 다시 호출하지 마세요.
+- 줄 번호는 1-indexed이며 `edit_file`/`search_in_file`의 결과와 동일합니다.
+- 빈 파일은 `=== {path} [empty file] ===`로 표시됩니다.
+- 범위 오류(`start > total`, `start > end`)는 `success=False`로 반환됩니다.
+
 ## 행동 원칙
 
 1. **즉시 실행**: 계획을 세웠으면 바로 도구를 호출하세요. 선언만 하고 멈추지 마세요.

@@ -99,7 +99,8 @@ class TestCallTool:
         result = call_tool("read_file", path=str(f))
 
         assert result.success is True
-        assert result.output == "content"
+        assert "1: content" in result.output
+        assert f"=== {f} [lines 1-1 of 1] ===" in result.output
 
     def test_calls_write_file_successfully(self, tmp_path):
         path = str(tmp_path / "out.txt")

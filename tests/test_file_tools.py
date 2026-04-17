@@ -36,7 +36,9 @@ class TestReadFile:
         result = read_file(str(f))
 
         assert result.success is True
-        assert result.output == "hello world"
+        assert "1: hello world" in result.output
+        assert f"=== {f} [lines 1-1 of 1] ===" in result.output
+        assert "⚠️" not in result.output
         assert result.error is None
 
     def test_missing_file_returns_error(self, tmp_path):
@@ -53,7 +55,117 @@ class TestReadFile:
         result = read_file(str(f))
 
         assert result.success is True
-        assert result.output == ""
+        assert "[empty file]" in result.output
+
+
+# ── read_file 페이지네이션 ────────────────────────────────────────────────
+
+
+class TestReadFilePagination:
+    @pytest.fixture
+    def big_file(self, tmp_path):
+        """200줄 파일"""
+        f = tmp_path / "big.txt"
+        f.write_text("\n".join(f"line{i}" for i in range(1, 201)), encoding="utf-8")
+        return f
+
+    def test_default_truncates_large_file_with_warning(self, big_file):
+        result = read_file(str(big_file))
+
+        assert result.success is True
+        assert "⚠️ File has 200 lines" in result.output
+        assert "Showing lines 1-150" in result.output
+        assert f"=== {big_file} [lines 1-150 of 200] ===" in result.output
+        assert "150: line150" in result.output
+        assert "151: line151" not in result.output
+
+    def test_start_only_reads_max_lines(self, tmp_path):
+        f = tmp_path / "huge.txt"
+        f.write_text("\n".join(f"row{i}" for i in range(1, 501)), encoding="utf-8")
+
+        result = read_file(str(f), start=50)
+
+        assert result.success is True
+        assert f"=== {f} [lines 50-199 of 500] ===" in result.output
+        assert "50: row50" in result.output
+        assert "199: row199" in result.output
+        assert "200: row200" not in result.output
+        assert "49: row49" not in result.output
+
+    def test_full_range(self, big_file):
+        result = read_file(str(big_file), start=50, end=80)
+
+        assert result.success is True
+        assert f"=== {big_file} [lines 50-80 of 200] ===" in result.output
+        assert "50: line50" in result.output
+        assert "80: line80" in result.output
+        assert "49: line49" not in result.output
+        assert "81: line81" not in result.output
+
+    def test_end_only_no_warning(self, tmp_path):
+        f = tmp_path / "small.txt"
+        f.write_text("\n".join(f"a{i}" for i in range(1, 51)), encoding="utf-8")
+
+        result = read_file(str(f), end=10)
+
+        assert result.success is True
+        assert f"=== {f} [lines 1-10 of 50] ===" in result.output
+        assert "⚠️" not in result.output
+        assert "10: a10" in result.output
+        assert "11: a11" not in result.output
+
+    def test_start_exceeds_file_length_errors(self, tmp_path):
+        f = tmp_path / "tiny.txt"
+        f.write_text("\n".join(f"x{i}" for i in range(1, 11)), encoding="utf-8")
+
+        result = read_file(str(f), start=1000)
+
+        assert result.success is False
+        assert result.error == "start exceeds file length (10 lines)"
+
+    def test_start_greater_than_end_errors(self, big_file):
+        result = read_file(str(big_file), start=10, end=5)
+
+        assert result.success is False
+        assert result.error == "invalid range"
+
+    def test_end_clamped_to_total_with_warning(self, tmp_path):
+        f = tmp_path / "ten.txt"
+        f.write_text("\n".join(f"n{i}" for i in range(1, 11)), encoding="utf-8")
+
+        result = read_file(str(f), end=999)
+
+        assert result.success is True
+        assert "clamped to 10" in result.output
+        assert f"[lines 1-10 of 10]" in result.output
+        assert "10: n10" in result.output
+
+    def test_max_lines_zero_raises_value_error(self, tmp_path):
+        f = tmp_path / "x.txt"
+        f.write_text("hi", encoding="utf-8")
+
+        with pytest.raises(ValueError):
+            read_file(str(f), max_lines=0)
+
+    def test_file_exactly_at_max_lines_no_warning(self, tmp_path):
+        f = tmp_path / "exact.txt"
+        f.write_text("\n".join(f"k{i}" for i in range(1, 151)), encoding="utf-8")
+
+        result = read_file(str(f))
+
+        assert result.success is True
+        assert "⚠️" not in result.output
+        assert f"[lines 1-150 of 150]" in result.output
+
+    def test_line_numbers_are_1_indexed(self, tmp_path):
+        f = tmp_path / "one.txt"
+        f.write_text("only", encoding="utf-8")
+
+        result = read_file(str(f))
+
+        assert result.success is True
+        assert "1: only" in result.output
+        assert "0: only" not in result.output
 
 
 # ── read_file_lines ────────────────────────────────────────────────────────
@@ -320,13 +432,15 @@ class TestAppendToFile:
 class TestReadFileEdgeCases:
     def test_unicode_content(self, tmp_path):
         f = tmp_path / "kor.txt"
-        content = "안녕하세요\n반갑습니다\n"
+        content = "안녕하세요\n반갑습니다"
         f.write_text(content, encoding="utf-8")
 
         result = read_file(str(f))
 
         assert result.success is True
-        assert result.output == content
+        assert "1: 안녕하세요" in result.output
+        assert "2: 반갑습니다" in result.output
+        assert f"=== {f} [lines 1-2 of 2] ===" in result.output
 
     def test_binary_like_large_content(self, tmp_path):
         f = tmp_path / "big.txt"
@@ -336,7 +450,8 @@ class TestReadFileEdgeCases:
         result = read_file(str(f))
 
         assert result.success is True
-        assert len(result.output) == 10_000
+        assert "1: " + content in result.output
+        assert "[lines 1-1 of 1]" in result.output
 
 
 class TestReadFileLinesEdgeCases:

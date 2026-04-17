@@ -38,17 +38,67 @@ def _resolve_within_workspace(path: str) -> tuple[Path, Path]:
 # ── 읽기 ──────────────────────────────────────────
 
 
-def read_file(path: str, start: int | None = None, end: int | None = None) -> ToolResult:
-    """파일 내용 읽기. start/end(1-indexed 줄 번호)를 지정하면 해당 범위만 반환한다."""
+def read_file(
+    path: str,
+    start: int | None = None,
+    end: int | None = None,
+    max_lines: int = 150,
+) -> ToolResult:
+    """
+    파일을 줄 단위로 페이지네이션하여 읽는다 (1-indexed, end 포함).
+
+    - start, end 둘 다 지정 → 해당 범위
+    - start만 지정 → start부터 start + max_lines - 1 까지
+    - end만 지정 → 1부터 end 까지
+    - 둘 다 None → 1부터 max_lines 까지 (초과 시 경고 헤더)
+
+    출력은 항상 `=== {path} [lines s-e of total] ===` 헤더 뒤에 줄 번호 prefix된 본문.
+    """
+    if max_lines <= 0:
+        raise ValueError("max_lines must be > 0")
     try:
-        content = Path(path).read_text(encoding="utf-8")
-        if start is not None or end is not None:
-            lines = content.splitlines()
-            s = (start - 1) if start is not None else 0
-            e = end if end is not None else len(lines)
-            sliced = lines[s:e]
-            content = "\n".join(f"{i+s+1}: {line}" for i, line in enumerate(sliced))
-        return ToolResult(success=True, output=content)
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+        total = len(lines)
+
+        if total == 0:
+            return ToolResult(success=True, output=f"=== {path} [empty file] ===")
+
+        warnings: list[str] = []
+
+        if start is not None and end is not None:
+            s, e = start, end
+        elif start is not None:
+            s, e = start, start + max_lines - 1
+        elif end is not None:
+            s, e = 1, end
+        else:
+            s, e = 1, min(max_lines, total)
+            if total > max_lines:
+                warnings.append(
+                    f"⚠️ File has {total} lines. Showing lines 1-{max_lines}. "
+                    f"Call read_file(path, start=..., end=...) for the rest."
+                )
+
+        if s < 1:
+            return ToolResult(success=False, output="", error="start must be >= 1")
+        if s > total:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"start exceeds file length ({total} lines)",
+            )
+        if s > e:
+            return ToolResult(success=False, output="", error="invalid range")
+
+        if e > total:
+            warnings.append(f"⚠️ end={e} clamped to {total} (file end).")
+            e = total
+
+        sliced = lines[s - 1 : e]
+        numbered = "\n".join(f"{i + s}: {line}" for i, line in enumerate(sliced))
+        header = f"=== {path} [lines {s}-{e} of {total}] ==="
+        output = "\n".join(warnings + [header, numbered])
+        return ToolResult(success=True, output=output)
     except FileNotFoundError:
         return ToolResult(success=False, output="", error=f"파일 없음: {path}")
     except Exception as e:

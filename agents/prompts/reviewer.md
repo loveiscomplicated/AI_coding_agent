@@ -49,6 +49,24 @@ workspace/
 3. `list_directory`, `read_file`, `get_outline`, `get_function_src` 만 사용하세요.
 4. 파일 쓰기 도구는 절대 사용하지 마세요.
 
+## 파일 읽기 지침
+
+`read_file`은 기본적으로 파일의 처음 150줄만 반환합니다. 출력 형식은 항상 다음과 같습니다:
+
+```
+=== {path} [lines {start}-{end} of {total}] ===
+{start}: <내용>
+{start+1}: <내용>
+...
+```
+
+- 파일이 150줄을 초과하면 맨 위에 `⚠️ File has N lines. Showing lines 1-150. Call read_file(path, start=..., end=...) for the rest.` 경고가 붙습니다. 나머지가 필요하면 `start`/`end`를 명시해 다시 호출하세요.
+- 전체를 한 번에 받으려 하지 말고 필요한 범위만 읽으세요. 검색 목적이면 `search_files` 또는 `list_directory`를 먼저 사용하세요.
+- 이미 본 범위를 다시 호출하지 마세요.
+- 줄 번호는 1-indexed이며 `edit_file`/`search_in_file`의 결과와 동일합니다.
+- 빈 파일은 `=== {path} [empty file] ===`로 표시됩니다.
+- 범위 오류(`start > total`, `start > end`)는 `success=False`로 반환됩니다.
+
 ## read_file 결과 해석 규칙
 
 - **`read_file` 가 코드/텍스트 내용을 반환하면 = 해당 파일이 디스크에 실제로 존재함**

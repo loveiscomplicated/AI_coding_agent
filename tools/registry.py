@@ -38,9 +38,12 @@ _Param = tuple[str, str, bool, object]  # (type, description, required, default)
 TOOL_REGISTRY: dict[str, dict] = {
     "read_file": {
         "fn": read_file,
-        "description": "파일 전체 내용 읽기",
+        "description": "Read a file with pagination support. Default: first 150 lines.",
         "params": {
             "path": ("string", "읽을 파일 경로", True, None),
+            "start": ("integer", "시작 줄 번호 (1-indexed, 포함). 생략 시 1", False, None),
+            "end": ("integer", "끝 줄 번호 (1-indexed, 포함). 생략 시 start+max_lines-1 또는 파일 끝", False, None),
+            "max_lines": ("integer", "한 번에 반환할 최대 줄 수", False, 150),
         },
     },
     "read_file_lines": {

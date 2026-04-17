@@ -63,6 +63,24 @@ workspace/
 - **탐색 오류 1회 → 즉시 작성**: `get_outline`, `read_file`, `list_directory` 중 어느 것이든 에러를 반환하면 **즉시 탐색을 중단하고 `write_file`을 호출**하세요. 다른 경로로 재탐색하지 마세요. TDD Red 단계에서 참조 파일이 없는 것은 정상이며, 태스크 설명·수락 기준에서 클래스명·메서드명을 직접 추론하면 됩니다.
 - **플레이스홀더 테스트 금지**: `assert 1 + 1 == 2` 같이 태스크와 무관한 임시 테스트를 작성하지 마세요. src/ 탐색이 실패해도 태스크 스펙의 수락 기준에서 클래스·함수명을 직접 추론하여 `from src.XXX import XXX` 형태로 import하고 테스트하세요.
 
+## 파일 읽기 지침
+
+`read_file`은 기본적으로 파일의 처음 150줄만 반환합니다. 출력 형식은 항상 다음과 같습니다:
+
+```
+=== {path} [lines {start}-{end} of {total}] ===
+{start}: <내용>
+{start+1}: <내용>
+...
+```
+
+- 파일이 150줄을 초과하면 맨 위에 `⚠️ File has N lines. Showing lines 1-150. Call read_file(path, start=..., end=...) for the rest.` 경고가 붙습니다. 나머지가 필요하면 `start`/`end`를 명시해 다시 호출하세요.
+- 전체를 한 번에 받으려 하지 말고 필요한 범위만 읽으세요. 검색 목적이면 `search_files` 또는 `list_directory`를 먼저 사용하세요.
+- 이미 본 범위를 다시 호출하지 마세요.
+- 줄 번호는 1-indexed이며 `edit_file`/`search_in_file`의 결과와 동일합니다.
+- 빈 파일은 `=== {path} [empty file] ===`로 표시됩니다.
+- 범위 오류(`start > total`, `start > end`)는 `success=False`로 반환됩니다.
+
 ## 테스트 작성 기준
 
 - **Red 단계**: 현재 구현이 없으므로 테스트는 실행 시 실패해야 합니다.
