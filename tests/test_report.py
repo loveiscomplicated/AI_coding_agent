@@ -187,6 +187,31 @@ class TestBuildReport:
         report = build_report(task, result)
         assert "test_foo" in report.failure_reasons
 
+    def test_token_usage_includes_all_roles_from_models_used(self):
+        task = make_task()
+        result = _FakePipelineResult(succeeded=False, failure_reason="x")
+        result.models_used = {
+            "test_writer": "model/a",
+            "implementer": "model/b",
+            "reviewer": "model/c",
+            "intervention": "model/d",
+        }
+        result.metrics.token_usage = {
+            "test_writer": (100, 10, 0, 0),
+            "intervention": (20, 5, 0, 0),
+        }
+
+        report = build_report(task, result)
+        assert report.token_usage is not None
+        assert report.token_usage["test_writer"]["input"] == 100
+        assert report.token_usage["intervention"]["output"] == 5
+        assert report.token_usage["implementer"] == {
+            "input": 0, "output": 0, "cached_read": 0, "cached_write": 0,
+        }
+        assert report.token_usage["reviewer"] == {
+            "input": 0, "output": 0, "cached_read": 0, "cached_write": 0,
+        }
+
 
 # ── save_report / load_report ─────────────────────────────────────────────────
 

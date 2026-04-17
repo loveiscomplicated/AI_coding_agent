@@ -22,7 +22,15 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from backend.config import LLM_PROVIDER, LLM_MODEL_CAPABLE, LLM_MODEL_FAST, ANTHROPIC_API_KEY, OPENAI_API_KEY, ZAI_API_KEY
+from backend.config import (
+    LLM_PROVIDER,
+    LLM_MODEL_CAPABLE,
+    LLM_MODEL_FAST,
+    ANTHROPIC_API_KEY,
+    OPENAI_API_KEY,
+    ZAI_API_KEY,
+    GEMINI_API_KEY,
+)
 from llm import LLMConfig, Message, create_client
 
 router = APIRouter()
@@ -36,12 +44,24 @@ _KNOWN_MODELS: dict[str, list[dict[str, str]]] = {
         {"id": "claude-opus-4-6", "name": "Opus 4.6"},
     ],
     "openai": [
+        {"id": "gpt-5", "name": "GPT-5"},
+        {"id": "gpt-5-mini", "name": "GPT-5 Mini"},
+        {"id": "gpt-5-nano", "name": "GPT-5 Nano"},
         {"id": "gpt-4.1", "name": "GPT-4.1"},
         {"id": "gpt-4.1-mini", "name": "GPT-4.1 Mini"},
-        {"id": "gpt-4o-mini", "name": "GPT-4o Mini"},
+        {"id": "gpt-4.1-nano", "name": "GPT-4.1 Nano"},
         {"id": "gpt-4o", "name": "GPT-4o"},
-        {"id": "o3-mini", "name": "o3 Mini"},
+        {"id": "gpt-4o-mini", "name": "GPT-4o Mini"},
+        {"id": "o4-mini", "name": "o4 Mini"},
         {"id": "o3", "name": "o3"},
+        {"id": "o3-mini", "name": "o3 Mini"},
+        {"id": "o1", "name": "o1"},
+    ],
+    "gemini": [
+        {"id": "gemini-3-pro-preview", "name": "Gemini 3 Pro"},
+        {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
+        {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash"},
+        {"id": "gemini-2.5-flash-lite", "name": "Gemini 2.5 Flash Lite"},
     ],
 }
 
@@ -50,13 +70,17 @@ def _fetch_glm_models(api_key: str) -> list[dict[str, str]]:
     """Zai API에서 사용 가능한 GLM 모델 목록을 조회한다."""
     try:
         import urllib.request as _req
+
         req = _req.Request(
             "https://api.z.ai/api/paas/v4/models",
             headers={"Authorization": f"Bearer {api_key}"},
         )
         with _req.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
-        return [{"id": m["id"], "name": m["id"], "provider": "glm"} for m in data.get("data", [])]
+        return [
+            {"id": m["id"], "name": m["id"], "provider": "glm"}
+            for m in data.get("data", [])
+        ]
     except Exception:
         return []
 
@@ -94,6 +118,11 @@ async def list_models() -> dict[str, Any]:
         glm_models = await asyncio.to_thread(_fetch_glm_models, ZAI_API_KEY)
         result.extend(glm_models)
 
+    # Gemini — API 키가 있거나 현재 provider인 경우
+    if GEMINI_API_KEY or LLM_PROVIDER == "gemini":
+        for m in _KNOWN_MODELS["gemini"]:
+            result.append({**m, "provider": "gemini"})
+
     # Ollama — 로컬 서버 응답 시 포함 (키 불필요)
     host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
     result.extend(await asyncio.to_thread(_fetch_ollama_models, host))
@@ -107,12 +136,13 @@ async def list_models() -> dict[str, Any]:
 
 # ── 요청 모델 ─────────────────────────────────────────────────────────────────
 
+
 class ChatRequest(BaseModel):
     max_tokens: int
     messages: list[dict[str, Any]]
     system: str | None = None
-    model: str | None = None      # None이면 백엔드 기본 모델 사용
-    provider: str | None = None   # None이면 LLM_PROVIDER 환경변수 사용
+    model: str | None = None  # None이면 백엔드 기본 모델 사용
+    provider: str | None = None  # None이면 LLM_PROVIDER 환경변수 사용
     use_fast_model: bool = False  # True면 LLM_MODEL_FAST 사용
 
 
@@ -134,6 +164,7 @@ def _to_messages(raw: list[dict[str, Any]]) -> list[Message]:
 
 
 # ── 스트리밍 엔드포인트 ───────────────────────────────────────────────────────
+
 
 @router.post("/stream")
 async def chat_stream(req: ChatRequest):
@@ -158,7 +189,11 @@ async def chat_stream(req: ChatRequest):
             try:
                 client = create_client(
                     provider,
-                    LLMConfig(model=model, system_prompt=system_prompt, max_tokens=req.max_tokens),
+                    LLMConfig(
+                        model=model,
+                        system_prompt=system_prompt,
+                        max_tokens=req.max_tokens,
+                    ),
                 )
                 for chunk in client.stream(messages):
                     loop.call_soon_threadsafe(queue.put_nowait, chunk)
@@ -187,6 +222,7 @@ async def chat_stream(req: ChatRequest):
 
 
 # ── 논스트리밍 엔드포인트 ─────────────────────────────────────────────────────
+
 
 @router.post("/complete")
 async def chat_complete(req: ChatRequest):

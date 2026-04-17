@@ -699,6 +699,7 @@ class ReactLoop:
         schema_dict = {
             "OpenaiClient": TOOLS_SCHEMA_OPENAI,
             "GlmClient": TOOLS_SCHEMA_OPENAI,
+            "GeminiClient": TOOLS_SCHEMA_OPENAI,
             "ClaudeClient": TOOLS_SCHEMA_ANTHROPIC,
             "OllamaClient": TOOLS_SCHEMA_OLLAMA,
         }

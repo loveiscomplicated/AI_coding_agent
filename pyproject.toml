@@ -23,6 +23,7 @@ dependencies = [
     "tree-sitter-rust>=0.23.0",
     "tree-sitter-go>=0.23.0",
     "tree-sitter-java>=0.23.0",
+    "google-genai>=1.73.1",
 ]
 
 [project.scripts]

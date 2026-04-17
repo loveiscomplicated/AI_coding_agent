@@ -119,7 +119,8 @@ def build_report(
     _total_cached_read = 0
     _total_cached_write = 0
     _token_usage: dict[str, dict[str, int]] = {}
-    for _role, _t in m.token_usage.items():
+    for _role in set(m.token_usage.keys()) | set(_mu.keys()):
+        _t = m.token_usage.get(_role, (0, 0, 0, 0))
         if isinstance(_t, (tuple, list)):
             _inp = _t[0] if len(_t) > 0 else 0
             _out = _t[1] if len(_t) > 1 else 0

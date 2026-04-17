@@ -68,7 +68,7 @@ def _rate_limit_delay(attempt: int, e: RateLimitError) -> float:
     suggested = _parse_retry_after(e)
     if suggested is not None:
         return suggested
-    base = _BASE_DELAY * (2 ** attempt)
+    base = _BASE_DELAY * (2**attempt)
     return base + random.uniform(0.0, base * 0.2)
 
 
@@ -185,7 +185,10 @@ class OpenaiClient(BaseLLMClient):
                         raise
                     logger.warning(
                         "OpenAI RateLimitError (시도 %d/%d) — %.2f초 후 재시도: %s",
-                        attempt + 1, _MAX_RETRIES, delay, e,
+                        attempt + 1,
+                        _MAX_RETRIES,
+                        delay,
+                        e,
                     )
                     time.sleep(delay)
                 except BadRequestError as e:
@@ -222,7 +225,11 @@ class OpenaiClient(BaseLLMClient):
             )
 
         _cached_read = 0
-        if usage and hasattr(usage, "prompt_tokens_details") and usage.prompt_tokens_details:
+        if (
+            usage
+            and hasattr(usage, "prompt_tokens_details")
+            and usage.prompt_tokens_details
+        ):
             _cached_read = getattr(usage.prompt_tokens_details, "cached_tokens", 0) or 0
 
         return LLMResponse(
@@ -270,7 +277,10 @@ class OpenaiClient(BaseLLMClient):
                         raise
                     logger.warning(
                         "OpenAI RateLimitError/stream (시도 %d/%d) — %.2f초 후 재시도: %s",
-                        attempt + 1, _MAX_RETRIES, delay, e,
+                        attempt + 1,
+                        _MAX_RETRIES,
+                        delay,
+                        e,
                     )
                     time.sleep(delay)
                 except BadRequestError as e:

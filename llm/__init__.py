@@ -15,6 +15,7 @@ LLM 클라이언트 팩토리.
 
 from .base import BaseLLMClient, LLMConfig, LLMResponse, Message
 from .claude_client import ClaudeClient
+from .gemini_client import GeminiClient
 from .glm_client import GlmClient
 from .openai_client import OpenaiClient
 
@@ -24,6 +25,7 @@ _PROVIDERS: dict[str, str] = {
     "openai": "OpenaiClient",
     "claude": "ClaudeClient",
     "glm": "GlmClient",
+    "gemini": "GeminiClient",
     # "lmstudio": "LMStudioClient",
 }
 
@@ -57,6 +59,8 @@ def create_client(provider: str, config: LLMConfig, **kwargs) -> BaseLLMClient:
         client_class = ClaudeClient
     elif provider == "glm":
         client_class = GlmClient
+    elif provider == "gemini":
+        client_class = GeminiClient
     else:
         # if provider not in _PROVIDERS
         supported = ", ".join(_PROVIDERS.keys())
@@ -90,6 +94,7 @@ __all__ = [
     "OpenaiClient",
     "ClaudeClient",
     "GlmClient",
+    "GeminiClient",
     "create_client",
     "list_providers",
 ]

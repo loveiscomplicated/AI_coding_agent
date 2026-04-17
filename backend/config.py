@@ -19,6 +19,7 @@ LLM_MODEL_CAPABLE: str = os.environ.get("LLM_MODEL_CAPABLE", "claude-opus-4-6")
 ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
 ZAI_API_KEY: str = os.environ.get("ZAI_API_KEY", "")
+GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
 
 # provider별 API 키 필수 확인
 if LLM_PROVIDER == "claude" and not ANTHROPIC_API_KEY:
@@ -36,6 +37,11 @@ if LLM_PROVIDER == "glm" and not ZAI_API_KEY:
     raise RuntimeError(
         "ZAI_API_KEY 환경 변수가 설정되지 않았습니다.\n"
         "프로젝트 루트의 .env 파일에 ZAI_API_KEY=... 를 추가하세요."
+    )
+if LLM_PROVIDER == "gemini" and not GEMINI_API_KEY:
+    raise RuntimeError(
+        "GEMINI_API_KEY 환경 변수가 설정되지 않았습니다.\n"
+        "프로젝트 루트의 .env 파일에 GEMINI_API_KEY=... 를 추가하세요."
     )
 
 # Discord 핫라인 (Step 5). 미설정 시 Discord 기능 비활성화.
