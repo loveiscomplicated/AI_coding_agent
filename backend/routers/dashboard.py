@@ -22,7 +22,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from orchestrator.milestone import load_milestone_reports
-from orchestrator.report import load_reports
+from orchestrator.report import _model_rate, load_reports
 from orchestrator.task import load_tasks
 from project_paths import resolve_reports_dir, resolve_tasks_path
 
@@ -63,7 +63,24 @@ def get_dashboard_summary(
     first_try = sum(1 for r in reports if r.test_pass_first_try)
     first_try_rate = round(first_try / completed * 100) if completed else 0
     total_tokens = sum(r.total_tokens for r in reports)
-    total_cost_usd = round(sum(r.cost_usd for r in reports), 4)
+    # total_cost_usd 는 이미 cost_usd is None 인 항목을 제외한 합계다.
+    # 아래 플래그는 "이 합계에서 제외된 리포트가 있는가" 만 나타낸다.
+    total_cost_usd = round(
+        sum(r.cost_usd for r in reports if r.cost_usd is not None), 4
+    )
+    has_missing_costs = any(r.cost_usd is None for r in reports)
+
+    # 비용 추정 품질 집계 + 단가 미등록 모델 수집
+    quality_breakdown: dict[str, int] = {"exact": 0, "fallback": 0, "missing": 0}
+    missing_models_set: set[str] = set()
+    for r in reports:
+        q = r.cost_estimation_quality or "missing"
+        quality_breakdown[q] = quality_breakdown.get(q, 0) + 1
+        if r.models_used:
+            for model in r.models_used.values():
+                if model and _model_rate(model) is None:
+                    missing_models_set.add(model)
+    models_with_missing_pricing = sorted(missing_models_set)
 
     milestone_count = len(load_milestone_reports(milestones_dir=milestones_dir))
 
@@ -81,7 +98,10 @@ def get_dashboard_summary(
             "first_try_rate": first_try_rate,
             "total_tokens": total_tokens,
             "total_cost_usd": total_cost_usd,
+            "has_missing_costs": has_missing_costs,
         },
+        "cost_estimation_quality_breakdown": quality_breakdown,
+        "models_with_missing_pricing": models_with_missing_pricing,
         "milestone_count": milestone_count,
     }
 

@@ -26,6 +26,8 @@ interface Summary {
     total_tokens: number
     total_cost_usd: number
   }
+  cost_estimation_quality_breakdown?: { exact: number; fallback: number; missing: number }
+  models_with_missing_pricing?: string[]
   milestone_count: number
 }
 
@@ -45,7 +47,7 @@ interface DashboardTask {
     time_elapsed_seconds: number
     completed_at: string
     total_tokens: number
-    cost_usd: number
+    cost_usd: number | null
   } | null
 }
 
@@ -987,6 +989,17 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
             <div className="text-red-500 text-sm">{error}</div>
           ) : (
             <>
+              {/* 단가 미등록 배너 */}
+              {summary?.models_with_missing_pricing && summary.models_with_missing_pricing.length > 0 && (
+                <div className="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/30 px-4 py-3 text-xs text-amber-800 dark:text-amber-200 flex flex-wrap items-start gap-x-2 gap-y-1 min-w-0">
+                  <span className="font-semibold shrink-0">일부 모델 단가 미등록</span>
+                  <span className="opacity-80 min-w-0 break-words">
+                    다음 모델의 단가가 등록되어 있지 않아 비용 집계에서 제외되었습니다:{' '}
+                    <code className="font-mono break-all">{summary.models_with_missing_pricing.join(', ')}</code>
+                  </span>
+                </div>
+              )}
+
               {/* 메트릭 카드 */}
               {m && (
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -1104,7 +1117,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
                                 {task.report.time_elapsed_seconds}s
                               </span>
                             )}
-                            {task.report && task.report.cost_usd > 0 && (
+                            {task.report && task.report.cost_usd != null && task.report.cost_usd > 0 && (
                               <span className="text-xs text-emerald-600 dark:text-emerald-400 font-mono">
                                 ${task.report.cost_usd.toFixed(4)}
                               </span>
