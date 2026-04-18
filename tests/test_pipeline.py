@@ -105,13 +105,13 @@ class TestParseReview:
         assert r.verdict == "CHANGES_REQUESTED"
         assert r.approved is False
 
-    def test_missing_verdict_yields_error(self):
-        # VERDICT / APPROVED / CHANGES_REQUESTED 키워드가 전혀 없으면
-        # Reviewer 인프라 장애로 판정 (이전에는 CHANGES_REQUESTED 로 퇴했으나
-        # LLM 실패와 코드 반려를 혼동하는 문제가 있어 ERROR 로 분리).
+    def test_missing_verdict_falls_back_to_changes_requested(self):
+        # VERDICT / APPROVED / CHANGES_REQUESTED 키워드가 전혀 없고
+        # 인프라 장애(empty/LLM_ERROR sentinel)도 아닌 경우는 CHANGES_REQUESTED 로
+        # fallback 한다. ERROR 는 진짜 인프라 장애(빈 응답, LLM 호출 실패)에만 쓴다.
         r = _parse_review("아무 형식도 없는 텍스트")
-        assert r.verdict == "ERROR"
-        assert r.is_error is True
+        assert r.verdict == "CHANGES_REQUESTED"
+        assert r.is_error is False
         assert r.approved is False
 
     def test_empty_output_yields_error(self):
@@ -430,3 +430,140 @@ class TestPipelineResult:
         assert task.failure_reason == "원인"
         assert result.succeeded is False
         assert result.failure_reason == "원인"
+
+
+# ── APPROVED_WITH_SUGGESTIONS ────────────────────────────────────────────────
+#
+# task-008 재현 시나리오: reviewer 가 기능 충족은 인정하면서 스타일 제안만 남긴 경우,
+# 기존에는 CHANGES_REQUESTED 로 퇴했다. 이제는 APPROVED_WITH_SUGGESTIONS 로
+# 판정되어 PR 이 생성되고 status=COMPLETED 로 끝나야 한다.
+
+
+_APPROVED_WITH_SUGGESTIONS_RAW = (
+    "VERDICT: APPROVED_WITH_SUGGESTIONS\n"
+    "SUMMARY: 기능 충족, 스타일 제안 있음\n"
+    "DETAILS:\n"
+    "## 승인 이유\n"
+    "- 4 passed\n"
+    "- acceptance_criteria 모두 검증됨\n\n"
+    "## 개선 제안 (non-blocking)\n"
+    "1. `src/auth.py:10`: try/except 대신 명시적 import 권장"
+)
+
+
+class TestParseReviewApprovedWithSuggestions:
+    def test_parses_approved_with_suggestions(self):
+        r = _parse_review(_APPROVED_WITH_SUGGESTIONS_RAW)
+        assert r.verdict == "APPROVED_WITH_SUGGESTIONS"
+        assert r.approved is True
+        assert r.has_suggestions is True
+        assert r.is_error is False
+        assert "개선 제안" in r.details
+
+    def test_keyword_fallback_recognizes_approved_with_suggestions(self):
+        r = _parse_review("리뷰 결론: APPROVED_WITH_SUGGESTIONS — 스타일 개선 몇 가지")
+        assert r.verdict == "APPROVED_WITH_SUGGESTIONS"
+        assert r.has_suggestions is True
+
+    def test_unknown_verdict_falls_back_to_changes_requested(self):
+        # 기존 파서는 unknown verdict 를 ERROR 로 처리했다. 새 규약에서는
+        # ERROR 는 빈 응답 / LLM_ERROR sentinel 에만 쓰고, 파싱 불가는 모두
+        # CHANGES_REQUESTED 로 fallback.
+        r = _parse_review("VERDICT: MAYBE\nSUMMARY: 모르겠음\nDETAILS:\n애매함")
+        assert r.verdict == "CHANGES_REQUESTED"
+        assert r.is_error is False
+
+
+class TestTDDPipelineApprovedWithSuggestions:
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_approved_with_suggestions_produces_pr(self, MockLoop, task, workspace):
+        """APPROVED_WITH_SUGGESTIONS → 파이프라인은 COMMITTING 단계로 전환.
+        (PR 실제 생성은 호출자 레이어지만, 여기서는 succeeded=True + review 객체
+        approved=True 인지로 'PR 이 생성될 것' 을 검증한다.)"""
+        MockLoop.return_value.run.return_value = _ok_scoped(_APPROVED_WITH_SUGGESTIONS_RAW)
+        mock_runner = MagicMock()
+        mock_runner.run.return_value = _pass_run()
+
+        pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+        result = pipeline.run(task, workspace)
+
+        assert result.succeeded is True
+        assert result.review is not None
+        assert result.review.verdict == "APPROVED_WITH_SUGGESTIONS"
+        assert result.review.approved is True  # PR 생성 분기 기준
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_approved_with_suggestions_sets_status_completed(
+        self, MockLoop, task, workspace
+    ):
+        """task status 가 COMMITTING (→ 호출자가 COMPLETED 로 확정) 이 되어야 한다."""
+        MockLoop.return_value.run.return_value = _ok_scoped(_APPROVED_WITH_SUGGESTIONS_RAW)
+        mock_runner = MagicMock()
+        mock_runner.run.return_value = _pass_run()
+
+        pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+        pipeline.run(task, workspace)
+
+        assert task.status == TaskStatus.COMMITTING
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_approved_with_suggestions_preserves_feedback_in_pr_body(
+        self, MockLoop, task, workspace
+    ):
+        """APPROVED_WITH_SUGGESTIONS 의 피드백이 _build_pr_body 결과에 'Reviewer Suggestions' 섹션으로 포함되어야 한다."""
+        from orchestrator.git_workflow import _build_pr_body
+
+        MockLoop.return_value.run.return_value = _ok_scoped(_APPROVED_WITH_SUGGESTIONS_RAW)
+        mock_runner = MagicMock()
+        mock_runner.run.return_value = _pass_run()
+
+        pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+        result = pipeline.run(task, workspace)
+
+        body = _build_pr_body(task, result)
+        assert "Reviewer Suggestions (non-blocking)" in body
+        assert "acceptance_criteria를 모두 충족" in body
+        # 원본 피드백 내용이 유지되는지 확인
+        assert "명시적 import 권장" in body
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_plain_approved_has_no_suggestions_section(
+        self, MockLoop, task, workspace
+    ):
+        """단순 APPROVED 는 suggestions 섹션이 없어야 한다 (기존 동작 보존)."""
+        from orchestrator.git_workflow import _build_pr_body
+
+        MockLoop.return_value.run.return_value = _ok_scoped(
+            "VERDICT: APPROVED\nSUMMARY: ok\nDETAILS:\nfine"
+        )
+        mock_runner = MagicMock()
+        mock_runner.run.return_value = _pass_run()
+
+        pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+        result = pipeline.run(task, workspace)
+
+        body = _build_pr_body(task, result)
+        assert "Reviewer Suggestions (non-blocking)" not in body
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_changes_requested_still_triggers_retry(self, MockLoop, task, workspace):
+        """CHANGES_REQUESTED 는 여전히 재구현 루프를 유발해야 한다 (기존 동작 보존).
+        max_review_retries + 1 = 2 번의 리뷰, 각 리뷰마다 Implementer 가 호출된다."""
+        MockLoop.return_value.run.return_value = _ok_scoped(
+            "VERDICT: CHANGES_REQUESTED\nSUMMARY: 결함 있음\nDETAILS:\n기능 미충족"
+        )
+        mock_runner = MagicMock()
+        mock_runner.run.return_value = _pass_run()
+
+        pipeline = TDDPipeline(
+            agent_llm=MagicMock(), test_runner=mock_runner,
+            max_retries=1, max_review_retries=1,
+        )
+        result = pipeline.run(task, workspace)
+
+        assert result.succeeded is False
+        assert result.review is not None
+        assert result.review.verdict == "CHANGES_REQUESTED"
+        # Reviewer 가 최소 2회 호출됐어야 한다 (초회 + 재시도 1회)
+        call_args = [c for c in MockLoop.call_args_list]
+        assert len(call_args) >= 3  # TestWriter + Implementer*N + Reviewer*2
