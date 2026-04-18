@@ -1377,15 +1377,17 @@ def _parse_review(raw: str) -> ReviewResult:
         DETAILS:
         ...
 
-    파싱 규칙:
-        - 유효한 verdict 는 VALID_VERDICTS 집합 참조
-          (APPROVED / APPROVED_WITH_SUGGESTIONS / CHANGES_REQUESTED / ERROR).
+    파싱 규칙 (strict — 본문/예시 텍스트가 control flow를 바꾸지 못하도록):
+        - `VERDICT:` 라인은 **첫 번째 매칭만** 채택한다. 이후 VERDICT 라인은
+          details 로 흘려 보내 quote/예시 안의 "VERDICT: ..." 가 verdict 를
+          덮어쓸 수 없게 한다. 동일 원칙이 `SUMMARY:` 에도 적용된다.
+        - 자유서술 텍스트의 키워드("...APPROVED..." 같은) 로는 verdict 를 추론하지
+          않는다. VERDICT 라인이 없으면 CHANGES_REQUESTED 로 fallback 한다.
         - 빈 출력이나 LLM_ERROR sentinel 은 즉시 `verdict="ERROR"` 로 분류한다
           (인프라 장애와 코드 반려를 분리).
-        - 그 외 알 수 없는 verdict (예: `VERDICT: MAYBE`) 나 VERDICT 라인 자체가
-          없는 경우는 `CHANGES_REQUESTED` 로 fallback 한다. ERROR 로 퇴하지 않는
-          이유: 파서 혼란을 LLM 인프라 장애로 오인해 Implementer 재실행을 건너뛰면
-          안 되기 때문.
+        - 알 수 없는 verdict (예: `VERDICT: MAYBE`) 도 CHANGES_REQUESTED 로
+          fallback 한다. ERROR 로 퇴하지 않는 이유: 파서 혼란을 LLM 인프라
+          장애로 오인해 Implementer 재실행을 건너뛰면 안 되기 때문.
     """
     verdict = ""
     summary = ""
@@ -1408,8 +1410,10 @@ def _parse_review(raw: str) -> ReviewResult:
         stripped = line.strip()
         # 마크다운 볼드(**VERDICT**: ...) 또는 헤더(## VERDICT: ...) 제거 후 파싱
         normalized = re.sub(r"^\*{1,3}|^#{1,6}\s*|\*{1,3}(?=:)", "", stripped).strip()
+        upper = normalized.upper()
 
-        if normalized.upper().startswith("VERDICT:"):
+        # VERDICT 는 첫 매칭만 채택. 이후 VERDICT 라인은 details (또는 스킵) 처리.
+        if not verdict and upper.startswith("VERDICT:"):
             value = normalized.split(":", 1)[1].strip().upper()
             if value in VALID_VERDICTS:
                 verdict = value
@@ -1418,39 +1422,34 @@ def _parse_review(raw: str) -> ReviewResult:
                     "Unknown verdict %r, fallback to CHANGES_REQUESTED", value
                 )
                 verdict = "CHANGES_REQUESTED"
+            continue
 
-        elif normalized.upper().startswith("SUMMARY:"):
+        # SUMMARY 도 첫 매칭만. in_details=True 이후 나오는 "SUMMARY:" 는 details 일부.
+        if not summary and not in_details and upper.startswith("SUMMARY:"):
             summary = normalized.split(":", 1)[1].strip()
+            continue
 
-        elif normalized.upper().startswith("DETAILS:"):
+        if not in_details and upper.startswith("DETAILS:"):
             in_details = True
-            # DETAILS: 와 같은 줄에 내용이 있을 수도 있음
             inline = normalized.split(":", 1)[1].strip()
             if inline:
                 details_lines.append(inline)
+            continue
 
-        elif in_details:
+        if in_details:
             details_lines.append(line)
 
-    # 명시적 VERDICT 를 못 찾으면 텍스트에서 키워드로 추론
+    # VERDICT 라인을 못 찾았다 = 형식 미준수 → CHANGES_REQUESTED fallback
+    # (키워드 추론은 하지 않는다 — quote/예시 텍스트가 승인으로 흐르는 것을 막는다)
     if not verdict:
-        upper = raw.upper()
-        if "APPROVED_WITH_SUGGESTIONS" in upper:
-            verdict = "APPROVED_WITH_SUGGESTIONS"
-        elif "APPROVED" in upper and "CHANGES_REQUESTED" not in upper:
-            verdict = "APPROVED"
-        elif "CHANGES_REQUESTED" in upper:
-            verdict = "CHANGES_REQUESTED"
-        else:
-            logger.warning(
-                "Reviewer 출력에서 VERDICT 를 찾지 못했습니다 — "
-                "CHANGES_REQUESTED 로 fallback 처리"
-            )
-            verdict = "CHANGES_REQUESTED"
-            if not summary:
-                summary = "Reviewer 응답에서 VERDICT 를 찾을 수 없음"
-            if not details_lines:
-                details_lines = [stripped_raw[:500]]
+        logger.warning(
+            "Reviewer 출력에 VERDICT 라인이 없음 — CHANGES_REQUESTED fallback"
+        )
+        verdict = "CHANGES_REQUESTED"
+        if not summary:
+            summary = "Reviewer 응답에 VERDICT 라인이 없음"
+        if not details_lines:
+            details_lines = [stripped_raw[:500]]
 
     return ReviewResult(
         verdict=verdict,
