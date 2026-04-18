@@ -304,3 +304,71 @@ class TestBuildPRBody:
         assert "테스트 결과" in body
         assert "코드 리뷰" in body
         assert "AI Coding Agent Pipeline" in body
+
+    def test_unclosed_code_fence_in_details_is_balanced(self, task):
+        """reviewer details 에 닫히지 않은 ``` 가 들어와도 footer 가
+        code block 으로 먹히지 않도록 balancer 가 닫아야 한다."""
+        run_result = RunResult(passed=True, returncode=0, stdout="",
+                               summary="1 passed")
+        review = ReviewResult(
+            verdict="CHANGES_REQUESTED",
+            summary="미닫힘 코드펜스 주입",
+            details="다음 코드가 문제:\n```python\ndef bad():\n    pass",
+            raw="",
+        )
+        result = PipelineResult(
+            task=task, succeeded=False, test_result=run_result,
+            review=review, test_files=[], impl_files=[],
+        )
+        body = _build_pr_body(task, result)
+        assert body.count("```") % 2 == 0, (
+            "triple-backtick 개수가 홀수 — 미닫힘 코드펜스가 뒤 섹션을 오염시킨다"
+        )
+        # footer 가 살아있어야 한다
+        assert "AI Coding Agent Pipeline" in body
+
+    def test_approved_with_suggestions_does_not_duplicate_details(self, task):
+        """APPROVED_WITH_SUGGESTIONS 에서 details 는 'Reviewer Suggestions'
+        섹션에만 포함돼야 하고, '## 코드 리뷰' 섹션은 verdict+summary 요약만
+        유지한다."""
+        run_result = RunResult(passed=True, returncode=0, stdout="",
+                               summary="4 passed")
+        unique_marker = "UNIQUE_SUGGESTION_MARKER_XYZ123"
+        review = ReviewResult(
+            verdict="APPROVED_WITH_SUGGESTIONS",
+            summary="기능 충족, 제안 있음",
+            details=f"## 개선 제안\n- {unique_marker}: 이름 변경 고려",
+            raw="",
+        )
+        result = PipelineResult(
+            task=task, succeeded=True, test_result=run_result,
+            review=review, test_files=[], impl_files=[],
+        )
+        body = _build_pr_body(task, result)
+        # 피드백은 정확히 한 번만 등장해야 한다
+        assert body.count(unique_marker) == 1, (
+            f"중복 포함됨 — body.count('{unique_marker}') = {body.count(unique_marker)}"
+        )
+        assert "Reviewer Suggestions (non-blocking)" in body
+        # 코드 리뷰 섹션에는 verdict+summary 만
+        assert "APPROVED_WITH_SUGGESTIONS" in body
+        assert "기능 충족, 제안 있음" in body
+
+    def test_plain_approved_without_suggestions_section(self, task):
+        """단순 APPROVED 는 'Reviewer Suggestions' 섹션을 만들지 않는다."""
+        run_result = RunResult(passed=True, returncode=0, stdout="",
+                               summary="4 passed")
+        review = ReviewResult(
+            verdict="APPROVED",
+            summary="잘 됨",
+            details="상세 리뷰 내용",
+            raw="",
+        )
+        result = PipelineResult(
+            task=task, succeeded=True, test_result=run_result,
+            review=review, test_files=[], impl_files=[],
+        )
+        body = _build_pr_body(task, result)
+        assert "Reviewer Suggestions (non-blocking)" not in body
+        # APPROVED 의 경우 details 는 여전히 코드 리뷰 섹션에 표시
+        assert "상세 리뷰 내용" in body

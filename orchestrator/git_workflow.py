@@ -33,8 +33,6 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from textwrap import dedent
-
 from orchestrator.pipeline import PipelineResult
 from orchestrator.task import Task
 from orchestrator.workspace import WorkspaceManager
@@ -329,6 +327,18 @@ def check_prerequisites(repo_path: str | Path) -> list[str]:
 # ── PR body 빌더 ──────────────────────────────────────────────────────────────
 
 
+def _balance_code_fences(body: str) -> str:
+    """reviewer 피드백에 미닫힘 코드펜스가 있으면 닫아서 뒤 섹션 오염을 막는다.
+
+    GitHub / GitLab PR body 는 CommonMark 로 렌더링되므로, details 안의 열린
+    ```` ``` ```` 하나가 footer 까지 전부 code block 안으로 먹힌다. 단순히 triple
+    backtick 개수가 홀수면 마지막에 ```` ``` ````를 덧붙여 blank-line 후 닫는다.
+    """
+    if body.count("```") % 2 == 1:
+        return body.rstrip() + "\n```\n"
+    return body
+
+
 def _build_pr_body(task: Task, result: PipelineResult) -> str:
     review_section = ""
     suggestions_section = ""
@@ -339,24 +349,26 @@ def _build_pr_body(task: Task, result: PipelineResult) -> str:
             verdict_icon = "✅"
         else:
             verdict_icon = "⚠️"
-        review_section = dedent(f"""
-            ## 코드 리뷰
 
-            {verdict_icon} **{result.review.verdict}** — {result.review.summary}
-
-            {result.review.details}
-        """).strip()
+        # APPROVED_WITH_SUGGESTIONS: details 는 아래 'Reviewer Suggestions' 섹션에만
+        # 담고 '코드 리뷰' 섹션은 verdict + summary 요약으로 유지해 중복을 제거한다.
+        # APPROVED / CHANGES_REQUESTED / ERROR: 기존처럼 details 포함.
+        review_body = (
+            f"{verdict_icon} **{result.review.verdict}** — {result.review.summary}"
+        )
+        if not result.review.has_suggestions and result.review.details:
+            review_body += "\n\n" + _balance_code_fences(result.review.details)
+        review_section = f"## 코드 리뷰\n\n{review_body}"
 
         if result.review.has_suggestions:
-            suggestions_body = result.review.details or result.review.summary or "(피드백 없음)"
-            suggestions_section = dedent(f"""
-                ## Reviewer Suggestions (non-blocking)
-
-                이 PR은 기능과 acceptance_criteria를 모두 충족했습니다. 아래 제안은
-                참고용이며 반영 여부는 사람이 판단합니다.
-
-                {suggestions_body}
-            """).strip()
+            raw_body = result.review.details or result.review.summary or "(피드백 없음)"
+            suggestions_body = _balance_code_fences(raw_body)
+            suggestions_section = (
+                "## Reviewer Suggestions (non-blocking)\n\n"
+                "이 PR은 기능과 acceptance_criteria를 모두 충족했습니다. 아래 제안은\n"
+                "참고용이며 반영 여부는 사람이 판단합니다.\n\n"
+                f"{suggestions_body}"
+            )
 
     test_section = ""
     if result.test_result:
