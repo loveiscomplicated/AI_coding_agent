@@ -40,7 +40,7 @@ def _from_flat_dict(data: dict[str, Any]) -> TaskReport:
         completed_at=data.get("completed_at"),
         retry_count=data.get("retry_count", 0),
         total_tokens=data.get("total_tokens", 0),
-        cost_usd=data.get("cost_usd", 0.0),
+        cost_usd=data.get("cost_usd"),
         test_count=data.get("test_count", 0),
         test_pass_first_try=data.get("test_pass_first_try", False),
         reviewer_verdict=data.get("reviewer_verdict", ""),

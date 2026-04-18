@@ -10,9 +10,10 @@ orchestrator/report.py — Task Report 저장/로드
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -24,50 +25,155 @@ logger = logging.getLogger(__name__)
 
 _REPORTS_DIR = Path("agent-data/reports")
 
-# ── LLM 모델별 단가 ($/1M tokens): {model_key: (input_rate, output_rate)} ──────
-_MODEL_PRICING: dict[str, tuple[float, float]] = {
+CostEstimationQuality = Literal["exact", "fallback", "missing"]
+
+# ── LLM 모델별 단가 ($/1M tokens) ─────────────────────────────────────────────
+# 각 엔트리: {"input": in_rate, "output": out_rate, "cached_read": cache_rate}
+# cached_read 는 캐시 적중 토큰에 적용되는 별도 단가다.
+#
+# 공식 가격 출처:
+#   - OpenAI:    https://openai.com/api/pricing/
+#   - Anthropic: https://www.anthropic.com/pricing
+#   - Google:    https://ai.google.dev/gemini-api/docs/pricing
+#   - Z.AI:      https://docs.z.ai/guides/overview/pricing
+#
+# Google Gemini / Z.AI 는 가격표가 "1M tokens" 기준이며, cached_read 는 input 과
+# 다른 별도 항목을 사용한다. `gemini-3-pro-preview` 키는 현재 공식 표기인
+# `gemini-3.1-pro-preview` 의 레거시 alias 로 취급해 같은 단가를 적용한다.
+_MODEL_PRICING: dict[str, dict[str, float]] = {
     # Anthropic Claude
-    "claude-haiku-4-5": (0.80, 4.00),
-    "claude-sonnet-4-5": (3.00, 15.00),
-    "claude-sonnet-4-6": (3.00, 15.00),
-    "claude-opus-4": (15.00, 75.00),
-    # OpenAI
-    "gpt-4.1-mini": (0.40, 1.60),
-    "gpt-4.1": (2.00, 8.00),
-    "gpt-4o-mini": (0.15, 0.60),
-    "gpt-4o": (2.50, 10.00),
-    # Zhipu GLM
-    "glm-4-flash": (0.10, 0.10),
-    "glm-4-plus": (0.70, 0.70),
+    "claude-haiku-4-5": {"input": 0.80, "output": 4.00, "cached_read": 0.08},
+    "claude-sonnet-4-5": {"input": 3.00, "output": 15.00, "cached_read": 0.30},
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "cached_read": 0.30},
+    "claude-opus-4": {"input": 15.00, "output": 75.00, "cached_read": 1.50},
+    # OpenAI GPT-5 family — gpt-5: 1.25 / 0.125 / 10.00, gpt-5-mini: 0.25 /
+    # 0.025 / 2.00, gpt-5-nano: 0.05 / 0.005 / 0.40.
+    "gpt-5-mini": {"input": 0.25, "output": 2.00, "cached_read": 0.025},
+    "gpt-5": {"input": 1.25, "output": 10.00, "cached_read": 0.125},
+    "gpt-5-nano": {"input": 0.05, "output": 0.40, "cached_read": 0.005},
+    "gpt-4.1-mini": {"input": 0.40, "output": 1.60, "cached_read": 0.10},
+    "gpt-4.1": {"input": 2.00, "output": 8.00, "cached_read": 0.50},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60, "cached_read": 0.075},
+    "gpt-4o": {"input": 2.50, "output": 10.00, "cached_read": 1.25},
+    # Google Gemini standard pricing, <= 200k prompt tier.
+    # gemini-3.1-pro-preview: 2.00 / 0.20 / 12.00.
+    # gemini-2.5-pro: 1.25 / 0.125 / 10.00.
+    # gemini-2.5-flash: 0.30 / 0.03 / 2.50.
+    # gemini-2.5-flash-lite: 0.10 / 0.01 / 0.40.
+    "gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00, "cached_read": 0.20},
+    "gemini-3-pro-preview": {"input": 2.00, "output": 12.00, "cached_read": 0.20},
+    "gemini-2.5-pro": {"input": 1.25, "output": 10.00, "cached_read": 0.125},
+    "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40, "cached_read": 0.01},
+    "gemini-2.5-flash": {"input": 0.30, "output": 2.50, "cached_read": 0.03},
+    # Z.AI GLM family — glm-5.1: 1.40 / 0.26 / 4.40, glm-4.6: 0.60 / 0.11 / 2.20.
+    "glm-5.1": {"input": 1.40, "output": 4.40, "cached_read": 0.26},
+    "glm-4.6": {"input": 0.60, "output": 2.20, "cached_read": 0.11},
+    "glm-4-flash": {"input": 0.10, "output": 0.10, "cached_read": 0.025},
+    "glm-4-plus": {"input": 0.70, "output": 0.70, "cached_read": 0.175},
 }
 
+# 긴 키가 먼저 매칭되도록 정렬 (예: 'gpt-5-mini' 가 'gpt-5' 보다 먼저)
+_PRICING_LOOKUP_ORDER: list[str] = sorted(_MODEL_PRICING.keys(), key=len, reverse=True)
 
-def _model_rate(model_id: str) -> tuple[float, float]:
-    """model_id (예: 'anthropic/claude-haiku-4-5-20251001')에서 단가를 반환한다."""
+# 양쪽 경계 보장 (model ID 는 provider/model-name 또는 단독 model-name 형태):
+# - 왼쪽 `(?:^|(?<=/))`: 키가 문자열 시작 또는 `/` 바로 뒤에 와야 매칭.
+#   `chatgpt-5`, `foo/bar-gpt-5`, `xglm-4.6` 처럼 앞에 다른 토큰이 붙은
+#   경우는 전부 거부된다 — 다른 모델이므로 과금하면 안 됨.
+# - 오른쪽 `(?![.\d])`: 키 뒤에 `.` 또는 숫자가 오면 다른 계열로 보고 거부
+#   (예: `gpt-5.4`, `glm-4.66`). `-20251001` 같은 date suffix 는 허용.
+_PRICING_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(?:^|(?<=/))" + re.escape(k) + r"(?![.\d])"), k)
+    for k in _PRICING_LOOKUP_ORDER
+]
+
+_PRICING_MISSING_WARNED: set[str] = set()
+
+
+def _model_rate(model_id: str) -> dict[str, float] | None:
+    """model_id (예: 'anthropic/claude-haiku-4-5-20251001')에서 단가 dict을 반환한다.
+
+    - substring 매칭이 아닌 "버전 suffix 경계" 매칭을 사용한다.
+      `gpt-5` 키는 `openai/gpt-5` 나 `openai/gpt-5-2026-04-01` 는 잡지만,
+      `openai/gpt-5.4` 나 `openai/gpt-50` 은 잡지 않는다.
+    - 미등록 모델은 None 을 반환한다.
+    """
+    if not model_id:
+        return None
     lm = model_id.lower()
-    for key, rates in _MODEL_PRICING.items():
-        if key in lm:
-            return rates
-    return (0.0, 0.0)
+    for pattern, key in _PRICING_PATTERNS:
+        if pattern.search(lm):
+            return _MODEL_PRICING[key]
+    return None
 
 
 def _calculate_cost(
     token_usage: dict,
     models_used: dict[str, str] | None,
-) -> float:
-    """역할별 토큰 사용량과 모델 정보로 총 USD 비용을 계산한다."""
+) -> float | None:
+    """역할별 토큰 사용량과 모델 정보로 총 USD 비용을 계산한다.
+
+    단가 등록이 된 역할이 하나도 없으면 None 을 반환한다 (null-safe 집계용).
+    일부 역할만 미등록이면 등록된 역할의 비용만 합산해 반환한다.
+    미등록 모델에 대해서는 logging.warning 으로 경고한다.
+    """
+    cost, _quality, _missing = _calculate_cost_with_quality(token_usage, models_used)
+    return cost
+
+
+def _calculate_cost_with_quality(
+    token_usage: dict,
+    models_used: dict[str, str] | None,
+) -> tuple[float | None, CostEstimationQuality, list[str]]:
+    """비용과 추정 품질, 미등록 모델 목록을 함께 반환한다.
+
+    Returns:
+        (cost_usd, quality, missing_models)
+        - quality == "exact":    models_used 의 모든 역할이 단가 등록됨
+        - quality == "fallback": 일부 역할만 단가 등록됨 (등록된 것만 합산)
+        - quality == "missing":  등록된 역할이 전무 (cost_usd 는 None)
+    """
     if not models_used:
-        return 0.0
+        return None, "missing", []
+
     total = 0.0
-    for role, usage in token_usage.items():
-        if isinstance(usage, (tuple, list)) and len(usage) >= 2:
-            inp, out = usage[0], usage[1]
+    registered = 0
+    missing_models: list[str] = []
+
+    for role, model in models_used.items():
+        rate = _model_rate(model)
+        if rate is None:
+            if model and model not in missing_models:
+                missing_models.append(model)
+                if model not in _PRICING_MISSING_WARNED:
+                    logger.warning("PRICING_MISSING model=%s", model)
+                    _PRICING_MISSING_WARNED.add(model)
+            continue
+        registered += 1
+
+        usage = token_usage.get(role)
+        if isinstance(usage, (tuple, list)):
+            inp = usage[0] if len(usage) > 0 else 0
+            out = usage[1] if len(usage) > 1 else 0
+            cr = usage[2] if len(usage) > 2 else 0
+        elif isinstance(usage, dict):
+            inp = usage.get("input", 0)
+            out = usage.get("output", 0)
+            cr = usage.get("cached_read", 0)
         else:
-            inp, out = 0, 0
-        model = models_used.get(role, "")
-        rate_in, rate_out = _model_rate(model)
-        total += (inp * rate_in + out * rate_out) / 1_000_000
-    return round(total, 6)
+            inp, out, cr = 0, 0, 0
+
+        total += (
+            inp * rate["input"]
+            + out * rate["output"]
+            + cr * rate.get("cached_read", rate["input"])
+        ) / 1_000_000
+
+    total_roles = len(models_used)
+    if registered == 0:
+        return None, "missing", missing_models
+    if registered < total_roles:
+        return round(total, 6), "fallback", missing_models
+    return round(total, 6), "exact", missing_models
 
 
 def build_report(
@@ -142,7 +248,9 @@ def build_report(
         round(_total_cached_read / (_total_input + _total_cached_read), 4)
         if (_total_input + _total_cached_read) > 0 else 0.0
     )
-    _cost_usd = _calculate_cost(m.token_usage, _mu)
+    _cost_usd, _cost_quality, _missing_models = _calculate_cost_with_quality(
+        m.token_usage, _mu
+    )
 
     # JSONL per-call 로그 저장
     if m.call_logs:
@@ -182,6 +290,7 @@ def build_report(
         total_cached_write_tokens=_total_cached_write,
         cache_hit_rate=_cache_hit_rate,
         token_usage=_token_usage or None,
+        cost_estimation_quality=_cost_quality,
     )
 
 

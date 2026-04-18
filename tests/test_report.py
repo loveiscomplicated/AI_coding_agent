@@ -12,6 +12,9 @@ import pytest
 
 from orchestrator.report import (
     TaskReport,
+    _calculate_cost,
+    _calculate_cost_with_quality,
+    _model_rate,
     build_report,
     save_report,
     load_report,
@@ -97,6 +100,7 @@ class TestTaskReportSerialization:
         minimal = {"task_id": "t2", "title": "", "status": "FAILED", "completed_at": ""}
         report = TaskReport.from_dict(minimal)
         assert report.retry_count == 0
+        assert report.cost_usd is None
         assert report.failure_reasons == []
         assert report.pr_number is None
 
@@ -276,3 +280,132 @@ class TestLoadReports:
     def test_missing_dir_returns_empty_list(self, tmp_path):
         nonexistent = tmp_path / "nonexistent"
         assert load_reports(reports_dir=nonexistent) == []
+
+
+# ── 비용 계산: 단가 미등록 / 품질 지표 ─────────────────────────────────────────
+
+class TestCostCalculation:
+    def test_model_pricing_matches_current_official_sources(self):
+        assert _model_rate("openai/gpt-5") == {
+            "input": 1.25, "output": 10.00, "cached_read": 0.125,
+        }
+        assert _model_rate("openai/gpt-5-mini") == {
+            "input": 0.25, "output": 2.00, "cached_read": 0.025,
+        }
+        assert _model_rate("google/gemini-2.5-flash") == {
+            "input": 0.30, "output": 2.50, "cached_read": 0.03,
+        }
+        assert _model_rate("google/gemini-3.1-pro-preview") == {
+            "input": 2.00, "output": 12.00, "cached_read": 0.20,
+        }
+        assert _model_rate("zai/glm-5.1") == {
+            "input": 1.40, "output": 4.40, "cached_read": 0.26,
+        }
+
+    def test_gemini_legacy_alias_maps_to_current_pricing(self):
+        assert _model_rate("google/gemini-3-pro-preview") == _model_rate(
+            "google/gemini-3.1-pro-preview"
+        )
+
+    def test_model_rate_rejects_version_suffix_boundary(self):
+        """미래의 `gpt-5.4` 처럼 dotted 버전은 `gpt-5` 단가로 오인식되면 안 된다.
+
+        substring 매칭은 `openai/gpt-5.4` 를 `gpt-5` 로 잡아 과금 오류를 일으키므로,
+        키 뒤에 `.` 또는 추가 숫자가 오면 매칭을 거부해야 한다.
+        """
+        assert _model_rate("openai/gpt-5.4") is None
+        assert _model_rate("openai/gpt-50") is None
+        assert _model_rate("zai/glm-4.66") is None
+        # 정상 케이스는 계속 매칭돼야 한다 (regression guard)
+        assert _model_rate("openai/gpt-5") is not None
+        assert _model_rate("openai/gpt-5-2026-04-01") is not None
+        assert _model_rate("anthropic/claude-haiku-4-5-20251001") is not None
+
+    def test_model_rate_rejects_prefix_boundary(self):
+        """`chatgpt-5` 나 `foo-bar-gpt-5` 는 `gpt-5` 단가로 해석되면 안 된다.
+
+        왼쪽에 alnum 이 붙은 경우는 다른 모델이므로 매칭을 거부해야 한다.
+        구분자(`/`, `-`, 문자열 시작)로 시작하는 경우만 허용.
+        """
+        assert _model_rate("openai/chatgpt-5") is None
+        assert _model_rate("foo/bar-gpt-5") is None
+        assert _model_rate("somegpt-5-mini") is None
+        assert _model_rate("xglm-4.6") is None
+        # 정상 케이스는 매칭 유지
+        assert _model_rate("openai/gpt-5") is not None
+        assert _model_rate("gpt-5") is not None
+        assert _model_rate("openai/gpt-5-mini") is not None
+
+    def test_calculate_cost_unregistered_model_returns_none(self, caplog):
+        """단가 테이블에 없는 모델만 사용된 경우 None 을 반환하고 경고를 남겨야 한다."""
+        token_usage = {"implementer": (1000, 500, 0, 0)}
+        models_used = {"implementer": "some-fictional-provider/ultra-model-9000"}
+
+        with caplog.at_level("WARNING"):
+            result = _calculate_cost(token_usage, models_used)
+
+        assert result is None
+        assert any("PRICING_MISSING" in rec.message for rec in caplog.records)
+
+    def test_calculate_cost_registered_model_includes_cached_read(self):
+        """등록된 모델은 input/output/cached_read 단가 모두 반영되어야 한다."""
+        token_usage = {"implementer": (1_000_000, 0, 0, 0)}
+        models_used = {"implementer": "openai/gpt-5"}
+        result = _calculate_cost(token_usage, models_used)
+        # gpt-5 input rate: $1.25/1M
+        assert result == pytest.approx(1.25)
+
+    def test_calculate_cost_with_quality_fallback_when_mixed(self):
+        token_usage = {
+            "a": (1000, 0, 0, 0),
+            "b": (1000, 0, 0, 0),
+        }
+        models_used = {"a": "openai/gpt-5", "b": "unknown/xyz"}
+        cost, quality, missing = _calculate_cost_with_quality(token_usage, models_used)
+        assert quality == "fallback"
+        assert "unknown/xyz" in missing
+        assert cost is not None and cost > 0
+
+    def test_task_report_cost_estimation_quality_mixed(self):
+        """build_report 는 등록/미등록 모델이 섞였을 때 'fallback' 으로 표기해야 한다."""
+        task = make_task()
+        result = _FakePipelineResult(succeeded=True)
+        result.models_used = {
+            "implementer": "openai/gpt-5",
+            "reviewer": "unregistered/quantum-foo",
+        }
+        result.metrics.token_usage = {
+            "implementer": (1000, 500, 0, 0),
+            "reviewer": (500, 200, 0, 0),
+        }
+        report = build_report(task, result)
+        assert report.cost_estimation_quality == "fallback"
+        assert report.cost_usd is not None and report.cost_usd > 0
+
+    def test_task_report_cost_estimation_quality_missing(self):
+        task = make_task()
+        result = _FakePipelineResult(succeeded=True)
+        result.models_used = {"implementer": "unregistered/foo"}
+        result.metrics.token_usage = {"implementer": (1000, 500, 0, 0)}
+        report = build_report(task, result)
+        assert report.cost_estimation_quality == "missing"
+        assert report.cost_usd is None
+
+    def test_legacy_yaml_without_quality_field_loads_as_missing(self, tmp_path):
+        """기존 YAML (cost_estimation_quality 없음) 은 'missing' 으로 로드돼야 한다."""
+        import yaml as _yaml
+        legacy = {
+            "task_id": "task-legacy",
+            "title": "legacy",
+            "status": "COMPLETED",
+            "completed_at": "2026-01-01T00:00:00+00:00",
+            "metrics": {
+                "retry_count": 0,
+                "total_tokens": 100,
+                "cost_usd": 0.0,
+            },
+        }
+        path = tmp_path / "task-legacy.yaml"
+        path.write_text(_yaml.safe_dump(legacy), encoding="utf-8")
+        loaded = load_report("task-legacy", reports_dir=tmp_path)
+        assert loaded.cost_estimation_quality == "missing"
