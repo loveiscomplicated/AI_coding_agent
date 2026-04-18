@@ -67,18 +67,32 @@ class _StopRequested(BaseException):
 # ── 결과 데이터 클래스 ────────────────────────────────────────────────────────
 
 
+VALID_VERDICTS = {
+    "APPROVED",
+    "APPROVED_WITH_SUGGESTIONS",
+    "CHANGES_REQUESTED",
+    "ERROR",
+}
+
+
 @dataclass
 class ReviewResult:
     """Reviewer 에이전트 출력 파싱 결과."""
 
-    verdict: str   # "APPROVED" | "CHANGES_REQUESTED" | "ERROR"
+    verdict: str   # "APPROVED" | "APPROVED_WITH_SUGGESTIONS" | "CHANGES_REQUESTED" | "ERROR"
     summary: str
     details: str
     raw: str       # 원문 (PR body 에 그대로 포함)
 
     @property
     def approved(self) -> bool:
-        return self.verdict == "APPROVED"
+        """PR 생성 여부 — APPROVED 또는 APPROVED_WITH_SUGGESTIONS."""
+        return self.verdict in ("APPROVED", "APPROVED_WITH_SUGGESTIONS")
+
+    @property
+    def has_suggestions(self) -> bool:
+        """비-블로킹 개선 제안이 있는지 (PR body에 suggestions 섹션 추가용)."""
+        return self.verdict == "APPROVED_WITH_SUGGESTIONS"
 
     @property
     def is_error(self) -> bool:
@@ -1364,12 +1378,14 @@ def _parse_review(raw: str) -> ReviewResult:
         ...
 
     파싱 규칙:
-        - VERDICT / APPROVED / CHANGES_REQUESTED 중 어느 것도 발견되지 않으면
-          `verdict="ERROR"` 를 반환한다.  (이전에는 조용히 CHANGES_REQUESTED 로
-          퇴하는 바람에 LLM 장애가 코드 반려로 오인되어 Implementer 재실행을
-          유발했다.)
-        - Reviewer LoopResult 가 LLM_ERROR 로 끝나 `"LLM 호출 중 오류가 발생했습니다: ..."`
-          문자열이 들어오는 경우도 동일하게 ERROR 로 분류한다.
+        - 유효한 verdict 는 VALID_VERDICTS 집합 참조
+          (APPROVED / APPROVED_WITH_SUGGESTIONS / CHANGES_REQUESTED / ERROR).
+        - 빈 출력이나 LLM_ERROR sentinel 은 즉시 `verdict="ERROR"` 로 분류한다
+          (인프라 장애와 코드 반려를 분리).
+        - 그 외 알 수 없는 verdict (예: `VERDICT: MAYBE`) 나 VERDICT 라인 자체가
+          없는 경우는 `CHANGES_REQUESTED` 로 fallback 한다. ERROR 로 퇴하지 않는
+          이유: 파서 혼란을 LLM 인프라 장애로 오인해 Implementer 재실행을 건너뛰면
+          안 되기 때문.
     """
     verdict = ""
     summary = ""
@@ -1395,8 +1411,13 @@ def _parse_review(raw: str) -> ReviewResult:
 
         if normalized.upper().startswith("VERDICT:"):
             value = normalized.split(":", 1)[1].strip().upper()
-            if value in ("APPROVED", "CHANGES_REQUESTED"):
+            if value in VALID_VERDICTS:
                 verdict = value
+            elif value:
+                logger.warning(
+                    "Unknown verdict %r, fallback to CHANGES_REQUESTED", value
+                )
+                verdict = "CHANGES_REQUESTED"
 
         elif normalized.upper().startswith("SUMMARY:"):
             summary = normalized.split(":", 1)[1].strip()
@@ -1414,20 +1435,22 @@ def _parse_review(raw: str) -> ReviewResult:
     # 명시적 VERDICT 를 못 찾으면 텍스트에서 키워드로 추론
     if not verdict:
         upper = raw.upper()
-        if "APPROVED" in upper and "CHANGES_REQUESTED" not in upper:
+        if "APPROVED_WITH_SUGGESTIONS" in upper:
+            verdict = "APPROVED_WITH_SUGGESTIONS"
+        elif "APPROVED" in upper and "CHANGES_REQUESTED" not in upper:
             verdict = "APPROVED"
         elif "CHANGES_REQUESTED" in upper:
             verdict = "CHANGES_REQUESTED"
         else:
             logger.warning(
-                "Reviewer 출력에서 VERDICT 를 찾지 못했습니다 — verdict=ERROR 처리"
+                "Reviewer 출력에서 VERDICT 를 찾지 못했습니다 — "
+                "CHANGES_REQUESTED 로 fallback 처리"
             )
-            return ReviewResult(
-                verdict="ERROR",
-                summary="Reviewer 응답에서 VERDICT 를 찾을 수 없음",
-                details=stripped_raw[:500],
-                raw=raw,
-            )
+            verdict = "CHANGES_REQUESTED"
+            if not summary:
+                summary = "Reviewer 응답에서 VERDICT 를 찾을 수 없음"
+            if not details_lines:
+                details_lines = [stripped_raw[:500]]
 
     return ReviewResult(
         verdict=verdict,

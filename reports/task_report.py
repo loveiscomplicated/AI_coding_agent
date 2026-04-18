@@ -7,7 +7,17 @@ orchestrator/metrics/report 계층에서 공통으로 사용한다.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+CostEstimationQuality = Literal["exact", "fallback", "missing"]
+
+ReviewerVerdict = Literal[
+    "APPROVED",
+    "APPROVED_WITH_SUGGESTIONS",
+    "CHANGES_REQUESTED",
+    "ERROR",
+    "",  # reviewer 단계 이전에 실패한 경우
+]
 
 
 @dataclass
@@ -18,10 +28,11 @@ class TaskReport:
     completed_at: str | None           # ISO 8601 UTC
     retry_count: int = 0
     total_tokens: int = 0
-    cost_usd: float = 0.0
+    cost_usd: float | None = None
+    cost_estimation_quality: CostEstimationQuality = "missing"
     test_count: int = 0
     test_pass_first_try: bool = False
-    reviewer_verdict: str = ""
+    reviewer_verdict: ReviewerVerdict = ""
     time_elapsed_seconds: float = 0.0
     failure_reasons: list[str] = field(default_factory=list)
     test_output_summary: str = ""
@@ -62,6 +73,7 @@ class TaskReport:
                 "retry_count": self.retry_count,
                 "total_tokens": self.total_tokens,
                 "cost_usd": self.cost_usd,
+                "cost_estimation_quality": self.cost_estimation_quality,
                 "test_count": self.test_count,
                 "test_pass_first_try": self.test_pass_first_try,
                 "reviewer_verdict": self.reviewer_verdict,
@@ -110,7 +122,8 @@ class TaskReport:
             completed_at=data.get("completed_at", ""),
             retry_count=m.get("retry_count", 0),
             total_tokens=m.get("total_tokens", 0),
-            cost_usd=m.get("cost_usd", 0.0),
+            cost_usd=m.get("cost_usd"),
+            cost_estimation_quality=_coerce_quality(m.get("cost_estimation_quality")),
             test_count=m.get("test_count", 0),
             test_pass_first_try=m.get("test_pass_first_try", False),
             reviewer_verdict=m.get("reviewer_verdict", ""),
@@ -137,3 +150,13 @@ class TaskReport:
             orchestrator_summary=o.get("summary", ""),
             models_used=data.get("models_used"),
         )
+
+
+def _coerce_quality(value: Any) -> CostEstimationQuality:
+    """YAML 로드 시 cost_estimation_quality 필드의 값을 Literal 범위로 제한한다.
+
+    구 포맷 (필드 없음) 또는 unknown 문자열은 "missing" 으로 폴백한다.
+    """
+    if value in ("exact", "fallback", "missing"):
+        return value  # type: ignore[return-value]
+    return "missing"

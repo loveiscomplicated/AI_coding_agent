@@ -331,8 +331,14 @@ def check_prerequisites(repo_path: str | Path) -> list[str]:
 
 def _build_pr_body(task: Task, result: PipelineResult) -> str:
     review_section = ""
+    suggestions_section = ""
     if result.review:
-        verdict_icon = "✅" if result.review.approved else "⚠️"
+        if result.review.has_suggestions:
+            verdict_icon = "💡"
+        elif result.review.approved:
+            verdict_icon = "✅"
+        else:
+            verdict_icon = "⚠️"
         review_section = dedent(f"""
             ## 코드 리뷰
 
@@ -340,6 +346,17 @@ def _build_pr_body(task: Task, result: PipelineResult) -> str:
 
             {result.review.details}
         """).strip()
+
+        if result.review.has_suggestions:
+            suggestions_body = result.review.details or result.review.summary or "(피드백 없음)"
+            suggestions_section = dedent(f"""
+                ## Reviewer Suggestions (non-blocking)
+
+                이 PR은 기능과 acceptance_criteria를 모두 충족했습니다. 아래 제안은
+                참고용이며 반영 여부는 사람이 판단합니다.
+
+                {suggestions_body}
+            """).strip()
 
     test_section = ""
     if result.test_result:
@@ -365,6 +382,7 @@ def _build_pr_body(task: Task, result: PipelineResult) -> str:
         test_section,
         files_section,
         review_section,
+        suggestions_section,
         retry_info,
         "---\n🤖 자동 생성 by AI Coding Agent Pipeline",
     ]
