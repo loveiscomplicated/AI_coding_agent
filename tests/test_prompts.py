@@ -55,3 +55,30 @@ class TestReviewerPromptVerdictSection:
         assert "VERDICT:" in content
         assert "SUMMARY:" in content
         assert "DETAILS:" in content
+
+    def test_security_and_structure_violations_trigger_changes_requested(self, content):
+        """보안 취약점·모듈 구조·target_files 스코프 위반은 반드시
+        CHANGES_REQUESTED 대상임이 명시돼 있어야 한다. 이게 APPROVED_WITH_SUGGESTIONS
+        로 흘러가면 보안/구조 결함이 비-블로킹 제안으로 내려가는 회귀가 생긴다."""
+        # CHANGES_REQUESTED 섹션 안에 세 키워드가 나열되어 있는지
+        assert "CHANGES_REQUESTED" in content
+        # 보안 취약점은 반려 대상
+        assert (
+            "SQL injection" in content
+            or "path traversal" in content
+            or "command injection" in content
+        )
+        # target_files 위반은 반려 대상
+        assert "target_files" in content
+        # __init__.py 신규 생성, 순환 import 는 자동 반려
+        assert "__init__.py" in content
+        assert "순환 import" in content
+
+    def test_approved_with_suggestions_is_style_only(self, content):
+        """APPROVED_WITH_SUGGESTIONS 범위가 '스타일/가독성/관용' 로 한정돼 있는지.
+        '방어성' 처럼 보안·견고성을 suggestions 로 떠넘길 수 있는 용어는 없어야 한다."""
+        # APPROVED_WITH_SUGGESTIONS 가 정의된 본문에 '방어성' 단어가 없는지
+        # (wording 충돌 방지 — 보안·견고성은 CHANGES_REQUESTED 전용)
+        assert "방어성" not in content
+        # suggestions 범위 예시는 여전히 스타일 항목 위주여야 함
+        assert "스타일" in content or "가독성" in content

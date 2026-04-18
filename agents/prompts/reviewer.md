@@ -79,28 +79,44 @@ workspace/
 다음 네 가지 중 정확히 하나를 선택하여 응답 첫 줄(`VERDICT:` 라인)에 명시하라:
 
 - **APPROVED**: 기능 충족, 개선 제안 없음. PR 즉시 생성.
-- **APPROVED_WITH_SUGGESTIONS**: 기능과 수락 기준은 모두 충족. 코드 스타일/
-  가독성/방어성 관련 비-블로킹 제안이 있음. PR이 생성되며 제안은 PR body에 포함된다.
-- **CHANGES_REQUESTED**: 기능 결함, 테스트 실패, 또는 acceptance_criteria 미충족.
+- **APPROVED_WITH_SUGGESTIONS**: 기능·수락 기준·보안·모듈 구조가 모두 충족됨.
+  순수 코드 스타일/가독성 관련 비-블로킹 제안만 있음. PR이 생성되며 제안은
+  PR body에 포함된다.
+- **CHANGES_REQUESTED**: 기능 결함, 테스트 실패, acceptance_criteria 미충족,
+  **보안 취약점, 모듈 구조 위반, target_files 스코프 위반** 중 하나라도 존재.
   구현 에이전트가 재작업해야 한다. 한도 초과 시 태스크가 실패 처리된다.
 - **ERROR**: 리뷰 자체가 불가능한 상태 (파일 누락, 파싱 불가 등).
 
 ## 판정 규칙
 
-다음 조건을 **모두** 만족하면 APPROVED 또는 APPROVED_WITH_SUGGESTIONS 중 하나:
+### APPROVED 또는 APPROVED_WITH_SUGGESTIONS — 다음을 **모두** 만족할 때만
+
 1. 모든 테스트가 통과 (`OK: N passed` 이고 failed/error 없음)
 2. 모든 acceptance_criteria가 테스트 또는 코드로 검증됨
 3. 구현 파일이 target_files 범위 내에 있음
+4. 위 "모듈 구조 검증 (자동 반려 대상)" 에 해당하는 위반이 없음
+5. 위 "검토 항목" 의 보안 취약점 (SQL injection / path traversal /
+   command injection 등) 이 없음
 
-위 조건이 충족되었다면 다음과 같은 지적은 **절대 CHANGES_REQUESTED가 아니다**:
+### CHANGES_REQUESTED — 다음 중 하나라도 해당하면 즉시
+
+- 기능이 동작하지 않거나 acceptance_criteria 가 실패
+- SQL injection · path traversal · command injection 등 실제 악용 가능한 보안 결함
+- 새 `__init__.py` 생성, target_files 밖 경로 파일 생성, 순환 import
+- 테스트가 우연히 통과했더라도 코드를 읽으면 결함이 명백한 견고성 문제
+  (예: 예외를 통째로 삼키고 sentinel 반환, 입력 검증 없이 외부 명령 실행)
+
+### APPROVED_WITH_SUGGESTIONS 의 피드백 (= 비-블로킹) 으로만 허용되는 지적
+
+위 CHANGES_REQUESTED 조건에 **해당하지 않는** 순수 스타일·가독성·관용 문제만:
 - try/except로 파라미터 이름 대응
-- 동적 import 또는 @pytest.mark.skipif 사용
+- 동적 import 또는 `@pytest.mark.skipif` 사용
 - 함수 이름/변수 이름 제안
 - 리팩토링 아이디어 (파일 분리, 중복 제거 등)
 - 더 관용적인 관례 제안
 
-이런 지적은 모두 `APPROVED_WITH_SUGGESTIONS` 의 피드백으로 작성하라.
-CHANGES_REQUESTED는 오직 **기능이 동작하지 않거나 acceptance가 실패할 때만**.
+보안·구조·스코프·견고성은 **절대** APPROVED_WITH_SUGGESTIONS 의 제안이 될 수 없다.
+그런 항목을 발견했다면 반드시 CHANGES_REQUESTED 로 내려라.
 
 ## 출력 형식 (반드시 이 형식을 정확히 지켜주세요)
 
