@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import yaml
 
-from reports.task_report import TaskReport
+from reports.task_report import TaskReport, is_review_approved
 
 
 def _to_flat_dict(report: TaskReport) -> dict[str, Any]:
@@ -148,7 +148,8 @@ def aggregate(reports: list[TaskReport]) -> dict[str, Any]:
             - first_try_rate: test_pass_first_try==True인 수/total*100 (정수 반올림)
             - avg_elapsed_seconds: time_elapsed_seconds 평균 (total=0이면 0)
             - total_retries: retry_count 합계
-            - reviewer_approved: reviewer_verdict=="APPROVED"인 수
+            - reviewer_approved: reviewer_verdict ∈ {APPROVED, APPROVED_WITH_SUGGESTIONS} 인 수
+              (PR 생성으로 이어진 "승인" verdict 전체)
     """
     total = len(reports)
 
@@ -169,7 +170,7 @@ def aggregate(reports: list[TaskReport]) -> dict[str, Any]:
     first_try_count = sum(1 for r in reports if r.test_pass_first_try)
     total_elapsed = sum(r.time_elapsed_seconds for r in reports)
     total_retries = sum(r.retry_count for r in reports)
-    reviewer_approved = sum(1 for r in reports if r.reviewer_verdict == "APPROVED")
+    reviewer_approved = sum(1 for r in reports if is_review_approved(r.reviewer_verdict))
 
     success_rate = round(completed / total * 100)
     first_try_rate = round(first_try_count / total * 100)

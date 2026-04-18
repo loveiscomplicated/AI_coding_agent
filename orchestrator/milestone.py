@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from orchestrator.report import TaskReport
+from reports.task_report import is_review_approved
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,8 @@ def collect_run_stats(reports: list[TaskReport]) -> dict:
     first_try = sum(1 for r in reports if r.test_pass_first_try)
     first_try_rate = round(first_try / completed * 100) if completed else 0
 
-    approved = sum(1 for r in reports if r.reviewer_verdict == "APPROVED")
+    # APPROVED 와 APPROVED_WITH_SUGGESTIONS 모두 PR 생성 = "승인" 으로 집계한다.
+    approved = sum(1 for r in reports if is_review_approved(r.reviewer_verdict))
     total_elapsed = sum(r.time_elapsed_seconds for r in reports)
     avg_elapsed = round(total_elapsed / total, 1) if total else 0
     total_tests = sum(r.test_count for r in reports)

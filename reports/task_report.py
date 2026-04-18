@@ -19,6 +19,17 @@ ReviewerVerdict = Literal[
     "",  # reviewer 단계 이전에 실패한 경우
 ]
 
+# PR 생성 + 태스크 COMPLETED 로 간주되는 verdict 집합. 집계(dashboard, weekly,
+# milestone, collector)와 UI 는 모두 이 집합을 참조해야 한다. APPROVED 만 세고
+# APPROVED_WITH_SUGGESTIONS 를 빼면 정상 머지된 PR이 "미승인" 으로 보이는 회귀가
+# 생긴다.
+APPROVED_VERDICTS: frozenset[str] = frozenset({"APPROVED", "APPROVED_WITH_SUGGESTIONS"})
+
+
+def is_review_approved(verdict: str | None) -> bool:
+    """reviewer_verdict 가 PR 생성으로 이어진 '승인' 상태인지 반환한다."""
+    return verdict in APPROVED_VERDICTS
+
 
 @dataclass
 class TaskReport:

@@ -119,6 +119,38 @@ def test_summary_empty_when_no_reports(tmp_path, client):
     assert body["models_with_missing_pricing"] == []
 
 
+def test_summary_approved_counts_approved_with_suggestions(tmp_path, client):
+    """dashboard summary.metrics.approved 가 APPROVED_WITH_SUGGESTIONS 도 포함해야 한다."""
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    _save(
+        reports_dir, "task-001",
+        reviewer_verdict="APPROVED",
+        cost_usd=0.01, cost_estimation_quality="exact",
+        models_used={"implementer": "openai/gpt-5"},
+    )
+    _save(
+        reports_dir, "task-002",
+        reviewer_verdict="APPROVED_WITH_SUGGESTIONS",
+        cost_usd=0.01, cost_estimation_quality="exact",
+        models_used={"implementer": "openai/gpt-5"},
+    )
+    _save(
+        reports_dir, "task-003",
+        reviewer_verdict="CHANGES_REQUESTED",
+        status="FAILED",
+        cost_usd=0.01, cost_estimation_quality="exact",
+        models_used={"implementer": "openai/gpt-5"},
+    )
+    res = client.get(
+        "/api/dashboard/summary",
+        params={"reports_dir": str(reports_dir), "tasks_path": str(tmp_path / "tasks.yaml")},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["metrics"]["approved"] == 2
+
+
 def test_tasks_endpoint_preserves_null_cost(tmp_path, client):
     reports_dir = tmp_path / "reports"
     reports_dir.mkdir()

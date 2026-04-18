@@ -25,6 +25,7 @@ from orchestrator.milestone import load_milestone_reports
 from orchestrator.report import _model_rate, load_reports
 from orchestrator.task import load_tasks
 from project_paths import resolve_reports_dir, resolve_tasks_path
+from reports.task_report import is_review_approved
 
 router = APIRouter()
 
@@ -54,7 +55,8 @@ def get_dashboard_summary(
     total = len(reports)
     completed = sum(1 for r in reports if r.status == "COMPLETED")
     failed = total - completed
-    approved = sum(1 for r in reports if r.reviewer_verdict == "APPROVED")
+    # APPROVED 와 APPROVED_WITH_SUGGESTIONS 모두 PR 생성 = "승인" 으로 집계한다.
+    approved = sum(1 for r in reports if is_review_approved(r.reviewer_verdict))
     total_tests = sum(r.test_count for r in reports)
     total_retries = sum(r.retry_count for r in reports)
     avg_elapsed = (

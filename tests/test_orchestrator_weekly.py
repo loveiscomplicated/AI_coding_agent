@@ -9,10 +9,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from reports.task_report import TaskReport
 
-from orchestrator.weekly import generate_weekly_report, get_week_range
+from orchestrator.weekly import collect_week_stats, generate_weekly_report, get_week_range
 
 
-def _report(task_id: str, completed_at: str | None) -> TaskReport:
+def _report(task_id: str, completed_at: str | None, verdict: str = "APPROVED") -> TaskReport:
     return TaskReport(
         task_id=task_id,
         title=f"title-{task_id}",
@@ -21,9 +21,20 @@ def _report(task_id: str, completed_at: str | None) -> TaskReport:
         retry_count=0,
         test_count=1,
         test_pass_first_try=True,
-        reviewer_verdict="APPROVED",
+        reviewer_verdict=verdict,
         time_elapsed_seconds=12.3,
     )
+
+
+def test_collect_week_stats_counts_approved_with_suggestions_as_approved():
+    """APPROVED_WITH_SUGGESTIONS 도 reviewer_approved 에 포함되어야 한다."""
+    reports = [
+        _report("a", "2026-01-06T00:00:00+00:00", verdict="APPROVED"),
+        _report("b", "2026-01-06T00:00:00+00:00", verdict="APPROVED_WITH_SUGGESTIONS"),
+        _report("c", "2026-01-06T00:00:00+00:00", verdict="CHANGES_REQUESTED"),
+    ]
+    stats = collect_week_stats(reports)
+    assert stats["reviewer_approved"] == 2
 
 
 def test_generate_weekly_report_filters_by_sunday_and_uses_prev_report(monkeypatch, tmp_path: Path):

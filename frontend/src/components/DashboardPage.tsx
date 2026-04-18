@@ -233,9 +233,13 @@ function StatusBadge({ status }: { status: string }) {
   )
 }
 
+// PR 생성 + COMPLETED 로 이어지는 "승인" verdict 집합. backend 의
+// reports.task_report.APPROVED_VERDICTS 와 의미가 일치해야 한다.
+const APPROVED_VERDICTS = new Set(['APPROVED', 'APPROVED_WITH_SUGGESTIONS'])
+
 function VerdictBadge({ verdict }: { verdict: string }) {
   if (!verdict) return null
-  const approved = verdict === 'APPROVED'
+  const approved = APPROVED_VERDICTS.has(verdict)
   return (
     <span className={`inline-block text-[11px] font-medium px-2 py-0.5 rounded-full ${
       approved

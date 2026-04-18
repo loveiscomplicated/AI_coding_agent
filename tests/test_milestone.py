@@ -10,7 +10,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from reports.task_report import TaskReport
 
-from orchestrator.milestone import generate_milestone_report, save_milestone_report
+from orchestrator.milestone import (
+    collect_run_stats,
+    generate_milestone_report,
+    save_milestone_report,
+)
 
 
 def _sample_reports() -> list[TaskReport]:
@@ -52,6 +56,30 @@ def test_generate_milestone_report_saves_content_with_valid_path(tmp_path: Path)
     assert path.suffix == ".md"
     assert path.exists()
     assert path.read_text(encoding="utf-8") == "# milestone report"
+
+
+def _report(task_id: str, verdict: str) -> TaskReport:
+    return TaskReport(
+        task_id=task_id,
+        title=task_id,
+        status="COMPLETED",
+        completed_at="2026-04-15T10:00:00+00:00",
+        retry_count=0,
+        test_count=1,
+        test_pass_first_try=True,
+        reviewer_verdict=verdict,
+        time_elapsed_seconds=10.0,
+    )
+
+
+def test_collect_run_stats_counts_approved_with_suggestions_as_approved():
+    """APPROVED_WITH_SUGGESTIONS 도 PR 생성 = '승인' 으로 집계된다."""
+    stats = collect_run_stats([
+        _report("t1", "APPROVED"),
+        _report("t2", "APPROVED_WITH_SUGGESTIONS"),
+        _report("t3", "CHANGES_REQUESTED"),
+    ])
+    assert stats["approved"] == 2
 
 
 def test_save_milestone_report_timestamp_filename_format(monkeypatch, tmp_path: Path):

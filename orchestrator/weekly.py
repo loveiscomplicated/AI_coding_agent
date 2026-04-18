@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Callable
 
 from orchestrator.report import TaskReport, load_reports
+from reports.task_report import is_review_approved
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +70,9 @@ def collect_week_stats(reports: list[TaskReport]) -> dict:
         "total_elapsed_seconds": round(total_elapsed, 1),
         "avg_elapsed_seconds": avg_elapsed,
         "total_retries": total_retries,
+        # APPROVED 와 APPROVED_WITH_SUGGESTIONS 모두 PR 생성 = "승인" 으로 집계한다.
         "reviewer_approved": sum(
-            1 for r in reports if r.reviewer_verdict == "APPROVED"
+            1 for r in reports if is_review_approved(r.reviewer_verdict)
         ),
     }
 

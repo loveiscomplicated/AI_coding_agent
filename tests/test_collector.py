@@ -468,10 +468,34 @@ class TestAggregate:
     def test_aggregate_with_pending_verdict(self, sample_task_report_data_pending):
         """PENDING verdict는 APPROVED로 카운트되지 않음"""
         report = TaskReport(**sample_task_report_data_pending)
-        
+
         result = aggregate([report])
-        
+
         assert result['reviewer_approved'] == 0
+
+    def test_aggregate_approved_with_suggestions_counts_as_approved(self):
+        """APPROVED_WITH_SUGGESTIONS 도 PR 생성 = '승인' 으로 집계된다.
+        (APPROVED 만 세고 APPROVED_WITH_SUGGESTIONS 를 빠뜨리면 정상 머지된 PR이
+        대시보드에서 '미승인' 으로 보이는 회귀가 생긴다.)"""
+        base = {
+            "task_id": "t",
+            "title": "t",
+            "status": "COMPLETED",
+            "completed_at": "2026-04-15T10:00:00",
+            "retry_count": 0,
+            "test_count": 4,
+            "test_pass_first_try": True,
+            "time_elapsed_seconds": 100.0,
+            "failure_reasons": [],
+            "reviewer_feedback": "",
+        }
+        approved = TaskReport(**{**base, "task_id": "a", "reviewer_verdict": "APPROVED"})
+        aws = TaskReport(**{**base, "task_id": "b", "reviewer_verdict": "APPROVED_WITH_SUGGESTIONS"})
+        rejected = TaskReport(**{**base, "task_id": "c", "reviewer_verdict": "CHANGES_REQUESTED"})
+
+        result = aggregate([approved, aws, rejected])
+
+        assert result["reviewer_approved"] == 2
 
     def test_aggregate_complex_scenario(self, sample_task_report_data, sample_task_report_data_failed, sample_task_report_data_pending):
         """복합 시나리오: 여러 상태의 report 집계"""
