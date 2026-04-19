@@ -82,3 +82,103 @@ class TestReviewerPromptVerdictSection:
         assert "방어성" not in content
         # suggestions 범위 예시는 여전히 스타일 항목 위주여야 함
         assert "스타일" in content or "가독성" in content
+
+    def test_quality_gate_skip_list_documented(self, content):
+        """Reviewer 가 QG 통과 항목을 재검사하지 않는다는 섹션이 있어야 한다.
+        syntax / assertion / test_* / import 4 항목이 모두 명시돼야 함."""
+        assert "Quality Gate 통과 항목" in content
+        assert "재검사하지 않는다" in content
+        assert "syntax" in content
+        assert "assertion" in content
+        assert "test_*" in content
+        assert "import" in content
+
+    def test_quality_gate_skip_list_includes_placeholder(self, content):
+        """리뷰 피드백 #3 회귀 가드: placeholder/skeleton 감지는 QG 담당.
+        Reviewer 가 placeholder 재검사로 `assert True` 같은 걸 기반으로
+        CHANGES_REQUESTED 를 내는 역할 겹침을 막는다.
+        """
+        # Quality Gate 통과 항목 섹션 안에 placeholder / skeleton 언급
+        section_start = content.index("Quality Gate 통과 항목")
+        # 다음 섹션(## ...) 전까지가 QG 섹션
+        next_section = content.find("\n## ", section_start + 1)
+        qg_section = content[section_start:next_section] if next_section > 0 else content[section_start:]
+        assert "placeholder" in qg_section.lower() or "스켈레톤" in qg_section or "skeleton" in qg_section.lower(), (
+            "Reviewer 프롬프트의 QG 통과 항목 섹션에 placeholder/skeleton 제외 지시가 없습니다."
+        )
+
+    def test_reviewer_scope_is_semantic_not_formal(self, content):
+        """Reviewer 의 '테스트 품질' 검토는 형식이 아닌 의미론에 한정돼야 한다.
+        'placeholder' 탐지 같은 형식 게이트는 QG 영역이라는 안내가 명시적이어야 한다.
+        """
+        # "테스트 품질" 또는 "테스트 의미 품질" 항목이 acceptance_criteria 나
+        # 외부 동작 검증에 초점을 맞추고 있는지
+        assert "외부 동작" in content or "acceptance_criteria" in content
+        # 또한 QG 가 placeholder 를 담당한다는 명시 문구
+        assert "QG" in content or "Quality Gate" in content
+
+
+class TestTestWriterPromptAntiPatterns:
+    """test_writer.md 에 금지 패턴 섹션과 ask_user 사용 조건이 있어야 한다.
+
+    정보 부족 상황에서 TestWriter가 방어적 코드(동적 import, try/except로 시그니처 추측,
+    빈 테스트, hasattr 우회)를 쓰는 대신 ask_user / pytest.skip / dependency_artifacts
+    조회 중 하나를 택하도록 유도하는 지시가 필요하다.
+    """
+
+    @pytest.fixture(scope="class")
+    def content(self) -> str:
+        return _load("test_writer.md")
+
+    def test_file_exists(self):
+        assert (PROMPTS_DIR / "test_writer.md").exists()
+
+    def test_test_writer_prompt_includes_antipatterns(self, content):
+        # 섹션 제목
+        assert "금지 패턴" in content
+        # 4개 금지 패턴이 모두 언급되어야 함
+        assert "동적 import" in content
+        assert "skipif" in content
+        assert "try/except" in content or "try: / except" in content
+        assert "빈 테스트" in content or "플레이스홀더" in content
+        assert "hasattr" in content
+
+    def test_prompt_references_dependency_artifacts(self, content):
+        assert "dependency_artifacts.md" in content
+
+    def test_prompt_suggests_ask_user_or_skip(self, content):
+        # 불확실할 때 대안으로 ask_user 와 pytest.skip 이 모두 제시되어야 함
+        assert "ask_user" in content
+        assert "pytest.skip" in content
+
+    def test_ask_user_usage_conditions_present(self, content):
+        # ask_user 남용 방지를 위한 조건 섹션 존재
+        assert "ask_user 사용 조건" in content
+
+    def test_workflow_is_strict_priority_and_mentions_dep_artifacts(self, content):
+        # "작업 절차" 섹션에 엄격한 우선순위 선언이 있어야 하고
+        # dependency_artifacts 가 그 안에서 명시적으로 언급돼야 한다.
+        assert "작업 절차" in content
+        assert "엄격한 우선순위" in content or "고정" in content
+        idx_workflow = content.index("작업 절차")
+        idx_dep = content.index("dependency_artifacts.md", idx_workflow)
+        assert idx_dep > idx_workflow
+
+    def test_workflow_clarifies_conflicting_first_directives(self, content):
+        """다른 섹션에서 '가장 먼저' 라고 나와도 '작업 절차' 의 1번이 최우선이어야 한다.
+
+        회귀 가드: 과거 '가장 먼저' 가 dependency_artifacts 와 PROJECT_STRUCTURE.md
+        양쪽에 모두 찍혀 있어 우선순위가 모호했다. 우선순위를 명시적으로 고정한다.
+        """
+        # 엄격한 우선순위를 선언하는 meta-directive 가 반드시 있어야 한다.
+        assert "이 절차의 1번이 항상 최우선" in content or "1번을 항상 우선" in content
+        # "행동 원칙" 의 PROJECT_STRUCTURE.md 지시는 보조 탐색(4단계 이하) 으로
+        # 격하돼야 하며, "가장 먼저" 로 다시 충돌시키면 안 된다.
+        # (섹션 헤더 '## 행동 원칙' 기준 — 작업 절차 안의 인용 표현 제외)
+        idx_principle = content.index("## 행동 원칙")
+        principle_block = content[idx_principle:idx_principle + 800]
+        assert "PROJECT_STRUCTURE.md" in principle_block
+        # 원칙 블록 안에서 "가장 먼저" 단어는 더이상 나오면 안 됨
+        assert "가장 먼저" not in principle_block, (
+            "'행동 원칙' 블록에 '가장 먼저' 가 남아 있으면 '작업 절차'의 우선순위와 충돌합니다."
+        )
