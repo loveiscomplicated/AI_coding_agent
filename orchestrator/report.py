@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 import yaml
 
-from orchestrator.pipeline import PipelineMetrics, PipelineResult
+from orchestrator.pipeline import PipelineMetrics, PipelineResult, _assert_invariants
 from orchestrator.task import Task, TaskStatus
 from reports.task_report import TaskReport
 
@@ -257,7 +257,7 @@ def build_report(
         from core.token_log import write_call_log
         for _log_role, _entries in m.call_logs.items():
             write_call_log(task.id, _log_role, _entries)
-    return TaskReport(
+    report = TaskReport(
         task_id=task.id,
         title=task.title,
         status="COMPLETED" if result.succeeded else "FAILED",
@@ -280,6 +280,8 @@ def build_report(
         orchestrator_summary=orchestrator_summary,
         quality_gate_rejections=m.quality_gate_rejections,
         quality_gate_reasons=m.quality_gate_reasons,
+        quality_gate_verdict=m.quality_gate_verdict,
+        quality_gate_rule_results=list(m.quality_gate_rule_results),
         test_red_to_green_first_try=m.test_red_to_green_first_try,
         impl_retries=m.impl_retries,
         review_retries=m.review_retries,
@@ -292,6 +294,11 @@ def build_report(
         token_usage=_token_usage or None,
         cost_estimation_quality=_cost_quality,
     )
+
+    # 불가능한 상태 조합 감지 — explicit raise (Python -O 에서도 활성화)
+    _assert_invariants(report)
+
+    return report
 
 
 def save_report(report: TaskReport, reports_dir: Path = _REPORTS_DIR) -> Path:

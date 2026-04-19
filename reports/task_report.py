@@ -19,6 +19,8 @@ ReviewerVerdict = Literal[
     "",  # reviewer 단계 이전에 실패한 경우
 ]
 
+QualityGateVerdict = Literal["PASS", "WARNING", "BLOCKED"]
+
 # PR 생성 + 태스크 COMPLETED 로 간주되는 verdict 집합. 집계(dashboard, weekly,
 # milestone, collector)와 UI 는 모두 이 집합을 참조해야 한다. APPROVED 만 세고
 # APPROVED_WITH_SUGGESTIONS 를 빼면 정상 머지된 PR이 "미승인" 으로 보이는 회귀가
@@ -56,6 +58,8 @@ class TaskReport:
     orchestrator_summary: str = ""
     quality_gate_rejections: int = 0
     quality_gate_reasons: list[str] = field(default_factory=list)
+    quality_gate_verdict: QualityGateVerdict | None = None
+    quality_gate_rule_results: list[dict[str, Any]] = field(default_factory=list)
     test_red_to_green_first_try: bool = False
     impl_retries: int = 0
     review_retries: int = 0
@@ -92,6 +96,8 @@ class TaskReport:
                 "failure_reasons": self.failure_reasons,
                 "quality_gate_rejections": self.quality_gate_rejections,
                 "quality_gate_reasons": self.quality_gate_reasons,
+                "quality_gate_verdict": self.quality_gate_verdict,
+                "quality_gate_rule_results": self.quality_gate_rule_results,
                 "test_red_to_green_first_try": self.test_red_to_green_first_try,
                 "impl_retries": self.impl_retries,
                 "review_retries": self.review_retries,
@@ -142,6 +148,8 @@ class TaskReport:
             failure_reasons=m.get("failure_reasons", []),
             quality_gate_rejections=m.get("quality_gate_rejections", 0),
             quality_gate_reasons=m.get("quality_gate_reasons", []),
+            quality_gate_verdict=_coerce_verdict(m.get("quality_gate_verdict")),
+            quality_gate_rule_results=list(m.get("quality_gate_rule_results", [])),
             test_red_to_green_first_try=m.get("test_red_to_green_first_try", False),
             impl_retries=m.get("impl_retries", 0),
             review_retries=m.get("review_retries", 0),
@@ -171,3 +179,13 @@ def _coerce_quality(value: Any) -> CostEstimationQuality:
     if value in ("exact", "fallback", "missing"):
         return value  # type: ignore[return-value]
     return "missing"
+
+
+def _coerce_verdict(value: Any) -> QualityGateVerdict | None:
+    """YAML 로드 시 quality_gate_verdict 를 Literal 범위로 제한한다.
+
+    구 포맷(필드 없음) 또는 unknown 값은 None 으로 폴백.
+    """
+    if value in ("PASS", "WARNING", "BLOCKED"):
+        return value  # type: ignore[return-value]
+    return None

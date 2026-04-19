@@ -36,3 +36,10 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 py-modules = ["main"]
 packages   = ["core", "cli", "tools", "llm", "memory", "backend", "orchestrator", "docker", "agents", "hotline", "structure"]
+
+[tool.pytest.ini_options]
+# 루트에서 `pytest` 실행 시 scripts/test_discord_read.py 같은 수동 실행 스크립트가
+# 수집되지 않도록 수집 범위를 tests/ 디렉토리로 명시적으로 제한한다.
+# scripts/ 하위의 test_* 파일은 API 호출을 포함한 인터랙티브 검증 도구이므로
+# CI 회귀 스위트에 포함되면 안 된다.
+testpaths = ["tests"]

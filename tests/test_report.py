@@ -62,6 +62,13 @@ class _FakePipelineResult:
     ):
         self.succeeded = succeeded
         self.failure_reason = failure_reason
+        # pipeline invariant 을 만족시키기 위해 succeeded=True 에 기본값 주입:
+        # test_result 가 없으면 "3 passed", review 가 없으면 APPROVED 로 채운다.
+        # 각 테스트가 명시적으로 test_result/review 를 넘기면 그대로 사용한다.
+        if succeeded and test_result is None:
+            test_result = _FakeTestResult()
+        if succeeded and review is None:
+            review = _FakeReview()
         self.test_result = test_result
         self.review = review
         from orchestrator.pipeline import PipelineMetrics
@@ -131,19 +138,25 @@ class TestBuildReport:
         assert report.test_count == 7
 
     def test_non_numeric_summary_gives_zero_count(self):
-        task = make_task()
+        # test_count=0 + succeeded=True 는 invariant 위반이므로, 이 파서 동작은
+        # 실패 경로(FAILED)에서만 관찰한다 — 실제로 "no tests ran" summary 는
+        # 성공 경로에 도달하지 않는다.
+        task = make_task(status=TaskStatus.FAILED)
         result = _FakePipelineResult(
-            succeeded=True,
+            succeeded=False,
             test_result=_FakeTestResult(summary="no tests ran"),
         )
         report = build_report(task, result)
         assert report.test_count == 0
 
     def test_reviewer_info_extracted(self):
-        task = make_task()
+        # CHANGES_REQUESTED verdict 는 pipeline invariant 상 succeeded=False 와만
+        # 공존 가능하므로 FAILED 경로에서 검증한다.
+        task = make_task(status=TaskStatus.FAILED)
         result = _FakePipelineResult(
-            succeeded=True,
+            succeeded=False,
             review=_FakeReview(verdict="CHANGES_REQUESTED", details="수정 필요"),
+            test_result=_FakeTestResult(),
         )
         report = build_report(task, result)
         assert report.reviewer_verdict == "CHANGES_REQUESTED"
