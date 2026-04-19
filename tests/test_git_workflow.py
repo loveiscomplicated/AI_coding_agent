@@ -372,3 +372,68 @@ class TestBuildPRBody:
         assert "Reviewer Suggestions (non-blocking)" not in body
         # APPROVED 의 경우 details 는 여전히 코드 리뷰 섹션에 표시
         assert "상세 리뷰 내용" in body
+
+
+class TestBuildPRBodyDepInjection:
+    """PR body 에 dep injection 검증 결과가 항상 포함돼야 한다.
+
+    verify_dep_injection.py 의 판정 규칙(depends_on vs dep_files_injected) 과
+    동일한 결과를 섹션으로 고정 노출하기 위한 회귀 가드.
+    """
+
+    def _make_result(self, task: Task, *, injected: int) -> PipelineResult:
+        from orchestrator.pipeline import PipelineMetrics
+        return PipelineResult(
+            task=task,
+            succeeded=True,
+            test_result=RunResult(passed=True, returncode=0, stdout="", summary=""),
+            review=ReviewResult(verdict="APPROVED", summary="ok", details="", raw=""),
+            test_files=[],
+            impl_files=[],
+            metrics=PipelineMetrics(dep_files_injected=injected),
+        )
+
+    def test_no_deps_section_is_informational(self, task):
+        assert task.depends_on == []
+        body = _build_pr_body(task, self._make_result(task, injected=0))
+        assert "의존성 주입 검증" in body
+        assert "검증 대상 아님" in body
+
+    def test_deps_with_zero_injected_flags_warning(self):
+        task = Task(
+            id="task-002",
+            title="x",
+            description="",
+            acceptance_criteria=[],
+            target_files=["src/a.py"],
+            depends_on=["task-001"],
+        )
+        body = _build_pr_body(task, self._make_result(task, injected=0))
+        assert "의존성 주입 검증" in body
+        assert "⚠️" in body
+        assert "dep_files_injected=0" in body
+        assert "task-001" in body
+
+    def test_deps_with_nonzero_injected_shows_ok(self):
+        task = Task(
+            id="task-002",
+            title="x",
+            description="",
+            acceptance_criteria=[],
+            target_files=["src/a.py"],
+            depends_on=["task-001"],
+        )
+        body = _build_pr_body(task, self._make_result(task, injected=3))
+        assert "의존성 주입 검증" in body
+        assert "✅" in body
+        assert "dep_files_injected=3" in body
+
+    def test_section_present_even_in_minimal_pr(self, task):
+        """review/test_result 여부와 무관하게 섹션이 항상 노출돼야 한다."""
+        from orchestrator.pipeline import PipelineMetrics
+        result = PipelineResult(
+            task=task, succeeded=True, test_result=None, review=None,
+            test_files=[], impl_files=[], metrics=PipelineMetrics(),
+        )
+        body = _build_pr_body(task, result)
+        assert "의존성 주입 검증" in body
