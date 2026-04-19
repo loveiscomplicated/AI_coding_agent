@@ -62,10 +62,21 @@ def classify_failure(failure_reason: str, test_stdout: str = "") -> FailureType:
         return FailureType.ENV_ERROR
     if "[max_iter]" in combined:
         return FailureType.MAX_ITER_EXCEEDED
-    # [TARGET_MISSING] — Implementer 가 target_files 를 채우지 않고 종료한 경우.
-    # WRITE_LOOP 와 같은 '쓰기 미수행' 계열이므로 MAX_ITER_EXCEEDED 로 묶어
-    # "바로 write_file 호출하라" 고정 힌트를 재사용한다.
-    if "[target_missing]" in combined:
+    # 쓰기 미수행 / 산출물 누락 계열 — 모두 MAX_ITER_EXCEEDED 로 묶어
+    # "바로 write_file 호출하라" 고정 힌트 + 2회차 give_up 흐름을 재사용한다.
+    #   [TARGET_MISSING]    Implementer 가 target_files 를 채우지 않음
+    #   [NO_WRITE]          TestWriter 가 write_file/edit_file 을 한 번도 호출하지 않음
+    #   [TEST_MISSING]      TestWriter 가 tests/ 에 파일을 쓰지 못함 (잘못된 경로 포함)
+    #   [TEST_SKELETON_ONLY] 선주입 스켈레톤을 그대로 두고 종료
+    #   [NO_TEST_FUNCTIONS] test_* 함수 없이 종료
+    # (TEST_SYNTAX_ERROR 는 LOGIC_ERROR 로 떨어져 analyze() LLM 이 파일별 수정
+    #  힌트를 생성한다 — 문법 오류는 "write 를 더 하라" 가 아니라 "어디를 고치라"
+    #  가 필요하다.)
+    _WRITE_LIKE_PREFIXES = (
+        "[target_missing]", "[no_write]", "[test_missing]",
+        "[test_skeleton_only]", "[no_test_functions]",
+    )
+    if any(p in combined for p in _WRITE_LIKE_PREFIXES):
         return FailureType.MAX_ITER_EXCEEDED
     return FailureType.LOGIC_ERROR
 
