@@ -30,6 +30,7 @@ from orchestrator.pipeline import (
     _build_test_writer_prompt,
     _build_implementer_prompt,
     _build_reviewer_prompt,
+    _validate_testwriter_output,
 )
 from orchestrator.task import Task, TaskStatus
 from orchestrator.workspace import WorkspaceManager
@@ -69,8 +70,21 @@ def workspace(tmp_path, task):
     return ws
 
 
-def _ok_scoped(answer: str = "완료") -> ScopedResult:
-    return ScopedResult(answer=answer, succeeded=True)
+def _ok_scoped(
+    answer: str = "완료",
+    write_file_count: int = 1,
+    edit_file_count: int = 0,
+    explored_paths: list[str] | None = None,
+) -> ScopedResult:
+    """성공 mock. TestWriter 가드를 통과하려면 write 호출이 최소 1회 있어야 한다 —
+    실제 루프에서는 write_file 이 호출되어야 파일이 남으므로 기본값 1이 현실적이다.
+    NO_WRITE 경로를 테스트하려면 write_file_count=0 으로 호출한다."""
+    return ScopedResult(
+        answer=answer, succeeded=True,
+        write_file_count=write_file_count,
+        edit_file_count=edit_file_count,
+        explored_paths=explored_paths or [],
+    )
 
 
 def _fail_scoped(answer: str = "실패") -> ScopedResult:
@@ -84,6 +98,20 @@ def _pass_run() -> RunResult:
 def _fail_run(summary: str = "1 failed in 0.1s") -> RunResult:
     return RunResult(
         passed=False, returncode=1, stdout="AssertionError: ...", summary=summary
+    )
+
+
+def _write_dependency_artifact(workspace: WorkspaceManager, file_paths: list[str]) -> None:
+    context_dir = workspace.path / "context"
+    context_dir.mkdir(exist_ok=True)
+    sections = [
+        "# 선행 태스크 산출물",
+        "",
+        "## task-dep: dependency",
+        f"**파일**: {', '.join(file_paths)}",
+    ]
+    (context_dir / "dependency_artifacts.md").write_text(
+        "\n".join(sections), encoding="utf-8"
     )
 
 
@@ -280,11 +308,15 @@ class TestTDDPipelineFailurePaths:
         mock_runner.run.assert_not_called()
 
     @patch("orchestrator.pipeline.ScopedReactLoop")
-    def test_fails_when_no_test_files_created(self, MockLoop, task, tmp_path):
-        # workspace 에 tests/ 파일 없음
+    def test_fails_when_test_writer_leaves_skeleton(self, MockLoop, task, tmp_path):
+        """TestWriter 가 선주입 스켈레톤을 건드리지 않고 끝나면 가드가 차단한다.
+
+        스켈레톤 선주입 이후 "tests/ 가 비었다" 는 상태는 발생하지 않는다 —
+        동일 의도의 회귀 가드는 [TEST_SKELETON_ONLY] 판정으로 이동했다.
+        """
         ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
         ws.create()
-        # tests/ 디렉토리는 비어 있는 상태
+        # tests/test_auth.py 는 skeleton 그대로 남아 있음
 
         MockLoop.return_value.run.return_value = _ok_scoped("완료했는데 파일 안 만듦")
         mock_runner = MagicMock()
@@ -294,7 +326,8 @@ class TestTDDPipelineFailurePaths:
         ws.cleanup()
 
         assert result.succeeded is False
-        assert "tests/" in result.failure_reason
+        assert "[TEST_SKELETON_ONLY]" in result.failure_reason
+        mock_runner.run.assert_not_called()
 
     @patch("orchestrator.pipeline.ScopedReactLoop")
     def test_fails_when_implementer_fails(self, MockLoop, task, workspace):
@@ -433,6 +466,105 @@ class TestPipelineResult:
         assert task.failure_reason == "원인"
         assert result.succeeded is False
         assert result.failure_reason == "원인"
+
+
+class TestDependencyInjectionMetrics:
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_dep_files_injected_counts_only_non_target_injected_files(
+        self, MockLoop, tmp_path
+    ):
+        task = Task(
+            id="task-metrics",
+            title="metric",
+            description="d",
+            acceptance_criteria=["c"],
+            target_files=["src/foo.py"],
+        )
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        try:
+            (ws.tests_dir / "test_foo.py").write_text(_real_test_content(), encoding="utf-8")
+            (ws.src_dir / "foo.py").write_text("def current():\n    return 1\n", encoding="utf-8")
+            (ws.src_dir / "models").mkdir(exist_ok=True)
+            (ws.src_dir / "models" / "user.py").write_text(
+                "class User:\n    pass\n", encoding="utf-8"
+            )
+            (ws.src_dir / "models" / "__init__.py").write_text("", encoding="utf-8")
+            _write_dependency_artifact(ws, ["src/foo.py", "src/models/user.py"])
+
+            MockLoop.return_value.run.return_value = _ok_scoped(
+                "VERDICT: APPROVED\nSUMMARY: ok\nDETAILS:\nfine"
+            )
+            mock_runner = MagicMock()
+            mock_runner.run.return_value = _pass_run()
+
+            pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+            result = pipeline.run(task, ws)
+
+            assert result.metrics.dep_files_injected == 1
+        finally:
+            ws.cleanup()
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_dep_files_injected_zero_when_no_dependency_artifact(
+        self, MockLoop, tmp_path
+    ):
+        task = Task(
+            id="task-no-artifact",
+            title="metric",
+            description="d",
+            acceptance_criteria=["c"],
+            target_files=["src/foo.py"],
+        )
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        try:
+            (ws.tests_dir / "test_foo.py").write_text(_real_test_content(), encoding="utf-8")
+            (ws.src_dir / "foo.py").write_text("def current():\n    return 1\n", encoding="utf-8")
+
+            MockLoop.return_value.run.return_value = _ok_scoped(
+                "VERDICT: APPROVED\nSUMMARY: ok\nDETAILS:\nfine"
+            )
+            mock_runner = MagicMock()
+            mock_runner.run.return_value = _pass_run()
+
+            pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+            result = pipeline.run(task, ws)
+
+            assert result.metrics.dep_files_injected == 0
+        finally:
+            ws.cleanup()
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_dep_files_injected_ignores_current_task_targets_even_if_present_in_src(
+        self, MockLoop, tmp_path
+    ):
+        task = Task(
+            id="task-duplicate",
+            title="metric",
+            description="d",
+            acceptance_criteria=["c"],
+            target_files=["src/foo.py"],
+        )
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        try:
+            (ws.tests_dir / "test_foo.py").write_text(_real_test_content(), encoding="utf-8")
+            (ws.src_dir / "foo.py").write_text("def current():\n    return 1\n", encoding="utf-8")
+            _write_dependency_artifact(ws, ["src/foo.py"])
+
+            MockLoop.return_value.run.return_value = _ok_scoped(
+                "VERDICT: APPROVED\nSUMMARY: ok\nDETAILS:\nfine"
+            )
+            mock_runner = MagicMock()
+            mock_runner.run.return_value = _pass_run()
+
+            pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+            result = pipeline.run(task, ws)
+
+            assert result.metrics.dep_files_injected == 0
+        finally:
+            ws.cleanup()
 
 
 # ── APPROVED_WITH_SUGGESTIONS ────────────────────────────────────────────────
@@ -587,3 +719,311 @@ class TestTDDPipelineApprovedWithSuggestions:
         # Reviewer 가 최소 2회 호출됐어야 한다 (초회 + 재시도 1회)
         call_args = [c for c in MockLoop.call_args_list]
         assert len(call_args) >= 3  # TestWriter + Implementer*N + Reviewer*2
+
+
+# ── TestWriter 종료 가드 ─────────────────────────────────────────────────────
+#
+# _validate_testwriter_output 가 실패 사유를 올바르게 반환하는지, 그리고
+# 파이프라인이 그 사유로 재시도 + 최종 실패 판정을 내리는지 검증한다.
+
+
+def _real_test_content() -> str:
+    return "def test_login_ok():\n    assert 1 == 1\n"
+
+
+class TestValidateTestWriterOutput:
+    def test_passes_when_files_have_real_tests(self, task, tmp_path):
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        try:
+            (ws.tests_dir / "test_auth.py").write_text(_real_test_content())
+            scoped = _ok_scoped(write_file_count=1)
+            assert _validate_testwriter_output(ws, task, scoped) is None
+        finally:
+            ws.cleanup()
+
+    def test_no_write_when_counters_zero(self, task, tmp_path):
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        try:
+            scoped = ScopedResult(answer="완료", succeeded=True,
+                                  write_file_count=0, edit_file_count=0)
+            reason = _validate_testwriter_output(ws, task, scoped)
+            assert reason is not None
+            assert reason.startswith("[NO_WRITE]")
+        finally:
+            ws.cleanup()
+
+    def test_test_missing_when_tests_dir_empty(self, task, tmp_path):
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        try:
+            # 스켈레톤을 전부 제거
+            for f in list(ws.tests_dir.rglob("*")):
+                if f.is_file():
+                    f.unlink()
+            scoped = _ok_scoped(write_file_count=1)
+            reason = _validate_testwriter_output(ws, task, scoped)
+            assert reason is not None
+            assert reason.startswith("[TEST_MISSING]")
+        finally:
+            ws.cleanup()
+
+    def test_syntax_error_detected(self, task, tmp_path):
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        try:
+            (ws.tests_dir / "test_auth.py").write_text("def test_x(:\n    pass\n")
+            scoped = _ok_scoped(write_file_count=1)
+            reason = _validate_testwriter_output(ws, task, scoped)
+            assert reason is not None
+            assert reason.startswith("[TEST_SYNTAX_ERROR]")
+            assert "test_auth.py" in reason
+        finally:
+            ws.cleanup()
+
+    def test_skeleton_unchanged_detected(self, task, tmp_path):
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        try:
+            # 스켈레톤 그대로 (create() 결과 유지)
+            scoped = _ok_scoped(write_file_count=1)
+            reason = _validate_testwriter_output(ws, task, scoped)
+            assert reason is not None
+            assert reason.startswith("[TEST_SKELETON_ONLY]")
+            assert "test_auth.py" in reason
+        finally:
+            ws.cleanup()
+
+    def test_react_jsx_tsx_skeletons_visible_to_guard(self, tmp_path):
+        """회귀 가드: JSX/TSX 는 스켈레톤 선주입 대상이므로 가드 수집기도 봐야 한다.
+
+        이전에는 `_TEST_FILE_GLOBS` 가 `.js/.ts` 만 포함해, 정상 배치된 `.jsx/.tsx`
+        스켈레톤도 `[TEST_MISSING]` 으로 오판됐다. skeleton unchanged 를 트리거해
+        수집기가 파일을 보고 있음을 확인한다.
+        """
+        for ext in ("jsx", "tsx"):
+            task_x = Task(
+                id=f"task-react-{ext}", title="t", description="d",
+                acceptance_criteria=["c"],
+                target_files=[f"Component.{ext}"],
+                language="javascript" if ext == "jsx" else "typescript",
+            )
+            ws = WorkspaceManager(task_x, tmp_path, base_dir=tmp_path / f"ws_{ext}")
+            ws.create()
+            try:
+                # 스켈레톤이 실제로 선주입됐는지 먼저 확인
+                skel = ws.tests_dir / f"test_Component.{ext}"
+                assert skel.exists(), f"{ext} 스켈레톤 미생성: {list(ws.tests_dir.rglob('*'))}"
+
+                # 가드는 스켈레톤 그대로 → TEST_SKELETON_ONLY 를 반환해야 한다
+                # ([TEST_MISSING] 이 나오면 수집기가 파일을 못 보는 것이다).
+                scoped = _ok_scoped(write_file_count=1)
+                reason = _validate_testwriter_output(ws, task_x, scoped)
+                assert reason is not None
+                assert reason.startswith("[TEST_SKELETON_ONLY]"), (
+                    f"{ext} 가드가 파일을 못 봄: {reason!r}"
+                )
+            finally:
+                ws.cleanup()
+
+    def test_no_test_functions_detected(self, task, tmp_path):
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        try:
+            # TODO 마커는 제거했지만 test_ 함수가 없는 상태
+            (ws.tests_dir / "test_auth.py").write_text(
+                "import pytest\n\nx = 1\n"
+            )
+            scoped = _ok_scoped(write_file_count=1)
+            reason = _validate_testwriter_output(ws, task, scoped)
+            assert reason is not None
+            assert reason.startswith("[NO_TEST_FUNCTIONS]")
+        finally:
+            ws.cleanup()
+
+
+class TestTestWriterGuardIntegration:
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_testwriter_fails_when_no_write_file_called(self, MockLoop, task, tmp_path):
+        """NO_WRITE: 쓰기 카운터가 0 이면 가드가 차단한다.
+
+        스켈레톤 선주입 상태라 파일은 존재하지만, write_file 을 한 번도
+        호출하지 않으면 탐색 루프로 간주해 실패 처리.
+        """
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+
+        MockLoop.return_value.run.return_value = ScopedResult(
+            answer="탐색만 함", succeeded=True, write_file_count=0, edit_file_count=0,
+        )
+        mock_runner = MagicMock()
+        pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+        result = pipeline.run(task, ws)
+        ws.cleanup()
+
+        assert result.succeeded is False
+        assert "[NO_WRITE]" in result.failure_reason
+        mock_runner.run.assert_not_called()
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_testwriter_fails_when_test_file_missing(self, MockLoop, task, tmp_path):
+        """TEST_MISSING: TestWriter 가 tests/ 밖에 파일을 쓰거나 스켈레톤을 삭제한 경우."""
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+
+        def _wipe_tests(*_a, **_k):
+            for f in list(ws.tests_dir.rglob("*")):
+                if f.is_file():
+                    f.unlink()
+            return _ok_scoped("tests 비움")
+
+        MockLoop.return_value.run.side_effect = _wipe_tests
+
+        mock_runner = MagicMock()
+        pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+        result = pipeline.run(task, ws)
+        ws.cleanup()
+
+        assert result.succeeded is False
+        assert "[TEST_MISSING]" in result.failure_reason
+        mock_runner.run.assert_not_called()
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_testwriter_fails_when_syntax_invalid(self, MockLoop, task, tmp_path):
+        """TEST_SYNTAX_ERROR: 테스트 파일에 Python 문법 오류가 있으면 차단."""
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+
+        def _write_broken(*_a, **_k):
+            (ws.tests_dir / "test_auth.py").write_text("def test_x(:\n    pass\n")
+            return _ok_scoped("깨진 문법")
+
+        MockLoop.return_value.run.side_effect = _write_broken
+        mock_runner = MagicMock()
+        pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+        result = pipeline.run(task, ws)
+        ws.cleanup()
+
+        assert result.succeeded is False
+        assert "[TEST_SYNTAX_ERROR]" in result.failure_reason
+        mock_runner.run.assert_not_called()
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_testwriter_fails_when_skeleton_unchanged(self, MockLoop, task, tmp_path):
+        """TEST_SKELETON_ONLY: 선주입 스켈레톤을 그대로 두면 차단."""
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        # 스켈레톤 파일은 create() 로 이미 존재. 건드리지 않음.
+
+        MockLoop.return_value.run.return_value = _ok_scoped("안 건드림")
+        mock_runner = MagicMock()
+        pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+        result = pipeline.run(task, ws)
+        ws.cleanup()
+
+        assert result.succeeded is False
+        assert "[TEST_SKELETON_ONLY]" in result.failure_reason
+        mock_runner.run.assert_not_called()
+
+        # 회귀 가드 (#4): 실패 사유가 TaskReport 집계용 metrics 에 누적돼야 한다.
+        assert result.metrics.quality_gate_rejections >= 1
+        assert any(
+            "[TEST_SKELETON_ONLY]" in r for r in result.metrics.quality_gate_reasons
+        ), f"quality_gate_reasons 누락: {result.metrics.quality_gate_reasons}"
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_testwriter_fails_when_no_test_functions(self, MockLoop, task, tmp_path):
+        """NO_TEST_FUNCTIONS: test_* 함수가 하나도 없으면 차단."""
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+
+        def _write_no_fns(*_a, **_k):
+            (ws.tests_dir / "test_auth.py").write_text("import pytest\n\nx = 1\n")
+            return _ok_scoped("함수 없음")
+
+        MockLoop.return_value.run.side_effect = _write_no_fns
+
+        mock_runner = MagicMock()
+        pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+        result = pipeline.run(task, ws)
+        ws.cleanup()
+
+        assert result.succeeded is False
+        assert "[NO_TEST_FUNCTIONS]" in result.failure_reason
+        mock_runner.run.assert_not_called()
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_testwriter_retry_prompt_includes_explored_paths(
+        self, MockLoop, task, tmp_path,
+    ):
+        """가드 실패 시 재시도 프롬프트에 prior_explored_paths + failure_reason 이
+        주입되는지 검증한다.
+
+        시나리오:
+          1회차 TestWriter : 스켈레톤 그대로 남김 + explored_paths 반환 → 가드가 [TEST_SKELETON_ONLY] 로 차단
+          2회차 TestWriter : 재시도 — 이 호출의 user_message 가 검증 대상
+        """
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+
+        # 1st call: skeleton unchanged + explored_paths
+        scoped_first = ScopedResult(
+            answer="탐색만",
+            succeeded=True,
+            write_file_count=1,
+            edit_file_count=0,
+            explored_paths=[
+                "/ws/src/auth.py",
+                "/ws/tests/test_auth.py",
+                "/ws/src/auth.py",  # 중복 — dedupe 대상
+            ],
+        )
+
+        # 2회차 이후는 파이프라인을 끝까지 돌릴 필요 없다 — 재시도 프롬프트가
+        # 주입되었는지만 확인하면 되므로, 2회차에서도 skeleton 을 그대로 두어
+        # 파이프라인이 실패하도록 둔다 (assert 대상은 call_args_list).
+        call_counter = {"n": 0}
+
+        def _side_effect(*_a, **_k):
+            call_counter["n"] += 1
+            if call_counter["n"] == 1:
+                return scoped_first
+            # 2회차: 여전히 skeleton → 가드가 최종 실패를 낸다
+            return ScopedResult(
+                answer="여전히 skeleton",
+                succeeded=True,
+                write_file_count=1,
+                edit_file_count=0,
+                explored_paths=[],
+            )
+
+        MockLoop.return_value.run.side_effect = _side_effect
+
+        mock_runner = MagicMock()
+        pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+        result = pipeline.run(task, ws)
+        ws.cleanup()
+
+        # 파이프라인은 TestWriter 가드 재시도 후에도 실패해야 한다
+        assert result.succeeded is False
+        assert "[TEST_SKELETON_ONLY]" in result.failure_reason
+
+        # 재시도 프롬프트 검증: 2번째 호출의 user_message 에 경로·사유 포함
+        call_args_list = MockLoop.return_value.run.call_args_list
+        assert len(call_args_list) >= 2, f"호출이 2회 미만: {len(call_args_list)}"
+        second_call = call_args_list[1]
+        second_prompt = (
+            second_call.args[0] if second_call.args
+            else second_call.kwargs.get("user_message", "")
+        )
+        assert "[TEST_SKELETON_ONLY]" in second_prompt
+        assert "직전 시도에서 탐색한 파일" in second_prompt
+        # 중복 제거 확인
+        assert second_prompt.count("/ws/src/auth.py") == 1
+        # 두 개의 고유 경로가 모두 포함
+        assert "/ws/src/auth.py" in second_prompt
+        assert "/ws/tests/test_auth.py" in second_prompt
+
+        # Docker 는 한 번도 실행되지 않아야 한다 (가드가 사전 차단)
+        mock_runner.run.assert_not_called()

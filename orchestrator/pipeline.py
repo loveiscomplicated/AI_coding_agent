@@ -46,7 +46,9 @@ from docker.runner import DockerTestRunner, RunResult, _detect_runtime
 from llm import LLMConfig, create_client
 from llm.base import Message, StopReason
 from orchestrator.task import Task, TaskStatus, LANGUAGE_TEST_FRAMEWORK_MAP
-from orchestrator.workspace import WorkspaceManager, strip_src_prefix
+from orchestrator.workspace import (
+    WorkspaceManager, strip_src_prefix, is_skeleton_unchanged,
+)
 from tools.hotline_tools import register_workspace_context_dir, unregister_workspace_context_dir
 
 logger = logging.getLogger(__name__)
@@ -343,14 +345,13 @@ class TDDPipeline:
         # 선행 태스크 주입 파일 수 기록
         dep_artifact = workspace.path / "context" / "dependency_artifacts.md"
         if dep_artifact.exists():
-            # src/ 에 주입된 파일 수를 세기 (원래 target_files 외 추가분).
-            # _copy_target_files() 가 선행 'src/' 한 단계를 떼고 배치하므로
-            # 비교 시 양쪽 모두 같은 규약(src_dir 기준 상대 경로)으로 정규화한다.
+            # dep_files_injected 는 "실제로 주입된 선행 파일" 수여야 한다.
+            # workspace/src 전체를 세면 현재 태스크 target_files 나 __init__.py 같은
+            # 보조 파일이 섞이므로, dependency_artifacts.md 에 기록된 파일만
+            # 현재 태스크의 target_files 와 같은 규약으로 비교해 집계한다.
             original_targets = {strip_src_prefix(f) for f in task.target_files}
-            all_src = set(workspace.list_src_files())
-            metrics.dep_files_injected = len(
-                [f for f in all_src if f.removeprefix("src/") not in original_targets]
-            )
+            injected_files = _parse_dependency_artifact_files(dep_artifact)
+            metrics.dep_files_injected = len(injected_files - original_targets)
 
         # ── Step 1: 테스트 작성 ───────────────────────────────────────────────
         # TestWriter 실행 전 기존 테스트 파일 스냅샷 (새로 생성된 파일만 DockerTestRunner에 전달하기 위함)
@@ -361,46 +362,76 @@ class TDDPipeline:
         _p({"type": "step", "step": "test_writing", "message": "TestWriter: 테스트 작성 중…"})
         test_scoped = self._run_test_writer(task, workspace, on_progress=_agent_p, pause_ctrl=pause_ctrl, enriched_desc=enriched_desc)
         _accumulate_tokens(metrics, "test_writer", test_scoped)
+
+        # TestWriter 종료 가드:
+        #  - LLM 실패(succeeded=False)  → 기존과 동일하게 WRITE_LOOP 여부로 분기
+        #  - LLM 성공(succeeded=True)   → 출력 가드 실행 → 실패 사유가 있으면 재시도
+        # 두 경우 모두 최대 1회 재시도 (기존 동작 유지) 후에도 실패면 파이프라인 실패.
+        _retry_scoped: ScopedResult | None = None
+        _retry_reason: str | None = None
+        _retry_label: str = ""
+
         if not test_scoped.succeeded:
             if _is_write_loop(test_scoped):
-                # 탐색만 하고 write_file 미호출 — retry=True로 재시도
-                logger.warning("[%s] TestWriter WRITE_LOOP — 재시도", task.id)
-                _p({"type": "step", "step": "write_loop_retry",
-                    "message": "탐색 루프 감지 — TestWriter 재시도…"})
-                test_scoped = self._run_test_writer(
-                    task, workspace, retry=True,
-                    on_progress=_agent_p, pause_ctrl=pause_ctrl,
-                    enriched_desc=enriched_desc,
+                _retry_reason = (
+                    "[WRITE_LOOP] 탐색만 하고 write_file 을 호출하지 않은 채 종료했습니다."
                 )
-                _accumulate_tokens(metrics, "test_writer", test_scoped)
-                if not test_scoped.succeeded:
-                    prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
-                    metrics.failed_stage = "test_writing"
-                    return PipelineResult.failed(
-                        task,
-                        f"{prefix}TestWriter 실패 (탐색 루프 후 재시도도 실패): {test_scoped.answer}",
-                        metrics=metrics,
-                    )
+                _retry_label = "탐색 루프 감지 — TestWriter 재시도…"
             else:
                 prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
                 metrics.failed_stage = "test_writing"
                 return PipelineResult.failed(task, f"{prefix}TestWriter 실패: {test_scoped.answer}", metrics=metrics)
+        else:
+            _retry_reason = _validate_testwriter_output(workspace, task, test_scoped)
+            if _retry_reason:
+                _retry_label = f"TestWriter 출력 가드 — {_retry_reason[:80]}"
 
-        test_files = workspace.list_test_files()
-        if not test_files:
-            # 모델이 write_file을 호출하지 않고 종료한 경우 — 즉시 1회 재시도
-            logger.warning("[%s] TestWriter 파일 미생성 — 재시도", task.id)
-            _p({"type": "step", "step": "test_writing_retry", "message": "TestWriter: 파일 미생성 — 재시도 중…"})
-            test_scoped = self._run_test_writer(task, workspace, retry=True, on_progress=_agent_p, pause_ctrl=pause_ctrl, enriched_desc=enriched_desc)
+        if _retry_reason:
+            # TaskReport 집계용: 가드 reject 횟수·사유 누적
+            metrics.quality_gate_rejections += 1
+            metrics.quality_gate_reasons.append(f"test_writer: {_retry_reason}")
+
+            logger.warning("[%s] TestWriter 가드 — 재시도: %s", task.id, _retry_reason)
+            _p({"type": "step", "step": "test_writing_retry", "message": _retry_label})
+            test_scoped = self._run_test_writer(
+                task, workspace, retry=True,
+                on_progress=_agent_p, pause_ctrl=pause_ctrl,
+                enriched_desc=enriched_desc,
+                prior_failure_reason=_retry_reason,
+                prior_explored_paths=list(test_scoped.explored_paths),
+            )
             _accumulate_tokens(metrics, "test_writer", test_scoped)
+
             if not test_scoped.succeeded:
                 prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
                 metrics.failed_stage = "test_writing"
-                return PipelineResult.failed(task, f"{prefix}TestWriter 실패: {test_scoped.answer}", metrics=metrics)
-            test_files = workspace.list_test_files()
-            if not test_files:
+                return PipelineResult.failed(
+                    task,
+                    f"{prefix}TestWriter 실패 (가드 후 재시도도 실패): {test_scoped.answer}",
+                    metrics=metrics,
+                )
+            # 재시도 후에도 출력 가드 위반이면 파이프라인 실패 (기존 retry 한도 소진)
+            _final_reason = _validate_testwriter_output(workspace, task, test_scoped)
+            if _final_reason:
+                metrics.quality_gate_rejections += 1
+                metrics.quality_gate_reasons.append(f"test_writer (retry): {_final_reason}")
                 metrics.failed_stage = "test_writing"
-                return PipelineResult.failed(task, "TestWriter 가 tests/ 에 파일을 생성하지 않았습니다.", metrics=metrics)
+                return PipelineResult.failed(
+                    task,
+                    f"TestWriter 가드 재시도 후에도 실패: {_final_reason}",
+                    metrics=metrics,
+                )
+
+        test_files = workspace.list_test_files()
+        # 가드가 통과했다면 반드시 파일이 있다 — 방어적으로 한 번 더 확인.
+        if not test_files:
+            metrics.failed_stage = "test_writing"
+            return PipelineResult.failed(
+                task,
+                "[TEST_MISSING] TestWriter 가 tests/ 에 파일을 생성하지 않았습니다.",
+                metrics=metrics,
+            )
+
         _p({"type": "step", "step": "test_written",
             "message": f"테스트 파일 생성: {', '.join(test_files)}"})
         logger.info("[%s] 테스트 파일 생성: %s", task.id, test_files)
@@ -679,6 +710,8 @@ class TDDPipeline:
         on_progress=None,
         pause_ctrl=None,
         enriched_desc: str | None = None,
+        prior_failure_reason: str | None = None,
+        prior_explored_paths: list[str] | None = None,
     ) -> ScopedResult:
         stop_check = (lambda: pause_ctrl.is_stopped) if pause_ctrl else None
         _framework = LANGUAGE_TEST_FRAMEWORK_MAP.get(task.language, task.test_framework)
@@ -697,12 +730,15 @@ class TDDPipeline:
             static_issues=static_issues,
             missing_criteria=missing_criteria,
             description_override=enriched_desc,
+            prior_failure_reason=prior_failure_reason,
+            prior_explored_paths=prior_explored_paths,
         )
         logger.debug(
-            "[%s] TestWriter 시작 (retry=%s, static_issues=%d, missing=%d)",
+            "[%s] TestWriter 시작 (retry=%s, static_issues=%d, missing=%d, prior_reason=%r)",
             task.id, retry,
             len(static_issues or []),
             len(missing_criteria or []),
+            (prior_failure_reason or "")[:60],
         )
         return loop.run(prompt)
 
@@ -889,6 +925,20 @@ except Exception as e:
 """
 
 
+def _dedupe_explored_paths(paths: list[str], limit: int = 20) -> list[str]:
+    """탐색 경로 목록을 삽입 순서 기준으로 중복 제거하고 상위 limit 개만 반환한다."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for p in paths:
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        ordered.append(p)
+        if len(ordered) >= limit:
+            break
+    return ordered
+
+
 def _build_test_writer_prompt(
     task: Task,
     workspace: WorkspaceManager,
@@ -896,6 +946,8 @@ def _build_test_writer_prompt(
     static_issues: list[str] | None = None,
     missing_criteria: list[str] | None = None,
     description_override: str | None = None,
+    prior_failure_reason: str | None = None,
+    prior_explored_paths: list[str] | None = None,
 ) -> str:
     structure_hint = ""
     if (workspace.path / "PROJECT_STRUCTURE.md").exists():
@@ -909,6 +961,24 @@ def _build_test_writer_prompt(
             "반드시 `write_file` 도구를 호출하여 `tests/` 디렉토리에 테스트 파일을 작성하세요.\n"
             "설명만 하고 도구를 호출하지 않으면 실패로 처리됩니다."
         )
+
+    if prior_failure_reason:
+        feedback_blocks.append(
+            "## 직전 시도 실패 이유\n"
+            f"{prior_failure_reason.strip()}\n"
+            "같은 사유로 다시 실패하지 않도록 곧바로 write_file 을 호출해 테스트 본문을 채우세요."
+        )
+
+    if prior_explored_paths:
+        dedup = _dedupe_explored_paths(prior_explored_paths, limit=20)
+        if dedup:
+            path_list = "\n".join(f"  - {p}" for p in dedup)
+            feedback_blocks.append(
+                "## 직전 시도에서 탐색한 파일\n"
+                "다음 파일들은 직전 시도에서 이미 열어봤습니다. "
+                "같은 파일을 다시 열지 말고 바로 write_file 을 호출하세요:\n"
+                f"{path_list}"
+            )
 
     if static_issues:
         issue_list = "\n".join(f"  - {i}" for i in static_issues)
@@ -1342,6 +1412,113 @@ def _is_write_loop(scoped: ScopedResult) -> bool:
     )
 
 
+# ── TestWriter 종료 가드 ──────────────────────────────────────────────────────
+#
+# TestWriter 가 "succeeded=True" 로 끝났어도 workspace 에 실제로 유효한 테스트가
+# 남아있지 않은 패턴을 차단한다. 실패 사유는 이후 재시도 프롬프트에 그대로 주입되어
+# 동일 실패의 반복을 줄인다.
+
+_TEST_FILE_GLOBS: list[str] = [
+    "test_*.py", "*_test.py",
+    "test_*.kt", "*Test.kt",
+    "*_test.go",
+    "test_*.js",  "*.test.js",  "*.spec.js",
+    "test_*.ts",  "*.test.ts",  "*.spec.ts",
+    # React 계열 — 스켈레톤은 .jsx/.tsx 로 선주입되므로 가드도 이를 수집해야 한다.
+    # (회귀 가드: 누락 시 React 태스크가 정상 스켈레톤에도 [TEST_MISSING] 오판.)
+    "test_*.jsx", "*.test.jsx", "*.spec.jsx",
+    "test_*.tsx", "*.test.tsx", "*.spec.tsx",
+]
+
+
+def _collect_test_files(tests_dir: Path) -> list[Path]:
+    """tests/ 디렉토리에서 언어별 테스트 파일을 수집한다 (중복 제거, 정렬)."""
+    if not tests_dir.exists():
+        return []
+    seen: dict[str, Path] = {}
+    for pattern in _TEST_FILE_GLOBS:
+        for f in tests_dir.rglob(pattern):
+            if f.is_file():
+                seen[str(f)] = f
+    return sorted(seen.values())
+
+
+def _validate_testwriter_output(
+    workspace: WorkspaceManager,
+    task: Task,
+    loop: ScopedResult,
+) -> str | None:
+    """
+    TestWriter 실행 결과가 파이프라인 다음 단계에 진입할 만큼 유효한지 검증한다.
+
+    통과 시 ``None``. 실패 시 재시도 프롬프트에 주입할 short failure_reason 문자열.
+
+    반환되는 reason 은 **단일 라인 prefix** 로 시작한다 (로그·UI 집계 용이):
+        [NO_WRITE]             write_file/edit_file 호출 0회
+        [TEST_MISSING]         tests/ 에 테스트 파일 없음
+        [TEST_SYNTAX_ERROR]    Python 파일 파싱 실패
+        [TEST_SKELETON_ONLY]   스켈레톤(TODO 마커)이 그대로 남음
+        [NO_TEST_FUNCTIONS]    test_* 함수 0개 (Python 기준)
+    """
+    # 1) 쓰기 호출 카운터 — 한 번도 쓰기를 시도하지 않았다면 나머지는 볼 필요가 없다.
+    #    스켈레톤은 workspace 생성 시 선주입되므로 파일 자체는 존재할 수 있다.
+    if loop.write_file_count == 0 and loop.edit_file_count == 0:
+        return (
+            "[NO_WRITE] TestWriter 가 write_file/edit_file 을 한 번도 호출하지 않았습니다. "
+            "탐색만 하지 말고 반드시 write_file 로 tests/ 에 실제 테스트를 작성하세요."
+        )
+
+    # 2) 테스트 파일 존재 확인 — 스켈레톤은 _inject_test_skeletons() 로 이미 생성되므로
+    #    이 단계에서 파일이 없다면 TestWriter 가 삭제하거나 tests/ 밖으로 쓴 경우다.
+    test_files = _collect_test_files(workspace.tests_dir)
+    if not test_files:
+        return (
+            "[TEST_MISSING] workspace/tests/ 에 테스트 파일이 없습니다. "
+            "선주입된 스켈레톤 파일을 덮어쓰지 말고 그 위에 실제 테스트를 작성하세요."
+        )
+
+    # 3) Syntax error 체크 (Python)
+    for f in test_files:
+        if f.suffix == ".py":
+            try:
+                ast.parse(f.read_text(encoding="utf-8"))
+            except SyntaxError as e:
+                return f"[TEST_SYNTAX_ERROR] {f.name}: {e}"
+
+    # 4) 스켈레톤 미변경 감지 (TODO 마커 + 테스트 함수 없음)
+    for f in test_files:
+        try:
+            content = f.read_text(encoding="utf-8")
+        except OSError as e:
+            return f"[TEST_MISSING] {f.name}: 읽기 실패 — {e}"
+        if is_skeleton_unchanged(content, task.id):
+            return (
+                f"[TEST_SKELETON_ONLY] {f.name} 이 선주입된 스켈레톤 그대로입니다. "
+                f"`# TODO: tests for task {task.id}` 주석을 실제 테스트로 교체하세요."
+            )
+
+    # 5) Python: 최소 1개의 test_* 함수 존재
+    for f in test_files:
+        if f.suffix != ".py":
+            continue
+        try:
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+        except SyntaxError:
+            # 3) 에서 이미 처리되지만 방어적으로 한 번 더 건너뜀
+            continue
+        has_test_fn = any(
+            isinstance(n, ast.FunctionDef) and n.name.startswith("test_")
+            for n in ast.walk(tree)
+        )
+        if not has_test_fn:
+            return (
+                f"[NO_TEST_FUNCTIONS] {f.name} 에 test_* 함수가 없습니다. "
+                "pytest 가 수집할 수 있도록 `def test_...():` 형태로 작성하세요."
+            )
+
+    return None
+
+
 def _accumulate_tokens(metrics: PipelineMetrics, role: str, scoped: ScopedResult) -> None:
     """ScopedResult 의 토큰 사용량을 metrics.token_usage 에 누적한다."""
     if scoped.loop_result is None:
@@ -1359,6 +1536,25 @@ def _accumulate_tokens(metrics: PipelineMetrics, role: str, scoped: ScopedResult
     )
     if lr.call_log:
         metrics.call_logs.setdefault(role, []).extend(lr.call_log)
+
+
+def _parse_dependency_artifact_files(dep_artifact: Path) -> set[str]:
+    """dependency_artifacts.md 에 기록된 실제 주입 파일 목록을 파싱한다."""
+    try:
+        content = dep_artifact.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+
+    injected: set[str] = set()
+    for line in content.splitlines():
+        match = re.match(r"^\*\*파일\*\*:\s*(.+)$", line.strip())
+        if not match:
+            continue
+        for raw_path in match.group(1).split(","):
+            rel_path = raw_path.strip().strip("`")
+            if rel_path:
+                injected.add(strip_src_prefix(rel_path))
+    return injected
 
 
 # ── 리뷰 파싱 ─────────────────────────────────────────────────────────────────
