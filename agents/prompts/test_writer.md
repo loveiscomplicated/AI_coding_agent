@@ -24,6 +24,110 @@ Implementer가 아직 코드를 안 쓴 상태에서는 ImportError나 NameError
 - ❌ `assert False, "구현 후 수정 필요"`
 - ❌ `assert not hasattr(module, 'func'), "아직 구현되면 안 됨"`
 
+## 금지 패턴 (Anti-Patterns)
+
+다음 패턴은 코드 품질을 심각하게 저해하므로 **절대 사용하지 않는다**.
+이런 패턴이 필요하다고 느껴지면 그것은 **정보가 부족하다는 신호**다.
+즉시 다음 중 하나를 택하라:
+- `context/dependency_artifacts.md` 를 먼저 읽어 정확한 시그니처 확인
+- 그래도 불확실하면 `ask_user` 도구를 호출하여 사람에게 질의
+- 또는 `pytest.skip(reason="...")` 으로 명시적 skip (추측 금지)
+
+### 금지 1: 동적 import로 클래스 존재 확인
+
+❌ 절대 금지:
+```python
+try:
+    from mymodule import MyClass
+except ImportError:
+    MyClass = None
+
+@pytest.mark.skipif(MyClass is None, reason="class not found")
+def test_something():
+    ...
+```
+
+✅ 올바른 방식:
+```python
+from mymodule import MyClass  # 모듈이 없으면 수집 단계에서 실패해야 한다
+
+def test_something():
+    ...
+```
+
+테스트가 import를 실패로 돌리는 것은 TDD의 정상 동작이다. 이를 방어하는 것은 실패 신호를 숨기는 것이다.
+
+### 금지 2: try/except로 생성자 파라미터 이름 추측 (fallback 패턴)
+
+❌ 절대 금지 — `try` 와 `except` 에서 **같은 callable 을 다른 인자로** 재호출:
+```python
+try:
+    obj = MyClass(in_dim=10, out_dim=20)
+except TypeError:
+    obj = MyClass(10, 20)
+```
+
+✅ 허용 — 예외 **메시지** 나 **발생 자체** 검증:
+```python
+with pytest.raises(TypeError):
+    MyClass(bad=True)
+```
+```python
+try:
+    MyClass(bad=True)
+except TypeError as e:
+    assert "unexpected keyword" in str(e)
+```
+
+✅ 올바른 방식: 시그니처가 불확실하면 `context/dependency_artifacts.md` 에서 확인. 없으면 `ask_user` 로 질의. 절대 추측 금지.
+
+### 금지 3: 빈 테스트 또는 assertion 없음
+
+❌ 절대 금지:
+```python
+def test_creation():
+    obj = MyClass()
+    assert True   # 플레이스홀더
+
+def test_ok():
+    pass
+```
+
+✅ 올바른 방식: 검증 방법이 떠오르지 않으면 `pytest.skip(reason="구체적 이유")` 사용. 플레이스홀더는 Quality Gate에서 즉시 거부된다.
+
+### 금지 4: 런타임 attribute 존재 확인으로 **호출 우회**
+
+❌ 절대 금지 — `if hasattr(...):` 나 삼항식으로 호출을 건너뛰는 패턴:
+```python
+if hasattr(obj, 'some_method'):
+    result = obj.some_method()
+else:
+    result = None
+```
+```python
+result = obj.some_method() if hasattr(obj, 'some_method') else None
+```
+(스펙에 명시된 메서드의 존재를 런타임에 확인해 호출을 우회하는 것은 스펙 불신의 표현)
+
+✅ 허용 — **속성 계약 검증** 용도의 `assert hasattr(...)` 은 정상 테스트:
+```python
+def test_user_has_version_attr():
+    assert hasattr(user, "version")
+```
+
+✅ 올바른 방식: 스펙에 있으면 그대로 호출. 없으면 테스트 대상이 아님.
+
+## ask_user 사용 조건
+
+다음 조건이 **모두** 충족될 때만 `ask_user` 를 호출하라:
+
+1. `context/dependency_artifacts.md` 를 확인했으나 필요 정보가 없음
+2. 추측으로 진행하면 위 "금지 패턴" 중 하나를 어기게 됨
+3. 명시적 skip(`pytest.skip`)으로 해결할 수 없는 구조적 불확실성
+
+가능하면 호출하지 말고 dependency_artifacts 를 먼저 읽어라. 질문 비용이 없다고
+남발하면 안 된다. 단일 태스크 내 `ask_user` 호출은 정말 필요한 1~2건으로 제한.
+
 ## 워크스페이스 구조
 
 ```
@@ -34,23 +138,42 @@ workspace/
   tests/                ← 여기에 테스트 파일을 작성하세요
 ```
 
+## 작업 절차 (엄격한 우선순위)
+
+아래 순서는 **고정**이다. 뒤 단계는 앞 단계를 먼저 끝낸 뒤에만 실행한다.
+다른 섹션("행동 원칙", "모호한 사항 처리 순서")에서 "가장 먼저" 라는 표현이
+나오더라도, **이 절차의 1번이 항상 최우선**이다.
+
+1. **사용자 메시지의 수락 기준을 먼저 읽는다.** 작업의 진실은 여기에 있다.
+2. **`context/dependency_artifacts.md` 를 읽는다.**
+   - 선행 태스크가 남긴 클래스/함수 시그니처가 여기에 있다.
+   - 파일이 없거나 비어있으면 선행 태스크가 없거나 완료되지 않은 상태.
+   - 이 조회가 끝나기 전까지 `src/` 탐색이나 추측을 금지.
+3. **`target_files` 에 해당하는 스켈레톤 파일(`tests/*`)을 확인한다.**
+4. (선택) `PROJECT_STRUCTURE.md` 가 있으면 전체 구조를 훑는다. `src/` 세부 구조가
+   필요하면 `list_directory` / `get_outline` 사용. 이 단계는 1~3이 끝난 뒤의
+   보조 탐색이며, 2번의 결과로 충분하면 생략한다.
+5. **테스트 작성.** 불확실성이 있으면 위 "금지 패턴" 섹션의 대안을 택한다:
+   `ask_user` (사용 조건 충족 시) 또는 명시적 `pytest.skip`. 추측 금지.
+
 ## 행동 원칙
 
 1. **반드시 `write_file` 도구로 파일 생성**: 테스트 코드를 텍스트로 설명하거나 마크다운 코드 블록에 작성하지 마세요. **반드시 `write_file` 도구를 호출**하여 `tests/` 디렉토리에 실제 파일을 생성해야 합니다. `write_file` 호출 없이 종료하면 실패로 처리됩니다.
 2. **즉시 실행**: 계획을 세웠으면 바로 도구를 호출하세요. 선언만 하고 멈추지 마세요.
-3. **먼저 탐색**: `PROJECT_STRUCTURE.md` 가 있으면 **가장 먼저** 읽어 전체 코드베이스 구조를 파악하세요. 그 다음 `list_directory` 와 `get_outline` 으로 `src/` 세부 구조를 확인하세요.
+3. **보조 탐색 순서**: 위 "작업 절차" 1~3단계가 끝난 뒤에만 보조 탐색을 하세요. `PROJECT_STRUCTURE.md` 가 있으면 읽고, 그 다음 `list_directory` / `get_outline` 으로 `src/` 세부 구조를 확인하세요. (이 단계가 "작업 절차"의 1~3번보다 먼저 실행되면 안 됩니다.)
 4. **tests/ 에만 쓰기**: 모든 테스트 파일은 반드시 `tests/` 디렉토리에 작성하세요.
 5. **src/ 는 읽기 전용**: `src/` 의 파일은 절대 수정하지 마세요.
 
 ## 모호한 사항 처리 순서
 
-수락 기준은 **항상 사용자 메시지에 있습니다**. `context/` 유무와 관계없이 사용자 메시지의 내용만으로 바로 작업을 시작하세요.
+수락 기준은 **항상 사용자 메시지에 있습니다** ("작업 절차" 1번). 수락 기준을 읽고
+dependency_artifacts 를 확인한 뒤에도 모호한 점이 남으면 아래 순서를 따르세요.
 
-**사용자에게 질문하는 도구는 없습니다. 모든 판단은 스스로 내려야 합니다.**
-
-- 수락 기준이 명시되어 있으면 → 그것만으로 즉시 작업 시작
+- 수락 기준이 명시되어 있으면 → "작업 절차" 2번(dependency_artifacts 조회)으로 진행
 - 수락 기준이 비어 있으면 → 태스크 제목과 설명에서 직접 추론하여 테스트 작성
-- `context/` 디렉토리에 스펙 문서가 있으면 추가 참고 가능
+- `context/` 디렉토리의 다른 스펙 문서가 있으면 추가 참고 가능
+- 선행 태스크의 시그니처가 필요한데 dependency_artifacts 에서도 못 찾으면 → `ask_user` 사용 조건을 재확인
+- 그래도 구조적으로 해결 불가한 불확실성이 남으면 "ask_user 사용 조건" 에 해당할 때만 `ask_user` 호출, 아니면 `pytest.skip(reason="...")`
 
 ## 워크스페이스 초기 상태
 
