@@ -57,8 +57,21 @@ def task():
 def workspace(tmp_path, task):
     ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
     ws.create()
-    # 테스트 파일이 있는 것처럼 만들어 줌
-    (ws.tests_dir / "test_auth.py").write_text("def test_login():\n    assert True\n")
+    # 테스트 파일이 있는 것처럼 만들어 줌. QG 의 not_placeholder/covers_acceptance
+    # 룰을 통과할 정도로 본문이 실재해야 한다 — `assert True`, `assert 1 == 1`,
+    # `assert 1 + 1 == 2` 같은 상수-only assertion 은 placeholder 로 거부되므로
+    # Name/Call 을 포함시킨다. 또한 acceptance_criteria 토큰(자격증명/True/False/반환)
+    # 을 코멘트에 포함해 covers_acceptance WARNING 을 피한다.
+    (ws.tests_dir / "test_auth.py").write_text(
+        "import json\n\n"
+        "# 올바른 자격증명으로 True 반환, 잘못된 자격증명으로 False 반환\n"
+        "def test_login_valid():\n"
+        "    data = json.dumps({'ok': True})\n"
+        "    assert 'ok' in data\n\n"
+        "def test_login_invalid():\n"
+        "    data = json.dumps({'ok': False})\n"
+        "    assert 'ok' in data\n"
+    )
     # target_file 가드 충족: 구현이 이미 이루어진 상태로 시뮬레이션
     # (MockLoop 가 실제로 쓰기를 수행하지 않으므로 선주입한 빈 스켈레톤을 채워둠).
     # _copy_target_files() 가 선행 'src/' 한 단계를 떼고 배치하므로 같은 규칙을 따른다.
@@ -350,7 +363,17 @@ class TestTDDPipelineFailurePaths:
         """Implementer 가 'succeeded=True' 로 끝나도 target_file 을 안 쓰면 가드에 걸린다."""
         ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
         ws.create()
-        (ws.tests_dir / "test_auth.py").write_text("def test_login():\n    assert True\n")
+        # QG 를 통과하는 실제 테스트 (이전에는 `assert True` 였으나 placeholder 룰에 걸림)
+        (ws.tests_dir / "test_auth.py").write_text(
+            "import json\n\n"
+            "# 올바른 자격증명으로 True 반환, 잘못된 자격증명으로 False 반환\n"
+            "def test_login_valid():\n"
+            "    data = json.dumps({'ok': True})\n"
+            "    assert 'ok' in data\n\n"
+            "def test_login_invalid():\n"
+            "    data = json.dumps({'ok': False})\n"
+            "    assert 'ok' in data\n"
+        )
         # 주의: target_file 을 채우지 않는다 → 빈 스켈레톤 그대로
 
         MockLoop.return_value.run.return_value = _ok_scoped("했다고 주장하지만 실제로 쓰지 않음")
@@ -370,7 +393,16 @@ class TestTDDPipelineFailurePaths:
         """가드 실패 시 impl_retries 루프에서 재시도를 먼저 시도한다."""
         ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
         ws.create()
-        (ws.tests_dir / "test_auth.py").write_text("def test_login():\n    assert True\n")
+        (ws.tests_dir / "test_auth.py").write_text(
+            "import json\n\n"
+            "# 올바른 자격증명으로 True 반환, 잘못된 자격증명으로 False 반환\n"
+            "def test_login_valid():\n"
+            "    data = json.dumps({'ok': True})\n"
+            "    assert 'ok' in data\n\n"
+            "def test_login_invalid():\n"
+            "    data = json.dumps({'ok': False})\n"
+            "    assert 'ok' in data\n"
+        )
 
         MockLoop.return_value.run.return_value = _ok_scoped("주장만 함")
         mock_runner = MagicMock()
@@ -728,7 +760,13 @@ class TestTDDPipelineApprovedWithSuggestions:
 
 
 def _real_test_content() -> str:
-    return "def test_login_ok():\n    assert 1 == 1\n"
+    # QG 의 not_placeholder 룰은 `assert 1 == 1` 같은 상수-only 를 flag 하므로
+    # Call (len) 이 들어간 실제 평가형 assertion 을 사용한다.
+    return (
+        "def test_login_ok():\n"
+        "    xs = [1, 2, 3]\n"
+        "    assert len(xs) == 3\n"
+    )
 
 
 class TestValidateTestWriterOutput:
@@ -1027,3 +1065,215 @@ class TestTestWriterGuardIntegration:
 
         # Docker 는 한 번도 실행되지 않아야 한다 (가드가 사전 차단)
         mock_runner.run.assert_not_called()
+
+
+# ── Quality Gate 통합 ─────────────────────────────────────────────────────────
+#
+# TestWriter 종료 직후 run_quality_gate() 가 1회 호출되어 verdict 를
+# 메트릭에 기록하고, BLOCKED → TestWriter 재시도, WARNING → 진행 기록,
+# PASS → 정상 진행 경로를 각각 검증한다.
+
+
+class TestQualityGateIntegration:
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_qg_pass_records_verdict_on_metrics(self, MockLoop, task, workspace):
+        """happy path — QG PASS 가 metrics 에 기록되고 파이프라인은 성공."""
+        MockLoop.return_value.run.return_value = _ok_scoped(
+            "VERDICT: APPROVED\nSUMMARY: ok\nDETAILS:\nfine"
+        )
+        mock_runner = MagicMock()
+        mock_runner.run.return_value = _pass_run()
+
+        # workspace fixture 는 tests/test_auth.py 에 실제 테스트를 써 둠
+        pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+        result = pipeline.run(task, workspace)
+
+        assert result.succeeded is True
+        assert result.metrics.quality_gate_verdict == "PASS"
+        rule_ids = {r["rule_id"] for r in result.metrics.quality_gate_rule_results}
+        # 6개 룰 모두 기록
+        assert {"syntax_valid", "has_test_function", "has_assertion",
+                "not_placeholder", "imports_resolvable",
+                "covers_acceptance"} <= rule_ids
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_qg_warning_proceeds_with_record(self, MockLoop, tmp_path):
+        """coverage 미커버 → WARNING → 파이프라인 진행 + metrics 기록."""
+        task = Task(
+            id="task-warn",
+            title="warning case",
+            description="d",
+            # 테스트에 전혀 등장하지 않는 토큰 (WARN 발생)
+            acceptance_criteria=["완전히 별개의 비밀번호 암호화 기능"],
+            target_files=["src/foo.py"],
+        )
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        try:
+            # 실제 테스트 작성 — 본문에 criterion 토큰은 없음
+            (ws.tests_dir / "test_foo.py").write_text(
+                "from foo import do\n\n"
+                "def test_do_basic():\n    assert do() == 1\n",
+                encoding="utf-8",
+            )
+            (ws.src_dir / "foo.py").write_text(
+                "def do():\n    return 1\n", encoding="utf-8",
+            )
+
+            MockLoop.return_value.run.return_value = _ok_scoped(
+                "VERDICT: APPROVED\nSUMMARY: ok\nDETAILS:\nfine"
+            )
+            mock_runner = MagicMock()
+            mock_runner.run.return_value = _pass_run()
+
+            pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+            result = pipeline.run(task, ws)
+        finally:
+            ws.cleanup()
+
+        assert result.succeeded is True
+        assert result.metrics.quality_gate_verdict == "WARNING"
+        # covers_acceptance 만 실패했는지 확인
+        failed = [r for r in result.metrics.quality_gate_rule_results if not r["passed"]]
+        assert len(failed) == 1
+        assert failed[0]["rule_id"] == "covers_acceptance"
+        # reason 에 누적
+        assert any("covers_acceptance" in msg
+                   for msg in result.metrics.quality_gate_reasons)
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_qg_blocked_triggers_testwriter_retry(self, MockLoop, tmp_path):
+        """task-009 재현: 1회차 placeholder → QG BLOCKED → 2회차 실제 테스트 → PASS → COMPLETED."""
+        task = Task(
+            id="task-009",
+            title="task-009 empty test regression",
+            description="사용자 로그인",
+            acceptance_criteria=["login 성공 시 True 반환"],
+            target_files=["src/auth.py"],
+        )
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        # target_file 이 실구현처럼 채워져 있도록 (Implementer mock)
+        (ws.src_dir / "auth.py").write_text(
+            "def login(u, p):\n    return True\n", encoding="utf-8",
+        )
+        call_counter = {"n": 0}
+
+        def _side_effect(*_a, **_kw):
+            call_counter["n"] += 1
+            if call_counter["n"] == 1:
+                # 1회차 TestWriter: placeholder 테스트만 작성 → QG BLOCKED
+                (ws.tests_dir / "test_auth.py").write_text(
+                    "def test_login():\n    assert True\n",
+                    encoding="utf-8",
+                )
+                return _ok_scoped("placeholder 작성")
+            if call_counter["n"] == 2:
+                # 2회차 TestWriter (재시도): 실제 테스트
+                (ws.tests_dir / "test_auth.py").write_text(
+                    "from auth import login\n\n"
+                    "def test_login():\n"
+                    "    assert login('u', 'p') is True\n",
+                    encoding="utf-8",
+                )
+                return _ok_scoped("실제 테스트 작성")
+            # 3회차 이후 (Implementer, Reviewer)
+            return _ok_scoped(
+                "VERDICT: APPROVED\nSUMMARY: ok\nDETAILS:\nfine"
+            )
+
+        MockLoop.return_value.run.side_effect = _side_effect
+        mock_runner = MagicMock()
+        mock_runner.run.return_value = _pass_run()
+
+        try:
+            pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+            result = pipeline.run(task, ws)
+        finally:
+            ws.cleanup()
+
+        # 재시도 후 최종 PASS
+        assert result.succeeded is True
+        assert result.metrics.quality_gate_verdict == "PASS"
+        # rejections 카운트 증가 확인 (1회차 BLOCKED)
+        assert result.metrics.quality_gate_rejections >= 1
+        # TestWriter 가 2회 호출된 뒤 Implementer·Reviewer 로 진행
+        assert MockLoop.return_value.run.call_count >= 3
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_qg_blocked_retry_still_blocked_fails_pipeline(self, MockLoop, tmp_path):
+        """1회차·2회차 모두 placeholder → QG 재시도에도 BLOCKED → 파이프라인 실패."""
+        task = Task(
+            id="task-stuck",
+            title="stuck in placeholder",
+            description="d",
+            acceptance_criteria=["무언가 동작"],
+            target_files=["src/bar.py"],
+        )
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        (ws.src_dir / "bar.py").write_text("def do(): return 1\n")
+
+        def _side_effect(*_a, **_kw):
+            # 항상 placeholder 만 작성
+            (ws.tests_dir / "test_bar.py").write_text(
+                "def test_x():\n    assert True\n",
+                encoding="utf-8",
+            )
+            return _ok_scoped("placeholder 반복")
+
+        MockLoop.return_value.run.side_effect = _side_effect
+        mock_runner = MagicMock()
+
+        try:
+            pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+            result = pipeline.run(task, ws)
+        finally:
+            ws.cleanup()
+
+        assert result.succeeded is False
+        assert "BLOCKED" in result.failure_reason
+        assert result.metrics.quality_gate_verdict == "BLOCKED"
+        # Docker 는 실행되지 않아야 함 (QG 가 사전 차단)
+        mock_runner.run.assert_not_called()
+
+    @patch("orchestrator.pipeline.ScopedReactLoop")
+    def test_qg_blocked_retry_prompt_includes_rule_ids(self, MockLoop, tmp_path):
+        """재시도 프롬프트에 BLOCKING 실패 룰 id + 메시지가 주입된다."""
+        task = Task(
+            id="task-ruleinject",
+            title="rule id inject",
+            description="d",
+            acceptance_criteria=["xx"],
+            target_files=["src/x.py"],
+        )
+        ws = WorkspaceManager(task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        (ws.src_dir / "x.py").write_text("def f(): return 1\n")
+
+        def _side_effect(*_a, **_kw):
+            (ws.tests_dir / "test_x.py").write_text(
+                "def test_x():\n    assert True\n",
+                encoding="utf-8",
+            )
+            return _ok_scoped("placeholder")
+
+        MockLoop.return_value.run.side_effect = _side_effect
+        mock_runner = MagicMock()
+
+        try:
+            pipeline = TDDPipeline(agent_llm=MagicMock(), test_runner=mock_runner)
+            pipeline.run(task, ws)
+        finally:
+            ws.cleanup()
+
+        # 최소 2회 TestWriter 호출 (1회차 + QG 재시도)
+        call_args_list = MockLoop.return_value.run.call_args_list
+        assert len(call_args_list) >= 2
+        # 재시도 TestWriter 호출 (index 1) 의 user_message 검증
+        retry_prompt = (
+            call_args_list[1].args[0] if call_args_list[1].args
+            else call_args_list[1].kwargs.get("user_message", "")
+        )
+        # placeholder 문제이므로 not_placeholder 룰 id 가 포함
+        assert "not_placeholder" in retry_prompt

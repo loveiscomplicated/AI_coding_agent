@@ -45,6 +45,10 @@ from agents.scoped_loop import ScopedReactLoop, ScopedResult
 from docker.runner import DockerTestRunner, RunResult, _detect_runtime
 from llm import LLMConfig, create_client
 from llm.base import Message, StopReason
+from orchestrator.quality_gate import (
+    QGVerdict, RULES as QG_RULES,
+    run_quality_gate, verdict_to_rule_results_dict,
+)
 from orchestrator.task import Task, TaskStatus, LANGUAGE_TEST_FRAMEWORK_MAP
 from orchestrator.workspace import (
     WorkspaceManager, strip_src_prefix, is_skeleton_unchanged,
@@ -108,6 +112,8 @@ class PipelineMetrics:
 
     quality_gate_rejections: int = 0        # 테스트 품질 게이트 reject 횟수 (assert False 등)
     quality_gate_reasons: list[str] = field(default_factory=list)
+    quality_gate_verdict: str | None = None  # "PASS" | "WARNING" | "BLOCKED" | None
+    quality_gate_rule_results: list[dict] = field(default_factory=list)
     test_red_to_green_first_try: bool = False  # 첫 구현 시도에서 테스트 통과 여부
     impl_retries: int = 0                   # Implementer 재시도 횟수
     review_retries: int = 0                 # Reviewer 피드백 후 재구현 횟수
@@ -436,25 +442,32 @@ class TDDPipeline:
             "message": f"테스트 파일 생성: {', '.join(test_files)}"})
         logger.info("[%s] 테스트 파일 생성: %s", task.id, test_files)
 
-        # ── Step 1.5: 테스트 품질 게이트 (P2 정적 검증 + P3 커버리지) ────────
-        static_issues = _validate_tests_static(test_files, workspace)
-        missing_criteria = _check_criteria_coverage(task, test_files, workspace, self._llm_for_role(ROLE_TEST_WRITER, self.agent_llm))
-        if static_issues or missing_criteria:
-            metrics.quality_gate_rejections += 1
-            metrics.quality_gate_reasons = (static_issues or []) + [
-                f"미커버: {c}" for c in (missing_criteria or [])
+        # ── Step 1.5: Quality Gate — TestWriter 종료 직후 1회 실행 ─────────────
+        #
+        # 형식적 유효성(syntax / assertion / test_* 존재 / placeholder 금지 /
+        # import 가능성 / 커버리지 heuristic) 을 룰 기반으로 검증한다.
+        # BLOCKED → TestWriter 재시도 1회; 재시도 후에도 BLOCKED 면 파이프라인 실패.
+        # WARNING → 진행하고 PR body 기록.
+        # 기능적 올바름은 Reviewer 담당이므로 QG 는 여기서 단일 콜만 수행.
+        qg_verdict = run_quality_gate(workspace.tests_dir, task)
+        metrics.quality_gate_verdict = qg_verdict.verdict
+        metrics.quality_gate_rule_results = verdict_to_rule_results_dict(qg_verdict)
+
+        if qg_verdict.verdict == "BLOCKED":
+            blocking_msgs = [
+                f"{rid}: {r.message}" for rid, r in qg_verdict.failed_rules("BLOCKING")
             ]
+            metrics.quality_gate_rejections += 1
+            metrics.quality_gate_reasons.extend(blocking_msgs)
             logger.warning(
-                "[%s] 테스트 품질 게이트 — 정적 이슈: %s | 미커버 기준: %s",
-                task.id, static_issues, missing_criteria,
+                "[%s] Quality Gate BLOCKED — %s", task.id, "; ".join(blocking_msgs),
             )
-            issues_summary = "; ".join(metrics.quality_gate_reasons)
+            issues_summary = "; ".join(blocking_msgs)
             _p({"type": "step", "step": "quality_gate",
                 "message": f"품질 게이트 재시도 — {issues_summary[:120]}"})
             test_scoped = self._run_test_writer(
                 task, workspace,
-                static_issues=static_issues,
-                missing_criteria=missing_criteria,
+                static_issues=blocking_msgs,
                 on_progress=_agent_p,
                 pause_ctrl=pause_ctrl,
                 enriched_desc=enriched_desc,
@@ -464,15 +477,48 @@ class TDDPipeline:
                 prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
                 metrics.failed_stage = "test_writing"
                 return PipelineResult.failed(
-                    task, f"{prefix}TestWriter 품질 보완 실패: {test_scoped.answer}", metrics=metrics
+                    task, f"{prefix}TestWriter 품질 보완 실패: {test_scoped.answer}",
+                    metrics=metrics,
+                )
+            # 재시도 후 QG 재실행 — 단일 콜 원칙 유지 (TestWriter 재시도 → 1회 재검증)
+            qg_verdict_retry = run_quality_gate(workspace.tests_dir, task)
+            metrics.quality_gate_verdict = qg_verdict_retry.verdict
+            metrics.quality_gate_rule_results = verdict_to_rule_results_dict(qg_verdict_retry)
+            if qg_verdict_retry.verdict == "BLOCKED":
+                blocking_msgs_retry = [
+                    f"{rid}: {r.message}"
+                    for rid, r in qg_verdict_retry.failed_rules("BLOCKING")
+                ]
+                metrics.quality_gate_rejections += 1
+                metrics.quality_gate_reasons.extend(blocking_msgs_retry)
+                metrics.failed_stage = "test_writing"
+                return PipelineResult.failed(
+                    task,
+                    "Quality Gate 재시도 후에도 BLOCKED: " + "; ".join(blocking_msgs_retry),
+                    metrics=metrics,
                 )
             test_files = workspace.list_test_files()
             if not test_files:
                 metrics.failed_stage = "test_writing"
-                return PipelineResult.failed(task, "TestWriter 품질 게이트 후 파일 미생성", metrics=metrics)
+                return PipelineResult.failed(
+                    task, "TestWriter 품질 게이트 후 파일 미생성", metrics=metrics,
+                )
             _p({"type": "step", "step": "quality_gate_ok",
                 "message": f"품질 게이트 통과 — {', '.join(test_files)}"})
             logger.info("[%s] 품질 게이트 통과 후 테스트 파일: %s", task.id, test_files)
+            qg_verdict = qg_verdict_retry
+
+        if qg_verdict.verdict == "WARNING":
+            warning_msgs = [
+                f"{rid}: {r.message}" for rid, r in qg_verdict.failed_rules("WARNING")
+            ]
+            metrics.quality_gate_reasons.extend(warning_msgs)
+            logger.info(
+                "[%s] Quality Gate WARNING (진행) — %s",
+                task.id, "; ".join(warning_msgs),
+            )
+            _p({"type": "step", "step": "quality_gate_warning",
+                "message": f"품질 게이트 WARNING — {('; '.join(warning_msgs))[:120]}"})
 
         # TestWriter가 새로 생성한 테스트 파일만 DockerTestRunner에 전달
         _test_files_after = set(glob.glob(os.path.join(_ws_path, "**", "test_*.py"), recursive=True))
@@ -1184,12 +1230,243 @@ def _validate_tests_static(test_files: list[str], workspace: WorkspaceManager) -
     return issues
 
 
+def _collect_direct_call_names(stmts: list[ast.stmt]) -> set[str]:
+    """statement 리스트에서 직접 호출된 이름(Name / dotted Attribute) 집합.
+
+    의도:
+      - `obj = Foo(...)`        → {"Foo"}
+      - `Foo(...).method(...)`  → {"Foo", "Foo.method"} 중 Name 인 "Foo" 수집
+      - `m.bar()`               → {"m.bar"}  (Attribute 체인 전체 문자열)
+      - 내장 호출(print 등)도 포함되지만 `str`, `int`, `len`, `print`,
+        `isinstance`, `repr` 같이 fallback 과 무관한 내장은 제외한다.
+
+    try 본문과 except 본문에서 **같은 이름** 이 겹치면 "재호출 fallback" 으로
+    본다. Name 과 Attribute 를 문자열로 정규화해 비교한다.
+    """
+    _BUILTIN_SAFE = {
+        "str", "int", "float", "bool", "len", "repr", "print", "isinstance",
+        "list", "tuple", "dict", "set",
+        # 오류 메시지 검증에 흔히 쓰임 — fallback 으로 오판하면 안 됨
+        "pytest", "re", "assert_",
+    }
+
+    def _name_of(expr) -> str | None:
+        if isinstance(expr, ast.Name):
+            return expr.id
+        if isinstance(expr, ast.Attribute):
+            base = _name_of(expr.value)
+            if base is None:
+                return None
+            return f"{base}.{expr.attr}"
+        return None
+
+    collected: set[str] = set()
+    for stmt in stmts:
+        for sub in ast.walk(stmt):
+            if not isinstance(sub, ast.Call):
+                continue
+            name = _name_of(sub.func)
+            if not name:
+                continue
+            # 내장 안전 호출 스킵
+            root = name.split(".", 1)[0]
+            if root in _BUILTIN_SAFE:
+                continue
+            collected.add(name)
+    return collected
+
+
+def _handler_catches(handler: ast.ExceptHandler, exc_name: str) -> bool:
+    exc_type = handler.type
+    if isinstance(exc_type, ast.Name) and exc_type.id == exc_name:
+        return True
+    if isinstance(exc_type, ast.Tuple) and any(
+        isinstance(elt, ast.Name) and elt.id == exc_name for elt in exc_type.elts
+    ):
+        return True
+    return False
+
+
+def _handler_is_only_reraise(handler: ast.ExceptHandler) -> bool:
+    body = handler.body
+    return (
+        len(body) == 1
+        and isinstance(body[0], ast.Raise)
+        and body[0].exc is None
+    )
+
+
+def _expr_uses_hasattr(expr: ast.expr) -> bool:
+    """표현식 트리 안 어딘가에 hasattr(...) 호출이 있으면 True."""
+    for sub in ast.walk(expr):
+        if (
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Name)
+            and sub.func.id == "hasattr"
+        ):
+            return True
+    return False
+
+
+def _detect_task008_antipatterns(tree: ast.Module, fname: str) -> list[str]:
+    """task-008 에서 관찰된 방어적 패턴을 AST 수준에서 감지한다.
+
+    감지 대상 (모두 test_writer.md "금지 패턴" 섹션과 1:1 매칭):
+      A. 동적 import + `pytest.mark.skipif(<Name> is None, ...)`
+         — `try: import ... except ImportError: Name = None` 모듈 레벨 블록
+           또는 `skipif(<Name> is None, ...)` 데코레이터
+      B. test_ 함수 내 `except TypeError:` 블록 (생성자 시그니처 추측 패턴)
+      C. `hasattr(...)` 호출 (스펙 메서드의 런타임 존재 확인 우회)
+    """
+    issues: list[str] = []
+
+    # ── A1: try: import ... except ImportError: X = None 블록 ────────────
+    import_failure_names: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, ast.Try):
+            continue
+        has_import_in_try = any(
+            isinstance(c, (ast.Import, ast.ImportFrom)) for c in node.body
+        )
+        if not has_import_in_try:
+            continue
+        for handler in node.handlers:
+            exc_type = handler.type
+            is_import_error = (
+                isinstance(exc_type, ast.Name) and exc_type.id == "ImportError"
+            ) or (
+                isinstance(exc_type, ast.Tuple)
+                and any(
+                    isinstance(elt, ast.Name) and elt.id == "ImportError"
+                    for elt in exc_type.elts
+                )
+            )
+            if not is_import_error:
+                continue
+            # handler 본문에서 Name = None 할당된 식별자 수집
+            for stmt in handler.body:
+                if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Constant) and stmt.value.value is None:
+                    for tgt in stmt.targets:
+                        if isinstance(tgt, ast.Name):
+                            import_failure_names.add(tgt.id)
+    if import_failure_names:
+        issues.append(
+            f"{fname}: 동적 import + `= None` 패턴 — "
+            f"`try: import X / except ImportError: X = None` 은 금지 (대상: "
+            f"{sorted(import_failure_names)}). "
+            "대신 일반 import 를 쓰고 모듈이 없으면 수집 단계에서 실패하도록 두세요. "
+            "시그니처가 불확실하면 `context/dependency_artifacts.md` 조회 또는 `ask_user` 사용."
+        )
+
+    # ── A2: @pytest.mark.skipif(<Name> is None, ...) 데코레이터 ───────────
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for dec in node.decorator_list:
+            if not isinstance(dec, ast.Call):
+                continue
+            func = dec.func
+            is_skipif = (
+                isinstance(func, ast.Attribute) and func.attr == "skipif"
+            ) or (
+                isinstance(func, ast.Name) and func.id == "skipif"
+            )
+            if not is_skipif or not dec.args:
+                continue
+            cond = dec.args[0]
+            # pattern: `X is None` 또는 `X is None or ...`
+            def _is_none_check(expr) -> bool:
+                return (
+                    isinstance(expr, ast.Compare)
+                    and len(expr.ops) == 1
+                    and isinstance(expr.ops[0], ast.Is)
+                    and isinstance(expr.comparators[0], ast.Constant)
+                    and expr.comparators[0].value is None
+                )
+            flagged = False
+            if _is_none_check(cond):
+                flagged = True
+            elif isinstance(cond, ast.BoolOp):
+                flagged = any(_is_none_check(v) for v in cond.values)
+            if flagged:
+                issues.append(
+                    f"{fname}::{node.name} — `skipif(<X> is None, ...)` 패턴 금지. "
+                    "클래스/함수 존재 여부를 런타임에 확인하지 말고 "
+                    "명시적 `pytest.skip(reason=...)` 또는 `ask_user` 를 사용하세요."
+                )
+
+    # ── B: test_ 함수 내 `except TypeError:` — 단, **생성자 fallback 형태**만
+    #   flag 한다. 구체적으로 try 본문에서 호출된 Name 이 except 본문에서 동일한
+    #   Name 으로 재호출(시그니처 추측) 되는 경우만 차단.
+    #   → `except TypeError as e: assert 'x' in str(e)` 처럼 예외 메시지 검증을
+    #     하는 정당한 패턴은 통과시킨다.
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("test")):
+            continue
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Try):
+                continue
+            try_call_names = _collect_direct_call_names(sub.body)
+            for handler in sub.handlers:
+                if not _handler_catches(handler, "TypeError"):
+                    continue
+                if _handler_is_only_reraise(handler):
+                    continue
+                except_call_names = _collect_direct_call_names(handler.body)
+                overlap = try_call_names & except_call_names
+                if not overlap:
+                    # 정당한 예외 메시지 검증/보조 정리 등 → 통과
+                    continue
+                issues.append(
+                    f"{fname}::{node.name} — `try: {sorted(overlap)[0]}(...) / "
+                    "except TypeError: {동일 호출} (...)` fallback 패턴 금지. "
+                    "생성자/함수 시그니처를 try/except 로 추측하지 말고 "
+                    "`context/dependency_artifacts.md` 에서 확인하거나 `ask_user` 를 사용하세요. "
+                    "TypeError 자체를 검증하려면 `pytest.raises(TypeError)` 또는 "
+                    "`except TypeError as e: assert ... in str(e)` 를 사용하세요."
+                )
+                break  # 함수당 1회만 보고
+
+    # ── C: test_ 함수 내 `if hasattr(...)` **게이트 패턴** 만 금지 ────────
+    #   `assert hasattr(obj, "version")` 같은 속성 계약 검증은 허용한다.
+    #   핵심은 "스펙에 있어야 할 메서드의 존재를 런타임에 확인해 호출을 우회"
+    #   하는 패턴이다. 따라서 다음 두 형태만 flag:
+    #     (1) `if hasattr(...):`  — ast.If 의 test 표현에 hasattr 이 포함
+    #     (2) `x if hasattr(...) else y`  — 삼항식 test 에 포함
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("test")):
+            continue
+        flagged = False
+        for sub in ast.walk(node):
+            # (1) if hasattr(...):
+            if isinstance(sub, ast.If) and _expr_uses_hasattr(sub.test):
+                flagged = True
+                break
+            # (2) <a> if hasattr(...) else <b>
+            if isinstance(sub, ast.IfExp) and _expr_uses_hasattr(sub.test):
+                flagged = True
+                break
+        if flagged:
+            issues.append(
+                f"{fname}::{node.name} — `if hasattr(...)` 게이트로 호출을 우회하는 "
+                "패턴 금지. 스펙에 명시된 메서드/속성은 그대로 호출하세요. "
+                "불확실하면 테스트 대상이 아니므로 `pytest.skip(reason=...)` 로 명시 skip. "
+                "(속성 존재 자체를 검증하려는 의도라면 `assert hasattr(obj, '...')` 는 허용됩니다.)"
+            )
+
+    return issues
+
+
 def _validate_python_test(src: str, fname: str) -> list[str]:
     issues: list[str] = []
     try:
         tree = ast.parse(src)
     except SyntaxError as e:
         return [f"{fname}: 문법 오류 — {e}"]
+
+    # ── 금지 패턴(task-008 회귀 가드): 동적 import + skipif / try-except TypeError /
+    #    hasattr 우회. 프롬프트로도 금지하고 있지만 여기서 정적으로 한 번 더 차단한다.
+    issues.extend(_detect_task008_antipatterns(tree, fname))
 
     # ── 플레이스홀더 감지: src/ import 없음 ───────────────────────────────
     # 커스텀 Python 테스트(pytest 미사용)는 test_ 함수 없이 모듈 레벨에서 동작한다.
@@ -1555,6 +1832,49 @@ def _parse_dependency_artifact_files(dep_artifact: Path) -> set[str]:
             if rel_path:
                 injected.add(strip_src_prefix(rel_path))
     return injected
+
+
+# ── Invariant 체크 ────────────────────────────────────────────────────────────
+
+
+def _assert_invariants(report) -> None:
+    """TaskReport 가 불가능한 상태 조합을 담고 있지 않은지 검증한다.
+
+    `assert` 가 아닌 explicit ``raise RuntimeError`` 를 사용해 Python ``-O``
+    플래그에서도 비활성화되지 않도록 한다.
+
+    검증 대상 (status == "COMPLETED" 일 때만):
+      - quality_gate_verdict 가 "BLOCKED" 이면 안 됨 (task-009 회귀 방지)
+      - test_count 가 0 이면 안 됨 (테스트 없이 COMPLETED 불가)
+      - reviewer_verdict 가 APPROVED / APPROVED_WITH_SUGGESTIONS / "" 이 아닌 경우
+        (예: CHANGES_REQUESTED, ERROR) COMPLETED 와 양립 불가
+
+    FAILED 상태나 기타 상태는 모든 조합이 합법이므로 체크하지 않는다.
+    """
+    if getattr(report, "status", None) != "COMPLETED":
+        return
+
+    task_id = getattr(report, "task_id", "<unknown>")
+    qg = getattr(report, "quality_gate_verdict", None)
+    if qg == "BLOCKED":
+        raise RuntimeError(
+            f"INVARIANT: task {task_id} is COMPLETED but "
+            f"quality_gate_verdict is BLOCKED"
+        )
+
+    test_count = getattr(report, "test_count", 0)
+    if test_count == 0:
+        raise RuntimeError(
+            f"INVARIANT: task {task_id} is COMPLETED but "
+            f"test_count is 0 (task-009 regression)"
+        )
+
+    rv = getattr(report, "reviewer_verdict", "")
+    if rv not in ("APPROVED", "APPROVED_WITH_SUGGESTIONS", ""):
+        raise RuntimeError(
+            f"INVARIANT: task {task_id} is COMPLETED but "
+            f"reviewer_verdict is {rv}"
+        )
 
 
 # ── 리뷰 파싱 ─────────────────────────────────────────────────────────────────
