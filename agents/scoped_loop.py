@@ -48,6 +48,10 @@ class ScopedResult:
     succeeded: bool
     workspace_files: list[str] = field(default_factory=list)
     loop_result: LoopResult | None = None
+    # 종료 가드·재시도 힌트용 실행 메트릭 (loop 에서 집계)
+    write_file_count: int = 0
+    edit_file_count: int = 0
+    explored_paths: list[str] = field(default_factory=list)
 
 
 class ScopedReactLoop(ReactLoop):
@@ -77,6 +81,11 @@ class ScopedReactLoop(ReactLoop):
         super().__init__(llm=llm, max_iterations=max_iterations, write_deadline=write_deadline, stop_check=stop_check, **kwargs)
         self._role = role
         self._workspace_dir = Path(workspace_dir).resolve()
+
+        # 쓰기·탐색 카운터 (종료 가드 및 재시도 힌트 생성에 사용)
+        self.write_file_count: int = 0
+        self.edit_file_count: int = 0
+        self.explored_paths: list[str] = []
 
         # 읽기 전용 도구 연속 호출 감지 (탐색 루프 방지)
         self._consecutive_readonly = 0
@@ -114,11 +123,27 @@ class ScopedReactLoop(ReactLoop):
             succeeded=loop_result.succeeded,
             workspace_files=workspace_files,
             loop_result=loop_result,
+            write_file_count=self.write_file_count,
+            edit_file_count=self.edit_file_count,
+            explored_paths=list(self.explored_paths),
         )
 
     # ── 오버라이드: 도구 실행 전 제약 검사 ───────────────────────────────────
 
     def _execute_tool(self, tc: ToolCall) -> ToolResult:
+        # ── 카운터 업데이트: **경로·역할 검사보다 먼저** 실행한다.
+        # 이유: 검사에 걸려 일찍 반환되면 "쓰기 시도 자체가 없었다" 로 착오된다.
+        # 잘못된 경로에 write_file 을 호출한 TestWriter 는 `[NO_WRITE]` 가 아니라
+        # `[TEST_MISSING]` / role 위반으로 분류돼야 올바른 재시도 힌트를 얻는다.
+        if tc.name == "write_file":
+            self.write_file_count += 1
+        elif tc.name == "edit_file":
+            self.edit_file_count += 1
+        elif tc.name in _PATH_ARG_READ_TOOLS:
+            explored = tc.input.get("path", "")
+            if explored:
+                self.explored_paths.append(str(explored))
+
         # 1. 허용 목록 검사
         if not self._role.allows(tc.name):
             msg = (

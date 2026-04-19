@@ -240,3 +240,59 @@ class TestRoleConfig:
         assert len(TEST_WRITER.system_prompt) > 100
         assert len(IMPLEMENTER.system_prompt) > 100
         assert len(REVIEWER.system_prompt) > 100
+
+
+# ── 쓰기 의도 카운터 (경로·역할 거절과 무관하게 intent 를 기록) ─────────────
+
+
+class TestWriteIntentCounter:
+    """경로·역할 검사로 조기 반환돼도 write_file 호출 횟수는 집계돼야 한다.
+
+    회귀 가드: 이전에는 early-return 전에 카운터 업데이트가 없어, workspace 밖
+    쓰기 시도가 `[NO_WRITE]` 로 오분류됐다.
+    """
+
+    def test_workspace_violation_still_increments_write_counter(self, workspace):
+        llm = _make_mock_llm()
+        loop = ScopedReactLoop(llm=llm, role=IMPLEMENTER, workspace_dir=workspace)
+        tc = ToolCall(
+            id="w1", name="write_file",
+            input={"path": "/etc/passwd", "content": "bad"},
+        )
+        result = loop._execute_tool(tc)
+        assert result.is_error is True
+        assert "workspace 격리" in result.content
+        # 의도 집계: 경로가 막혔어도 1회 호출로 기록
+        assert loop.write_file_count == 1
+
+    def test_role_violation_still_increments_write_counter(self, reviewer_loop):
+        # REVIEWER 는 write_file 금지. 호출이 거절돼도 의도는 기록.
+        tc = ToolCall(
+            id="w2", name="write_file",
+            input={"path": "out.py", "content": "x"},
+        )
+        result = reviewer_loop._execute_tool(tc)
+        assert result.is_error is True
+        assert reviewer_loop.write_file_count == 1
+
+    def test_edit_file_violation_still_increments_edit_counter(self, workspace):
+        llm = _make_mock_llm()
+        loop = ScopedReactLoop(llm=llm, role=IMPLEMENTER, workspace_dir=workspace)
+        tc = ToolCall(
+            id="e1", name="edit_file",
+            input={"path": "/etc/hosts", "old_str": "a", "new_str": "b"},
+        )
+        _ = loop._execute_tool(tc)
+        assert loop.edit_file_count == 1
+
+    def test_read_tool_path_collected_in_explored_paths(self, workspace):
+        llm = _make_mock_llm()
+        loop = ScopedReactLoop(llm=llm, role=IMPLEMENTER, workspace_dir=workspace)
+        (workspace / "src" / "foo.py").write_text("x = 1")
+        tc = ToolCall(
+            id="r1", name="read_file",
+            input={"path": str(workspace / "src" / "foo.py")},
+        )
+        _ = loop._execute_tool(tc)
+        # 경로는 절대 경로로 정규화된 후 explored_paths 에 들어간다
+        assert any("src/foo.py" in p for p in loop.explored_paths)
