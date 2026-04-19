@@ -36,6 +36,110 @@ from orchestrator.task import Task, TaskStatus
 logger = logging.getLogger(__name__)
 
 
+# ── 테스트 스켈레톤 ─────────────────────────────────────────────────────────────
+#
+# TestWriter 가 탐색만 하고 write_file 을 호출하지 않는 패턴을 차단하기 위해
+# workspace 생성 시 target_files 별로 빈 테스트 스켈레톤을 미리 주입한다.
+# 스켈레톤은 "명백히 비어있음" 을 드러내도록 작성 — `pass` 나 가짜 통과 테스트는
+# 절대 포함하지 않는다 (TestWriter 가 그대로 남겨두는 것을 방지).
+
+_SKELETON_MARKER = "# TODO: tests for task"
+_SKELETON_MARKER_KOTLIN = "// TODO: tests for task"
+_SKELETON_MARKER_JS = "// TODO: tests for task"
+
+_SKELETON_TEMPLATES: dict[str, str] = {
+    ".py":  "import pytest\n\n\n# TODO: tests for task {task_id}\n",
+    ".kt":  "package tests\n\nimport org.junit.Test\n\n// TODO: tests for task {task_id}\n",
+    ".go":  'package tests_test\n\nimport "testing"\n\n// TODO: tests for task {task_id}\n',
+    ".js":  "// TODO: tests for task {task_id}\n",
+    ".ts":  "// TODO: tests for task {task_id}\n",
+    ".jsx": "// TODO: tests for task {task_id}\n",
+    ".tsx": "// TODO: tests for task {task_id}\n",
+}
+
+# 실제 소스 파일로 간주할 확장자 — 그 외(.md, .html, .css 등)는 스켈레톤을 만들지 않는다.
+_SKELETON_EXTS = frozenset(_SKELETON_TEMPLATES.keys())
+
+
+def _test_skeleton_for(rel_path: str, task_id: str) -> tuple[str, str] | None:
+    """
+    target_file 상대 경로로부터 (test_rel_path, skeleton_content) 튜플을 반환한다.
+    지원하지 않는 확장자면 None.
+
+    ``test_rel_path`` 는 ``workspace/tests/`` 기준 상대 경로로, 원본 target_file 의
+    디렉토리 구조를 **보존** 한다. 선행 ``src/`` 한 단계는 (``strip_src_prefix()`` 와 동일하게)
+    흡수되어 ``src_dir`` / ``tests_dir`` 이 각각 대응하도록 유지된다.
+
+    파일명 규약은 언어별 수집기 관례를 따른다:
+        Python  : test_<stem>.py    (pytest 기본 패턴)
+        Kotlin  : test_<stem>.kt    (JUnit 은 파일명 제약 없음 — pytest 관례 재사용)
+        Go      : <stem>_test.go    (`go test` 가 수집하는 유일한 패턴)
+        JS/TS   : test_<stem>.{js,ts,jsx,tsx}
+
+    예)
+        ("src/auth.py",         "task-001") → ("test_auth.py",          "import pytest\\n...")
+        ("src/a/user.py",       "task-002") → ("a/test_user.py",        "import pytest\\n...")
+        ("src/b/user.py",       "task-002") → ("b/test_user.py",        "import pytest\\n...")
+        ("app/Foo.kt",          "task-007") → ("app/test_Foo.kt",       "package tests\\n...")
+        ("pkg/server.go",       "task-012") → ("pkg/server_test.go",    "package tests_test\\n...")
+        ("tests/test_auth.py",  "task-020") → ("test_auth.py",          ...)  ← 이미 tests/ 내 경로
+    """
+    p = Path(rel_path)
+    ext = p.suffix.lower()
+    template = _SKELETON_TEMPLATES.get(ext)
+    if template is None:
+        return None
+
+    # 디렉토리 보존: 선행 'src/' 한 단계만 제거 (workspace 의 tests_dir 가 이미
+    # 'tests/' 루트이므로, target_file 의 src/ 루트와 대칭으로 벗긴다).
+    # 'tests/' 로 시작하는 target_file 은 한 단계 벗겨 tests_dir 안에 평탄하게 배치한다.
+    trimmed = Path(strip_src_prefix(rel_path))
+    if trimmed.parts and trimmed.parts[0] == "tests":
+        trimmed = Path(*trimmed.parts[1:]) if len(trimmed.parts) > 1 else Path(trimmed.name)
+
+    parent_parts = trimmed.parent.parts  # tuple — 비어있을 수 있음
+    stem = trimmed.name[: -len(trimmed.suffix)] if trimmed.suffix else trimmed.name
+
+    # 이미 언어 테스트 규약을 만족하는 이름이면 그대로 사용한다.
+    #   Python / Kotlin / JS: test_*, *_test
+    #   Go: *_test (`_test.go` 필수)
+    if ext == ".go":
+        if stem.endswith("_test"):
+            fname = f"{stem}{ext}"
+        else:
+            fname = f"{stem}_test{ext}"
+    else:
+        if stem.startswith("test_") or stem.endswith("_test"):
+            fname = f"{stem}{ext}"
+        else:
+            fname = f"test_{stem}{ext}"
+
+    test_rel = str(Path(*parent_parts, fname)) if parent_parts else fname
+    return test_rel, template.format(task_id=task_id)
+
+
+def is_skeleton_unchanged(content: str, task_id: str) -> bool:
+    """
+    스켈레톤이 그대로인지 판정한다. 주입 시 작성한 TODO 마커가 여전히 있고
+    실질적인 테스트 본문(test_ 함수, Kotlin @Test, JS test(/it( 등)이 없으면 True.
+
+    주의: 이 함수는 Python 파일은 ast 로 더 정확히 검사하지만, 비-Python 파일은
+    문자열 기반 휴리스틱으로 판정한다. pipeline 의 종료 가드에서 Python 은
+    ast 로 별도 확인하므로, 여기서는 비-Python 용 빠른 경로로 쓴다.
+    """
+    marker_py = f"# TODO: tests for task {task_id}"
+    marker_doc = f"// TODO: tests for task {task_id}"
+    has_marker = marker_py in content or marker_doc in content
+    if not has_marker:
+        return False
+
+    # 실제 테스트 본문으로 볼 만한 토큰 존재 여부
+    for token in ("def test_", "@Test", "func Test", "test(", "it(", "describe("):
+        if token in content:
+            return False
+    return True
+
+
 def strip_src_prefix(rel_path: str) -> str:
     """target_file 경로의 선행 'src/' 한 단계를 제거한다.
 
@@ -109,6 +213,7 @@ class WorkspaceManager:
         (self._path / "context").mkdir(exist_ok=True)
 
         self._copy_target_files()
+        self._inject_test_skeletons()
         self._copy_requirements()
         self._copy_project_structure()
         self._copy_context_docs()
@@ -215,6 +320,40 @@ class WorkspaceManager:
             except OSError:
                 missing.append(rel_path)
         return missing
+
+    def _inject_test_skeletons(self) -> None:
+        """
+        workspace/tests/ 에 빈 테스트 스켈레톤을 선주입한다.
+
+        목적: TestWriter 가 탐색만 하고 write_file 을 호출하지 않는 패턴을
+              차단하고, 파일이 잘못된 위치에 생성되어 pytest 수집이 실패하는
+              회귀를 방지한다.
+
+        규약:
+          - 파일명: `tests/test_{name}.{ext}` (target_file 과 동일 루트의 tests/ 에 평탄화)
+          - 이미 파일이 존재하면 **덮어쓰지 않는다** (재실행 시 사용자·직전 에이전트
+            작성 내용 보호)
+          - 지원 확장자만 주입 (.py/.kt/.go/.js/.ts/.jsx/.tsx). 그 외는 건너뜀.
+          - 스켈레톤은 `# TODO: tests for task {task_id}` 마커를 포함하고,
+            실제 test 함수는 포함하지 않는다. "가짜 통과" 테스트 절대 금지.
+        """
+        if not self.task.target_files:
+            return
+
+        self.tests_dir.mkdir(exist_ok=True)
+        for rel_path in self.task.target_files:
+            skeleton = _test_skeleton_for(rel_path, self.task.id)
+            if skeleton is None:
+                continue
+            test_rel, content = skeleton
+            dest = self.tests_dir / test_rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                # 재실행 보호: 이미 파일이 있으면 그대로 둔다
+                logger.debug("테스트 스켈레톤 보존 (기존 파일): %s", dest)
+                continue
+            dest.write_text(content, encoding="utf-8")
+            logger.info("테스트 스켈레톤 주입: %s", dest)
 
     def _copy_requirements(self) -> None:
         """repo 루트의 requirements.txt 가 있으면 workspace 루트에 복사."""
@@ -351,7 +490,7 @@ class WorkspaceManager:
                 )
 
         # context/ 에 요약 문서 작성
-        if any(t.target_files for t in done_deps):
+        if len(artifacts_lines) > 2:
             context_dir = self.path / "context"
             context_dir.mkdir(exist_ok=True)
             (context_dir / "dependency_artifacts.md").write_text(
