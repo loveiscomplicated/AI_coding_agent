@@ -53,6 +53,11 @@ from orchestrator.intervention import (
     set_complexity_routing as _set_intervention_complexity_routing,
     create_intervention_llms,
 )
+from orchestrator.task_redesign import (
+    SplitTaskError,
+    create_redesign_llm,
+    split_task as _split_task,
+)
 from agents.roles import RoleModelConfig, resolve_model_for_role, ROLE_MERGE_AGENT
 from orchestrator.pipeline import TDDPipeline
 from orchestrator.report import build_report, load_reports, save_report
@@ -399,6 +404,22 @@ def _default_logs_dir(repo_path: Path) -> Path:
     return repo_path / "agent-data" / "logs"
 
 
+def _load_spec_content(repo_path: Path) -> str:
+    """auto_split 용 spec 문서를 찾아 로드한다. 없으면 빈 문자열."""
+    candidates = (
+        repo_path / "agent-data" / "spec.md",
+        repo_path / "agent-data" / "context" / "spec.md",
+        repo_path / "spec.md",
+    )
+    for path in candidates:
+        try:
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return ""
+
+
 # ── 파이프라인 실행 (CLI + API 공용) ──────────────────────────────────────────
 
 def run_pipeline(
@@ -415,7 +436,8 @@ def run_pipeline(
     pause_controller: "PauseController | None" = None,
     max_workers: int = 1,
     discord_channel_id: int | None = None,
-    max_orchestrator_retries: int = 2,
+    max_orchestrator_retries: int = 3,
+    intervention_auto_split: bool = False,
     auto_merge: bool = False,
     provider: str = "claude",
     model_fast: str = "claude-haiku-4-5",
@@ -479,8 +501,12 @@ def run_pipeline(
         )
         emit({"type": "frontend_skipped", "task_ids": [t.id for t in frontend_tasks]})
 
-    # DONE만 제외 — FAILED는 재시도 대상, frontend는 파이프라인 미실행
-    pending = [t for t in all_tasks if t.status != TaskStatus.DONE and t.task_type != "frontend"]
+    # DONE/SUPERSEDED 제외 — FAILED는 재시도 대상, frontend는 파이프라인 미실행
+    pending = [
+        t for t in all_tasks
+        if t.status not in (TaskStatus.DONE, TaskStatus.SUPERSEDED)
+        and t.task_type != "frontend"
+    ]
     # FAILED 태스크는 새 실행을 위해 상태 초기화
     for t in pending:
         if t.status == TaskStatus.FAILED:
@@ -714,11 +740,21 @@ def run_pipeline(
         """태스크 하나를 실행한다. 실패 시 오케스트레이터가 개입하여 재시도한다."""
         nonlocal success_count, fail_count
 
+        # SUPERSEDED 태스크는 이전 실행에서 auto_split 으로 대체된 잔해 —
+        # 어떤 경로로든 run_one 에 진입하면 조용히 스킵한다.
+        if task.status == TaskStatus.SUPERSEDED:
+            logger.info("[%s] SUPERSEDED — 실행 스킵", task.id)
+            return
+
         start_time = time.monotonic()
         emit({"type": "task_start", "task_id": task.id, "title": task.title})
         _notify(notifier, f"🚀 [{task.id}] \"{task.title}\" 시작")
 
         hints_tried: list[str] = []
+        # intervention.generate_skeleton_files() 가 생성한 스텁. 다음 재시도 워크스페이스
+        # 생성자에 주입되고, 주입 후 즉시 비워진다 (한 번만 사용).
+        pending_skeletons: dict[str, str] = {}
+        auto_split_triggered = False
 
         for orch_attempt in range(max_orchestrator_retries + 1):
             # 리스너 스레드 생존 확인 + 중단 여부 확인
@@ -726,7 +762,12 @@ def run_pipeline(
             if pause_ctrl.is_stopped:
                 logger.info("[%s] 중단 요청 — 오케스트레이터 루프 종료", task.id)
                 return
-            with WorkspaceManager(task, repo_path, keep_on_failure=True) as ws:
+            with WorkspaceManager(
+                task, repo_path, keep_on_failure=True,
+                skeleton_files=pending_skeletons or None,
+            ) as ws:
+                # 다음 반복에서 재주입되지 않도록 즉시 초기화.
+                pending_skeletons = {}
                 # 선행 태스크 산출물 주입 (depends_on 연결된 완료 태스크)
                 if task.depends_on:
                     dep_tasks = [t for t in all_tasks if t.id in task.depends_on]
@@ -865,6 +906,18 @@ def run_pipeline(
                             f"이전 오류:\n{task.last_error or ''}"
                         )
                         task.failure_reason = ""  # 초기화 (다음 시도 전)
+                        # 스켈레톤이 생성됐다면 다음 반복의 WorkspaceManager 에 주입된다.
+                        if analysis.skeleton_files:
+                            pending_skeletons = dict(analysis.skeleton_files)
+                            logger.info(
+                                "[%s] 다음 재시도에 스켈레톤 주입 예약: %s",
+                                task.id, list(pending_skeletons.keys()),
+                            )
+                            emit({"type": "orchestrator_skeleton_generated",
+                                  "task_id": task.id, "title": task.title,
+                                  "attempt": orch_attempt + 1,
+                                  "next_attempt": orch_attempt + 2,
+                                  "files": list(pending_skeletons.keys())})
                         logger.warning(
                             "[%s] 오케스트레이터 → RETRY (시도 %d → %d)\n  힌트: %s",
                             task.id, orch_attempt + 1, orch_attempt + 2, analysis.hint[:150],
@@ -894,6 +947,57 @@ def run_pipeline(
                               "title": task.title, "attempt": orch_attempt + 1,
                               "reason": analysis.hint, "failure_reason": failure_reason})
                         is_last_attempt = True  # 아래 최종 실패 처리로 넘어감
+
+                # ── 자동 분해 (intervention_auto_split 플래그 ON 시) ─────────
+                # 조건: 모든 재시도 소진 + 최소 1회 intervention 수행 + 중복 트리거 방지.
+                # 성공 시 원 태스크는 SUPERSEDED 로 보존되고 다음 실행 사이클에서
+                # 하위 태스크가 픽업된다 — 현재 사이클은 종료.
+                if (
+                    is_last_attempt
+                    and intervention_auto_split
+                    and hints_tried
+                    and not auto_split_triggered
+                ):
+                    auto_split_triggered = True
+                    spec_content = _load_spec_content(repo_path)
+                    try:
+                        split_llm = create_redesign_llm(_cross_provider, _cross_capable_model)
+                    except Exception as exc:
+                        logger.error("[%s] 자동 분해 LLM 생성 실패: %s", task.id, exc)
+                        split_llm = None
+
+                    if split_llm is not None:
+                        try:
+                            with _save_lock:
+                                subtasks = _split_task(
+                                    task, all_tasks, spec_content, split_llm,
+                                    tasks_yaml_path=tasks_path,
+                                )
+                        except SplitTaskError as exc:
+                            logger.warning("[%s] 자동 분해 거부/실패: %s", task.id, exc)
+                            emit({"type": "task_split_failed", "task_id": task.id,
+                                  "title": task.title, "reason": str(exc)})
+                        except Exception as exc:
+                            logger.error("[%s] 자동 분해 예외: %s", task.id, exc, exc_info=True)
+                            emit({"type": "task_split_failed", "task_id": task.id,
+                                  "title": task.title, "reason": str(exc)})
+                        else:
+                            sub_ids = [s.id for s in subtasks]
+                            logger.warning(
+                                "[%s] 자동 분해 성공 → %s (SUPERSEDED 보존). "
+                                "다음 파이프라인 실행 시 하위 태스크가 실행됩니다.",
+                                task.id, sub_ids,
+                            )
+                            _notify(notifier,
+                                    f"🧩 [{task.id}] 자동 분해 — 하위 {len(sub_ids)}개 태스크 생성\n"
+                                    f"{', '.join(sub_ids)}\n"
+                                    f"(원 태스크는 SUPERSEDED, 재실행 시 이어집니다)")
+                            emit({"type": "task_split", "task_id": task.id,
+                                  "title": task.title,
+                                  "subtask_ids": sub_ids,
+                                  "subtasks": [s.to_dict() for s in subtasks]})
+                            # 현재 사이클 종료 — 최종 실패 처리 건너뜀 (SUPERSEDED 로 이미 기록됨)
+                            return
 
                 # ── 최종 실패 처리 ───────────────────────────────────────────
                 task.status = TaskStatus.FAILED
