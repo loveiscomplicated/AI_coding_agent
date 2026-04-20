@@ -140,6 +140,21 @@ function logEntryText(e: LogEntry): { text: string; color: string } {
         text: `📋 [${e.task_id}] 보고서 저장 완료 → ${e.report_path ?? ''}\n${(e.report ?? '').split('\n').slice(0, 6).map((l: string) => '     ' + l).join('\n')}`,
         color: 'text-orange-300',
       }
+    case 'orchestrator_skeleton_generated':
+      return {
+        text: `🧱 [${e.task_id}] 스켈레톤 생성 — 다음 재시도(#${e.next_attempt})에 주입: ${(e.files ?? []).join(', ')}`,
+        color: 'text-sky-300',
+      }
+    case 'task_split':
+      return {
+        text: `🧩 [${e.task_id}] 자동 분해 → ${(e.subtask_ids ?? []).join(', ')} (원 태스크 SUPERSEDED, 재실행 시 이어집니다)`,
+        color: 'text-violet-300',
+      }
+    case 'task_split_failed':
+      return {
+        text: `⚠ [${e.task_id}] 자동 분해 실패: ${(e.reason ?? '').slice(0, 150)} — 일반 실패 경로로 진행`,
+        color: 'text-amber-400',
+      }
     default:
       return { text: JSON.stringify(e), color: 'text-zinc-600' }
   }

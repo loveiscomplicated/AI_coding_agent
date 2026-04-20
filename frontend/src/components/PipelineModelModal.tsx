@@ -174,6 +174,7 @@ interface PipelineModelModalProps {
     roleModels?: RoleOverrides,
     noPush?: boolean,
     autoSelectByComplexity?: boolean,
+    interventionAutoSplit?: boolean,
   ) => void
   onCancel: () => void
   tasks?: PipelineTaskSummary[]
@@ -195,6 +196,7 @@ export function PipelineModelModal({ models, onConfirm, onCancel, tasks }: Pipel
 
   const [agentCount, setAgentCount] = useState(1)
   const [noPush, setNoPush] = useState(false)
+  const [interventionAutoSplit, setInterventionAutoSplit] = useState(false)
   const [roleOverrides, setRoleOverrides] = useState<RoleOverrides>({})
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [autoByComplexity, setAutoByComplexity] = useState(false)
@@ -239,6 +241,7 @@ export function PipelineModelModal({ models, onConfirm, onCancel, tasks }: Pipel
       effectiveRoleModels,
       noPush,
       autoByComplexity,
+      interventionAutoSplit,
     )
   }
 
@@ -313,6 +316,34 @@ export function PipelineModelModal({ models, onConfirm, onCancel, tasks }: Pipel
             <span
               className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ${
                 noPush ? 'translate-x-0' : 'translate-x-5'
+              }`}
+            />
+          </button>
+        </div>
+
+        {/* 최종 실패 시 태스크 자동 분해 (intervention_auto_split) */}
+        <div className="rounded-xl border border-gray-200 dark:border-zinc-700 p-3 flex items-center justify-between">
+          <div>
+            <p className="text-xs font-semibold text-gray-700 dark:text-zinc-200">최종 실패 시 태스크 자동 분해</p>
+            <p className="text-xs text-gray-400 dark:text-zinc-500 mt-0.5">
+              {interventionAutoSplit
+                ? '실행 중 태스크 구조가 변경됩니다. 재시도 소진 시 LLM이 태스크를 2~3개 하위 태스크로 분해합니다 (재실행 필요)'
+                : '비활성화 — 재시도 소진 시 태스크를 FAILED로 종료합니다'}
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={interventionAutoSplit}
+            aria-label="최종 실패 시 태스크 자동 분해"
+            onClick={() => setInterventionAutoSplit(v => !v)}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-zinc-900 ${
+              interventionAutoSplit ? 'bg-blue-600' : 'bg-gray-300 dark:bg-zinc-600'
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ${
+                interventionAutoSplit ? 'translate-x-5' : 'translate-x-0'
               }`}
             />
           </button>

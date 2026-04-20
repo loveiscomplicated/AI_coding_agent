@@ -233,11 +233,13 @@ function StatusBadge({ status }: { status: string }) {
     implementing: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400',
     reviewing: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-400',
     pending: 'bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400',
+    superseded: 'bg-zinc-200 text-zinc-500 dark:bg-zinc-800/70 dark:text-zinc-400 line-through',
   }
   const cls = map[status] ?? map.pending
+  const label = status === 'superseded' ? '대체됨' : status
   return (
     <span className={`inline-block text-[11px] font-medium px-2 py-0.5 rounded-full ${cls}`}>
-      {status}
+      {label}
     </span>
   )
 }
@@ -606,7 +608,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
     }
   }
 
-  async function resumePipeline(providerFast: string, modelFast: string, providerCapable: string, modelCapable: string, agentCount: number, roleModels?: Record<string, {provider?: string; model?: string}>, noPush?: boolean, autoSelectByComplexity?: boolean) {
+  async function resumePipeline(providerFast: string, modelFast: string, providerCapable: string, modelCapable: string, agentCount: number, roleModels?: Record<string, {provider?: string; model?: string}>, noPush?: boolean, autoSelectByComplexity?: boolean, interventionAutoSplit?: boolean) {
     if (!project) return
     setShowResumeModal(false)
     setResuming(true)
@@ -628,6 +630,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
           provider_capable: providerCapable,
           model_capable: modelCapable,
           auto_select_by_complexity: autoSelectByComplexity ?? false,
+          intervention_auto_split: interventionAutoSplit ?? false,
           ...(roleModels && Object.keys(roleModels).length > 0 ? { role_models: roleModels } : {}),
         }),
       })

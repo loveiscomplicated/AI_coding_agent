@@ -359,6 +359,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
     roleModels?: Record<string, {provider?: string; model?: string}>,
     noPush?: boolean,
     autoSelectByComplexity?: boolean,
+    interventionAutoSplit?: boolean,
   ) {
     setShowModelModal(false)
     dispatch({ type: 'SAVING' })
@@ -401,6 +402,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
           provider_capable: providerCapable,
           model_capable: modelCapable,
           auto_select_by_complexity: autoSelectByComplexity ?? false,
+          intervention_auto_split: interventionAutoSplit ?? false,
           ...(roleModels && Object.keys(roleModels).length > 0 ? { role_models: roleModels } : {}),
         }),
       })
