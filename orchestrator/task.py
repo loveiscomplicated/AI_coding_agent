@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -71,6 +71,8 @@ class Task:
     depends_on: list[str] = field(default_factory=list)  # 선행 태스크 ID 목록
     task_type: str = "backend"  # "backend" | "frontend" — frontend는 멀티 에이전트 파이프라인 제외
     language: str = "python"    # 태스크 구현 언어 (DockerTestRunner 실행 환경 결정)
+    complexity: Literal["simple", "standard", "complex"] | None = None
+    # draft 단계에서 LLM이 평가한 난이도. 파이프라인 모델 자동 선택 토글과 연동된다.
 
     # ── 런타임 상태 (YAML 저장/복원 가능) ────────────────────────────────────
     status: TaskStatus = TaskStatus.PENDING
@@ -99,7 +101,7 @@ class Task:
     # ── 직렬화 ────────────────────────────────────────────────────────────────
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "id": self.id,
             "title": self.title,
             "description": self.description,
@@ -115,9 +117,18 @@ class Task:
             "pr_url": self.pr_url,
             "failure_reason": self.failure_reason,
         }
+        if self.complexity is not None:
+            result["complexity"] = self.complexity
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Task":
+        complexity_raw = data.get("complexity")
+        complexity: Literal["simple", "standard", "complex"] | None
+        if complexity_raw in ("simple", "standard", "complex"):
+            complexity = complexity_raw
+        else:
+            complexity = None
         return cls(
             id=data["id"],
             title=data["title"],
@@ -128,6 +139,7 @@ class Task:
             depends_on=data.get("depends_on", []),
             task_type=data.get("task_type", "backend"),
             language=data.get("language", "python"),
+            complexity=complexity,
             status=TaskStatus(data.get("status", TaskStatus.PENDING.value)),
             retry_count=data.get("retry_count", 0),
             last_error=data.get("last_error", ""),

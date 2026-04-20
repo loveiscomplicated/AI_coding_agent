@@ -50,6 +50,7 @@ from orchestrator.intervention import (
     save_report as orch_save_report,
     set_llm as _set_intervention_llm,
     set_model_config as _set_intervention_model_config,
+    set_complexity_routing as _set_intervention_complexity_routing,
     create_intervention_llms,
 )
 from agents.roles import RoleModelConfig, resolve_model_for_role, ROLE_MERGE_AGENT
@@ -425,6 +426,8 @@ def run_pipeline(
     role_compaction_tuning_enabled: bool = False,
     role_compaction_tuning_preset: str = "balanced",
     role_compaction_tuning_overrides: dict[str, str] | None = None,
+    auto_select_by_complexity: bool = False,
+    complexity_map: dict[str, dict[str, str]] | None = None,
 ) -> dict:
     """
     파이프라인 실행 핵심 로직. CLI와 FastAPI 백엔드 양쪽에서 호출된다.
@@ -506,9 +509,20 @@ def run_pipeline(
     capable_llm = create_client(_provider_capable, LLMConfig(model=model_capable, max_tokens=8192))
     runner = DockerTestRunner()
 
+    # 복잡도 기반 자동 선택이 켜져 있고 매핑이 주입되지 않은 경우 backend.config 기본값 사용.
+    # (circular import 회피: 함수 내부에서 import)
+    _complexity_map = complexity_map
+    if auto_select_by_complexity and not _complexity_map:
+        from backend.config import COMPLEXITY_MODEL_MAP as _DEFAULT_COMPLEXITY_MAP
+        _complexity_map = _DEFAULT_COMPLEXITY_MAP
+
+    # role_models 우선순위: auto_select ON이어도 사용자가 명시한 role override는 존중한다.
+    # 최종 해석은 TDDPipeline._llm_for_role / intervention.analyze() 내부에서 수행.
+    _effective_role_models = role_models
+
     pipeline = TDDPipeline(
         agent_llm=fast_llm, implementer_llm=fast_llm, test_runner=runner,
-        role_models=role_models,
+        role_models=_effective_role_models,
         provider=provider,
         model_fast=model_fast,
         model_capable=model_capable,
@@ -517,16 +531,31 @@ def run_pipeline(
         role_compaction_tuning_enabled=role_compaction_tuning_enabled,
         role_compaction_tuning_preset=role_compaction_tuning_preset,
         role_compaction_tuning_overrides=role_compaction_tuning_overrides,
+        auto_select_by_complexity=auto_select_by_complexity,
+        complexity_map=_complexity_map,
     )
     git = GitWorkflow(repo_path, base_branch=base_branch)
-    _merge_provider, _merge_model = resolve_model_for_role(
-        role=ROLE_MERGE_AGENT,
-        role_models=role_models,
-        provider=provider,
-        model_fast=model_fast,
-        model_capable=model_capable,
-        provider_fast=provider_fast,
-        provider_capable=provider_capable,
+    # merge_agent는 cross-task(그룹 단위)이므로 단일 complexity가 없다.
+    # base: 토글 ON → standard tier fast / 토글 OFF → resolve_model_for_role로 기본값 해석.
+    # 그 위에 role_models['merge_agent']가 지정되어 있으면 부분 override를 합성한다
+    # (API 계약: role_models는 auto_select 여부와 무관하게 최상위 override).
+    from agents.roles import compose_role_override
+    if auto_select_by_complexity and _complexity_map:
+        _base_merge_provider = _complexity_map["standard"]["provider_fast"]
+        _base_merge_model = _complexity_map["standard"]["model_fast"]
+    else:
+        _base_merge_provider, _base_merge_model = resolve_model_for_role(
+            role=ROLE_MERGE_AGENT,
+            role_models=None,  # override는 아래에서 별도 합성
+            provider=provider,
+            model_fast=model_fast,
+            model_capable=model_capable,
+            provider_fast=provider_fast,
+            provider_capable=provider_capable,
+        )
+    _merge_provider, _merge_model = compose_role_override(
+        (_effective_role_models or {}).get(ROLE_MERGE_AGENT),
+        _base_merge_provider, _base_merge_model,
     )
     merge_llm = create_client(_merge_provider, LLMConfig(model=_merge_model, max_tokens=8192))
     merge_agent = MergeAgent(llm=merge_llm, repo_path=repo_path)
@@ -536,12 +565,21 @@ def run_pipeline(
     _set_hotline_notifier(notifier)
     _set_hotline_repo_path(repo_path)
     _set_hotline_tasks_path(tasks_path)
-    conv_llm, sum_llm = create_hotline_llms(_provider_capable, model_capable)
+    # 토글 ON 시 cross-task LLM(hotline + intervention 전역 fallback)도 standard tier capable을 사용.
+    # 실제 per-task intervention 모델은 intervention.analyze()에서 다시 task.complexity로 해석한다.
+    if auto_select_by_complexity and _complexity_map:
+        _cross_provider = _complexity_map["standard"]["provider_capable"]
+        _cross_capable_model = _complexity_map["standard"]["model_capable"]
+    else:
+        _cross_provider = _provider_capable
+        _cross_capable_model = model_capable
+    conv_llm, sum_llm = create_hotline_llms(_cross_provider, _cross_capable_model)
     _set_hotline_llm(conv_llm, sum_llm)
     # 오케스트레이터 개입 LLM 주입
-    analyze_llm, report_llm = create_intervention_llms(_provider_capable, model_capable)
+    analyze_llm, report_llm = create_intervention_llms(_cross_provider, _cross_capable_model)
     _set_intervention_llm(analyze_llm, report_llm)
     _set_intervention_model_config(provider, model_fast, model_capable, provider_fast, provider_capable)
+    _set_intervention_complexity_routing(auto_select_by_complexity, _complexity_map)
 
     # ── auto_merge catch-up: 이전 실행에서 완료됐지만 미머지된 브랜치 처리 ────────
     if auto_merge and not no_pr:
@@ -804,7 +842,7 @@ def run_pipeline(
                         task, failure_reason, orch_attempt + 1,
                         test_stdout=test_stdout,
                         previous_hints=hints_tried,
-                        role_models=role_models,
+                        role_models=_effective_role_models,
                     )
                     _accumulate_external_tokens(
                         result.metrics,
@@ -881,6 +919,7 @@ def run_pipeline(
                         orchestrator_model=model_capable,
                         coding_agent_model=model_fast,
                         models_used=result.models_used or None,
+                        role_models=_effective_role_models,
                     )
                     _accumulate_external_tokens(
                         result.metrics,
@@ -888,8 +927,10 @@ def run_pipeline(
                         report_result.token_usage,
                         report_result.call_log,
                     )
+                    # 보고서 생성 모델은 analyze 모델과 별도 키로 기록한다.
+                    # 기존처럼 'intervention' 키를 덮어쓰면 분석 단계 모델 추적을 잃는다.
                     if report_result.call_log:
-                        result.models_used["intervention"] = report_result.call_log[-1].get("model", "")
+                        result.models_used["intervention_report"] = report_result.call_log[-1].get("model", "")
                     orch_report_text = report_result.text
                     report_path = orch_save_report(orch_report_text, task.id, reports_dir)
                     logger.warning(

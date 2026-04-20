@@ -192,6 +192,8 @@ class TDDPipeline:
         role_compaction_tuning_enabled: bool = False,
         role_compaction_tuning_preset: str = "balanced",
         role_compaction_tuning_overrides: dict[str, str] | None = None,
+        auto_select_by_complexity: bool = False,
+        complexity_map: dict[str, dict[str, str]] | None = None,
     ):
         self.agent_llm = agent_llm
         self.implementer_llm = implementer_llm or agent_llm
@@ -211,23 +213,57 @@ class TDDPipeline:
         self.role_compaction_tuning_enabled = role_compaction_tuning_enabled
         self.role_compaction_tuning_preset = role_compaction_tuning_preset
         self.role_compaction_tuning_overrides = role_compaction_tuning_overrides or {}
+        self.auto_select_by_complexity = auto_select_by_complexity
+        self.complexity_map = complexity_map or {}
+
+    # ── 역할별 모델 해석 ─────────────────────────────────────────────────────
+
+    def _resolve_provider_model(
+        self, role: str, task: "Task | None"
+    ) -> tuple[str, str] | None:
+        """역할에 최종 적용될 (provider, model)을 반환한다.
+
+        `_llm_for_role`과 `_run_pipeline`의 telemetry(`models_used`) 양쪽이 이 메서드를
+        공유하여, 실제 호출 모델과 기록 모델이 절대 어긋나지 않게 한다.
+
+        우선순위:
+          1) role_models[role] 부분 override — compose_role_override로 base에 덮어씀
+          2) auto_select_by_complexity=True & task 있음 → complexity 기반 매핑
+          3) resolve_model_for_role() 기본 해석
+          4) model config 미주입 + 완전 override만 있음 → override 그대로 반환
+          5) 그 외 → None (호출자가 fallback 처리)
+        """
+        from agents.roles import compose_role_override, resolve_complexity_model
+
+        if self.auto_select_by_complexity and task is not None and self.complexity_map:
+            base_p, base_m = resolve_complexity_model(role, task.complexity, self.complexity_map)
+        elif self.provider and self.model_fast and self.model_capable:
+            base_p, base_m = resolve_model_for_role(
+                role=role,
+                role_models=None,  # override는 아래 compose에서 합성
+                provider=self.provider,
+                model_fast=self.model_fast,
+                model_capable=self.model_capable,
+                provider_fast=self.provider_fast,
+                provider_capable=self.provider_capable,
+            )
+        else:
+            role_cfg = (self.role_models or {}).get(role)
+            if role_cfg and role_cfg.provider and role_cfg.model:
+                return (role_cfg.provider, role_cfg.model)
+            return None
+
+        role_cfg = (self.role_models or {}).get(role)
+        return compose_role_override(role_cfg, base_p, base_m)
 
     # ── 역할별 LLM 생성 ──────────────────────────────────────────────────────
 
-    def _llm_for_role(self, role: str, fallback):
-        """resolve_model_for_role()로 역할별 LLM 클라이언트를 생성한다.
-        model config가 주입되지 않은 경우(레거시 호출) fallback LLM을 반환한다."""
-        if self.provider is None or self.model_fast is None or self.model_capable is None:
+    def _llm_for_role(self, role: str, fallback, task: "Task | None" = None):
+        """역할별 LLM 클라이언트를 생성한다. 해석은 `_resolve_provider_model`에 위임."""
+        resolved = self._resolve_provider_model(role, task)
+        if resolved is None:
             return fallback
-        p, m = resolve_model_for_role(
-            role=role,
-            role_models=self.role_models,
-            provider=self.provider,
-            model_fast=self.model_fast,
-            model_capable=self.model_capable,
-            provider_fast=self.provider_fast,
-            provider_capable=self.provider_capable,
-        )
+        p, m = resolved
         return create_client(p, LLMConfig(model=m, max_tokens=8192))
 
     # ── 공개 인터페이스 ───────────────────────────────────────────────────────
@@ -336,19 +372,14 @@ class TDDPipeline:
 
     def _run_pipeline(self, task, workspace, _p, _agent_p, pause_ctrl=None, enriched_desc=None) -> "PipelineResult":
         """run()의 실제 파이프라인 로직. workspace 등록/해제는 run()이 담당한다."""
-        # 역할별 실제 사용 모델을 미리 계산 — 성공/실패 양쪽 모두 TaskReport에 기록
+        # 역할별 실제 사용 모델을 미리 계산 — 성공/실패 양쪽 모두 TaskReport에 기록.
+        # _llm_for_role과 동일한 _resolve_provider_model 경로를 사용하여
+        # 실제 호출 모델과 기록 모델이 어긋나지 않음을 보장한다.
         models_used: dict[str, str] = {}
-        if self.provider and self.model_fast and self.model_capable:
-            for _role_key in [ROLE_TEST_WRITER, ROLE_IMPLEMENTER, ROLE_REVIEWER]:
-                _rp, _rm = resolve_model_for_role(
-                    role=_role_key,
-                    role_models=self.role_models,
-                    provider=self.provider,
-                    model_fast=self.model_fast,
-                    model_capable=self.model_capable,
-                    provider_fast=self.provider_fast,
-                    provider_capable=self.provider_capable,
-                )
+        for _role_key in [ROLE_TEST_WRITER, ROLE_IMPLEMENTER, ROLE_REVIEWER]:
+            _resolved = self._resolve_provider_model(_role_key, task)
+            if _resolved is not None:
+                _rp, _rm = _resolved
                 models_used[_role_key] = f"{_rp}/{_rm}"
 
         try:
@@ -799,7 +830,7 @@ class TDDPipeline:
         stop_check = (lambda: pause_ctrl.is_stopped) if pause_ctrl else None
         _framework = LANGUAGE_TEST_FRAMEWORK_MAP.get(task.language, task.test_framework)
         loop = ScopedReactLoop(
-            llm=self._llm_for_role(ROLE_TEST_WRITER, self.agent_llm),
+            llm=self._llm_for_role(ROLE_TEST_WRITER, self.agent_llm, task=task),
             role=TEST_WRITER.render(task.language, _framework),
             workspace_dir=workspace.path,
             max_iterations=self.max_iterations,
@@ -840,7 +871,7 @@ class TDDPipeline:
         stop_check = (lambda: pause_ctrl.is_stopped) if pause_ctrl else None
         _framework = LANGUAGE_TEST_FRAMEWORK_MAP.get(task.language, task.test_framework)
         loop = ScopedReactLoop(
-            llm=self._llm_for_role(ROLE_IMPLEMENTER, self.implementer_llm),
+            llm=self._llm_for_role(ROLE_IMPLEMENTER, self.implementer_llm, task=task),
             role=IMPLEMENTER.render(task.language, _framework),
             workspace_dir=workspace.path,
             max_iterations=self.max_iterations,
@@ -870,7 +901,7 @@ class TDDPipeline:
         stop_check = (lambda: pause_ctrl.is_stopped) if pause_ctrl else None
         _framework = LANGUAGE_TEST_FRAMEWORK_MAP.get(task.language, task.test_framework)
         loop = ScopedReactLoop(
-            llm=self._llm_for_role(ROLE_REVIEWER, self.agent_llm),
+            llm=self._llm_for_role(ROLE_REVIEWER, self.agent_llm, task=task),
             role=REVIEWER.render(task.language, _framework),
             workspace_dir=workspace.path,
             max_iterations=self.reviewer_max_iterations,

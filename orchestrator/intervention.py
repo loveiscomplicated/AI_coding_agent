@@ -180,6 +180,10 @@ _model_capable: str = ""
 _provider_fast: str | None = None
 _provider_capable: str | None = None
 
+# 복잡도 기반 자동 선택 config 글로벌
+_auto_select_by_complexity: bool = False
+_complexity_map: dict[str, dict[str, str]] = {}
+
 
 def set_llm(analyze_llm: BaseLLMClient, report_llm: BaseLLMClient) -> None:
     """LLM 클라이언트를 주입한다. 파이프라인 시작 시 run.py에서 호출."""
@@ -202,6 +206,20 @@ def set_model_config(
     _model_capable = model_capable
     _provider_fast = provider_fast
     _provider_capable = provider_capable
+
+
+def set_complexity_routing(
+    auto_select_by_complexity: bool,
+    complexity_map: dict[str, dict[str, str]] | None,
+) -> None:
+    """복잡도 기반 자동 선택 플래그와 매핑을 주입한다.
+
+    파이프라인 시작 시 run.py에서 호출한다. True이면 analyze()가 task.complexity에
+    따라 per-task capable 모델을 선택한다 (role_models 무시).
+    """
+    global _auto_select_by_complexity, _complexity_map
+    _auto_select_by_complexity = auto_select_by_complexity
+    _complexity_map = complexity_map or {}
 
 
 def create_intervention_llms(provider: str, model: str) -> tuple[BaseLLMClient, BaseLLMClient]:
@@ -344,19 +362,39 @@ def analyze(
         previous_hints : 이전 시도에서 제공한 힌트 목록 (중복 방지용)
         role_models: 역할별 모델 오버라이드. None이면 글로벌 _analyze_llm 사용.
     """
-    # role_models에 "intervention" 오버라이드가 있으면 새 클라이언트 생성
-    if role_models and _model_capable:
-        int_provider, int_model = resolve_model_for_role(
-            role=ROLE_INTERVENTION,
-            role_models=role_models,
-            provider=_provider,
-            model_fast=_model_fast,
-            model_capable=_model_capable,
-            provider_fast=_provider_fast,
-            provider_capable=_provider_capable,
+    # 우선순위 (TDDPipeline._llm_for_role와 동일 계약):
+    #  1) role_models['intervention'] override — 부분 지정 시 base와 합성
+    #  2) auto_select_by_complexity=True → task.complexity 기반 per-task capable 모델
+    #  3) 전역 _analyze_llm (파이프라인 시작 시 주입된 기본 LLM)
+    intervention_override = (role_models or {}).get(ROLE_INTERVENTION)
+    use_override = intervention_override and (intervention_override.provider or intervention_override.model)
+
+    # base (override의 미지정 필드를 채우는 기본값)
+    base_provider = ""
+    base_model = ""
+    if _auto_select_by_complexity and _complexity_map:
+        from agents.roles import resolve_complexity_model
+        base_provider, base_model = resolve_complexity_model(
+            ROLE_INTERVENTION, task.complexity, _complexity_map
         )
+    elif _model_capable:
+        base_provider = _provider_capable or _provider
+        base_model = _model_capable
+
+    if use_override:
+        from agents.roles import compose_role_override
+        int_provider, int_model = compose_role_override(
+            intervention_override, base_provider, base_model,
+        )
+        if not (int_provider and int_model):
+            logger.error("intervention override 합성 실패: base=(%r, %r)", base_provider, base_model)
+            return AnalysisResult(should_retry=False, hint="오케스트레이터 모델 해석 실패", raw="")
         llm: BaseLLMClient = create_client(
             int_provider, LLMConfig(model=int_model, system_prompt=_ANALYZE_SYSTEM, max_tokens=1024)
+        )
+    elif _auto_select_by_complexity and _complexity_map:
+        llm = create_client(
+            base_provider, LLMConfig(model=base_model, system_prompt=_ANALYZE_SYSTEM, max_tokens=1024)
         )
     elif _analyze_llm is None:
         logger.error("intervention.set_llm()이 호출되지 않았습니다.")
@@ -445,14 +483,57 @@ def generate_report_with_metrics(
     orchestrator_model: str = "",
     coding_agent_model: str = "",
     models_used: dict[str, str] | None = None,
+    role_models: dict[str, RoleModelConfig] | None = None,
 ) -> ReportGenerationResult:
     """
     최종 실패 보고서를 LLM으로 생성한다.
 
+    우선순위 (analyze()와 동일):
+      1) role_models['intervention'] override
+      2) auto_select_by_complexity=True → task.complexity 기반 per-task capable 모델
+      3) 전역 _report_llm (파이프라인 시작 시 주입된 기본)
+
     Returns:
         생성된 보고서와 LLM 메타데이터
     """
-    if _report_llm is None:
+    # analyze()와 동일한 우선순위: override > complexity > 전역 _report_llm
+    intervention_override = (role_models or {}).get(ROLE_INTERVENTION)
+    use_override = intervention_override and (intervention_override.provider or intervention_override.model)
+
+    base_provider = ""
+    base_model = ""
+    if _auto_select_by_complexity and _complexity_map:
+        from agents.roles import resolve_complexity_model
+        base_provider, base_model = resolve_complexity_model(
+            ROLE_INTERVENTION, task.complexity, _complexity_map
+        )
+    elif _model_capable:
+        base_provider = _provider_capable or _provider
+        base_model = _model_capable
+
+    report_llm: BaseLLMClient | None
+    if use_override:
+        from agents.roles import compose_role_override
+        int_provider, int_model = compose_role_override(
+            intervention_override, base_provider, base_model,
+        )
+        if not (int_provider and int_model):
+            logger.error("intervention 보고서 override 합성 실패: base=(%r, %r)",
+                         base_provider, base_model)
+            return ReportGenerationResult(
+                text=f"# 보고서 생성 실패\n\n모델 해석 실패\n\n## 최종 실패 원인\n{failure_reason}"
+            )
+        report_llm = create_client(
+            int_provider, LLMConfig(model=int_model, system_prompt=_REPORT_SYSTEM, max_tokens=4096)
+        )
+    elif _auto_select_by_complexity and _complexity_map:
+        report_llm = create_client(
+            base_provider, LLMConfig(model=base_model, system_prompt=_REPORT_SYSTEM, max_tokens=4096)
+        )
+    else:
+        report_llm = _report_llm
+
+    if report_llm is None:
         logger.error("intervention.set_llm()이 호출되지 않았습니다.")
         return ReportGenerationResult(
             text=f"# 보고서 생성 실패\n\nLLM 미초기화\n\n## 최종 실패 원인\n{failure_reason}"
@@ -485,7 +566,7 @@ id: {task.id}
 위 정보를 바탕으로 실패 분석 보고서를 작성하세요.
 """
     try:
-        response = _report_llm.chat([Message(role="user", content=user_msg)])
+        response = report_llm.chat([Message(role="user", content=user_msg)])
         report_body = _extract_text(response) or "보고서 생성 실패"
         token_usage, call_log = _usage_from_response(response)
     except Exception as e:
