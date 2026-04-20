@@ -775,7 +775,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
             <button
               className="rounded-lg bg-blue-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
               onClick={() => {
-                if (critiqueStatus === 'idle') {
+                if (critiqueStatus === 'idle' && applyStatus !== 'done') {
                   setShowRunConfirm(true)
                 } else {
                   setShowModelModal(true)
