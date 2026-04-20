@@ -5,7 +5,7 @@
  * TaskDraftPanel, DashboardPage 등 여러 곳에서 공유한다.
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 export interface AvailableModel {
   id: string
@@ -15,6 +15,33 @@ export interface AvailableModel {
 
 export type RoleOverride = { provider?: string; model?: string }
 export type RoleOverrides = Record<string, RoleOverride>
+
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000') as string
+
+// 백엔드 /api/chat/complexity-map 응답 shape.
+// env override가 적용된 런타임 실매핑을 받아 UI에 그대로 표시한다.
+export interface ComplexityMapEntry {
+  provider_fast: string
+  model_fast: string
+  provider_capable: string
+  model_capable: string
+}
+export type ComplexityMap = Record<'simple' | 'standard' | 'complex', ComplexityMapEntry>
+
+// 백엔드 조회 실패 시 fallback. backend/config.py의 기본값과 동일.
+export const DEFAULT_COMPLEXITY_MAP: ComplexityMap = {
+  simple:   { provider_fast: 'openai', model_fast: 'gpt-4.1-mini',
+              provider_capable: 'gemini', model_capable: 'gemini-2.5-flash-lite' },
+  standard: { provider_fast: 'openai', model_fast: 'gpt-5-mini',
+              provider_capable: 'gemini', model_capable: 'gemini-2.5-flash' },
+  complex:  { provider_fast: 'openai', model_fast: 'gpt-5',
+              provider_capable: 'gemini', model_capable: 'gemini-3-pro-preview' },
+}
+
+export interface PipelineTaskSummary {
+  id: string
+  complexity?: 'simple' | 'standard' | 'complex' | null
+}
 // ── ModelSelect ───────────────────────────────────────────────────────────────
 
 interface ModelSelectProps {
@@ -25,6 +52,7 @@ interface ModelSelectProps {
   selectedModel: string
   onProviderChange: (p: string) => void
   onModelChange: (m: string) => void
+  disabled?: boolean
 }
 
 export function ModelSelect({
@@ -35,28 +63,31 @@ export function ModelSelect({
   selectedModel,
   onProviderChange,
   onModelChange,
+  disabled = false,
 }: ModelSelectProps) {
   const providers = Array.from(new Set(models.map(m => m.provider)))
   const filtered = models.filter(m => m.provider === selectedProvider)
 
   return (
-    <div className="rounded-xl border border-gray-200 dark:border-zinc-700 p-3 space-y-2">
+    <div className={`rounded-xl border border-gray-200 dark:border-zinc-700 p-3 space-y-2 ${disabled ? 'opacity-40' : ''}`}>
       <div>
         <p className="text-xs font-semibold text-gray-700 dark:text-zinc-200">{label}</p>
         <p className="text-xs text-gray-400 dark:text-zinc-500 mt-0.5">{hint}</p>
       </div>
       <div className="flex gap-2">
         <select
-          className="rounded-lg border border-gray-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-xs text-gray-700 dark:text-zinc-200 px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500 w-28 shrink-0"
+          className="rounded-lg border border-gray-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-xs text-gray-700 dark:text-zinc-200 px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500 w-28 shrink-0 disabled:cursor-not-allowed"
           value={selectedProvider}
           onChange={e => onProviderChange(e.target.value)}
+          disabled={disabled}
         >
           {providers.map(p => <option key={p} value={p}>{p}</option>)}
         </select>
         <select
-          className="flex-1 rounded-lg border border-gray-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-xs text-gray-700 dark:text-zinc-200 px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="flex-1 rounded-lg border border-gray-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-xs text-gray-700 dark:text-zinc-200 px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed"
           value={selectedModel}
           onChange={e => onModelChange(e.target.value)}
+          disabled={disabled}
         >
           {filtered.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
         </select>
@@ -142,11 +173,13 @@ interface PipelineModelModalProps {
     agentCount: number,
     roleModels?: RoleOverrides,
     noPush?: boolean,
+    autoSelectByComplexity?: boolean,
   ) => void
   onCancel: () => void
+  tasks?: PipelineTaskSummary[]
 }
 
-export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineModelModalProps) {
+export function PipelineModelModal({ models, onConfirm, onCancel, tasks }: PipelineModelModalProps) {
   const providers = Array.from(new Set(models.map(m => m.provider)))
   const defaultProvider = providers[0] ?? ''
   const modelsForProvider = (p: string) => models.filter(m => m.provider === p)
@@ -164,6 +197,22 @@ export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineMode
   const [noPush, setNoPush] = useState(false)
   const [roleOverrides, setRoleOverrides] = useState<RoleOverrides>({})
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [autoByComplexity, setAutoByComplexity] = useState(false)
+  const [complexityMap, setComplexityMap] = useState<ComplexityMap>(DEFAULT_COMPLEXITY_MAP)
+
+  // 백엔드 env override가 적용된 실매핑을 가져온다. 실패 시 DEFAULT_COMPLEXITY_MAP 유지.
+  useEffect(() => {
+    let cancelled = false
+    fetch(`${API_BASE}/api/chat/complexity-map`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!cancelled && data?.map) setComplexityMap(data.map as ComplexityMap)
+      })
+      .catch(() => { /* fallback 유지 */ })
+    return () => { cancelled = true }
+  }, [])
+
+  const tasksWithoutComplexity = (tasks ?? []).filter(t => !t.complexity)
 
   const handleFastProviderChange = (p: string) => {
     setFastProvider(p)
@@ -180,12 +229,16 @@ export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineMode
     const roleModels = Object.entries(roleOverrides)
       .filter(([, cfg]) => cfg.provider || cfg.model)
       .reduce<RoleOverrides>((acc, [role, cfg]) => ({ ...acc, [role]: cfg }), {})
+    // role_models 는 auto_select 여부와 무관하게 그대로 전송한다.
+    // 백엔드에서 role_models → complexity mapping → 기본값 순으로 해석한다.
+    const effectiveRoleModels = Object.keys(roleModels).length > 0 ? roleModels : undefined
     onConfirm(
       fastProvider, fastModel,
       capableProvider, capableModel,
       agentCount,
-      Object.keys(roleModels).length > 0 ? roleModels : undefined,
+      effectiveRoleModels,
       noPush,
+      autoByComplexity,
     )
   }
 
@@ -208,6 +261,7 @@ export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineMode
           selectedModel={fastModel}
           onProviderChange={handleFastProviderChange}
           onModelChange={setFastModel}
+          disabled={autoByComplexity}
         />
 
         <ModelSelect
@@ -218,6 +272,7 @@ export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineMode
           selectedModel={capableModel}
           onProviderChange={handleCapableProviderChange}
           onModelChange={setCapableModel}
+          disabled={autoByComplexity}
         />
 
         {/* 병렬 에이전트 수 */}
@@ -263,20 +318,86 @@ export function PipelineModelModal({ models, onConfirm, onCancel }: PipelineMode
           </button>
         </div>
 
-        {/* 역할별 모델 설정 */}
+        {/* 복잡도 기반 자동 선택 */}
+        <div className="rounded-xl border border-gray-200 dark:border-zinc-700 p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs font-semibold text-gray-700 dark:text-zinc-200">복잡도 기반 자동 선택</p>
+              <p className="text-xs text-gray-400 dark:text-zinc-500 mt-0.5">
+                {autoByComplexity
+                  ? '각 태스크의 complexity 라벨에 따라 모델이 자동 선택됩니다 (위 설정 무시)'
+                  : '각 태스크의 complexity 값을 무시하고 위 설정을 모든 태스크에 적용합니다'}
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autoByComplexity}
+              aria-label="복잡도 기반 자동 선택"
+              onClick={() => setAutoByComplexity(v => !v)}
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-zinc-900 ${
+                autoByComplexity ? 'bg-blue-600' : 'bg-gray-300 dark:bg-zinc-600'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ${
+                  autoByComplexity ? 'translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+
+          {autoByComplexity && (
+            <div
+              data-testid="complexity-mapping-table"
+              className="pt-2 border-t border-gray-100 dark:border-zinc-800 space-y-1"
+            >
+              {(['simple', 'standard', 'complex'] as const).map(tier => {
+                const entry = complexityMap[tier]
+                const fastLabel = `${entry.provider_fast} · ${entry.model_fast}`
+                const capableLabel = `${entry.provider_capable} · ${entry.model_capable}`
+                return (
+                  <div
+                    key={tier}
+                    className="grid grid-cols-[70px_1fr] gap-2 text-[11px] text-gray-500 dark:text-zinc-400"
+                  >
+                    <span className="font-mono text-gray-600 dark:text-zinc-300">{tier}</span>
+                    <span>
+                      fast: <span className="text-gray-600 dark:text-zinc-300">{fastLabel}</span>
+                      <span className="mx-1 text-gray-400 dark:text-zinc-600">·</span>
+                      capable: <span className="text-gray-600 dark:text-zinc-300">{capableLabel}</span>
+                    </span>
+                  </div>
+                )
+              })}
+              {tasksWithoutComplexity.length > 0 && (
+                <p
+                  data-testid="complexity-missing-warning"
+                  className="pt-1 text-[11px] text-amber-600 dark:text-amber-400"
+                >
+                  ⚠ complexity 라벨이 없는 태스크 {tasksWithoutComplexity.length}개는 'standard'로 실행됩니다
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* 역할별 모델 설정 — auto_select ON 이어도 여기서 특정 역할을 override 가능 */}
         <div className="rounded-xl border border-gray-200 dark:border-zinc-700 overflow-hidden">
           <button
             className="w-full flex items-center justify-between px-3 py-2.5 text-xs font-semibold text-gray-600 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-zinc-800 transition-colors"
             onClick={() => setShowAdvanced(v => !v)}
           >
-            <span>역할별 모델 설정</span>
+            <span>역할별 모델 설정{autoByComplexity ? ' (선택한 역할만 복잡도 매핑을 덮어씀)' : ''}</span>
             <span className="text-gray-400 dark:text-zinc-600">{showAdvanced ? '▲' : '▼'}</span>
           </button>
 
           {showAdvanced && (
             <div className="px-3 pb-3 space-y-2 border-t border-gray-100 dark:border-zinc-800 pt-2">
               <p className="text-xs text-gray-400 dark:text-zinc-500">
-                비워두면 위의 코딩 에이전트 모델이 사용됩니다.
+                {autoByComplexity
+                  ? '비워두면 각 태스크의 complexity에 해당하는 모델이 사용됩니다.'
+                  : '비워두면 위의 코딩 에이전트 모델이 사용됩니다.'}
               </p>
               {ROLES.map(({ key, label }) => (
                 <RoleOverrideRow
