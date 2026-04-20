@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from llm import BaseLLMClient, LLMConfig, Message, create_client
-from orchestrator.task import Task
+from orchestrator.task import Task, TaskStatus, save_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -206,3 +206,169 @@ task_type: {task.task_type}
         success=True, action=action, explanation=explanation,
         tasks=tasks, raw=raw,
     )
+
+
+# ── 자동 분해 래퍼 (intervention 4회차 실패 후 호출) ─────────────────────────
+
+
+class SplitTaskError(RuntimeError):
+    """`split_task()` 이 LLM 응답을 받아들일 수 없을 때 발생."""
+
+
+_WORD_RE = re.compile(r"[A-Za-z\uAC00-\uD7A3_][A-Za-z\uAC00-\uD7A3_0-9]{2,}")
+
+
+def _content_words(text: str) -> set[str]:
+    return {w.lower() for w in _WORD_RE.findall(text or "")}
+
+
+def _validate_subtask_scope(
+    parent: Task,
+    payload: dict,
+    subtask_idx: int,
+    min_criterion_overlap: float = 0.75,
+) -> None:
+    """하위 태스크 payload 가 부모 범위를 벗어나지 않는지 검증한다.
+
+    - `target_files` 는 엄격한 부분집합이어야 한다 (LLM 이 새 파일을 꾸며내지 못하도록).
+    - 각 `acceptance_criteria` 항목은 부모의 "개별 acceptance criterion" 중 하나에
+      매핑될 수 있어야 한다. 매핑 기준은:
+        * 부모 criterion + title/description 단어 집합이 child 단어의
+          `min_criterion_overlap` 이상을 덮어야 함
+      이렇게 해야 parent 문구 일부를 앞에 복사한 뒤 새 스코프를 덧붙이는 패턴을
+      막을 수 있다.
+
+    Raises:
+        SplitTaskError: 범위 위반 발견 시.
+    """
+    parent_files = set(parent.target_files)
+    child_files = payload.get("target_files") or []
+    if not isinstance(child_files, list):
+        raise SplitTaskError(
+            f"하위 태스크 {subtask_idx} target_files 형식 오류 (리스트 아님)"
+        )
+    for f in child_files:
+        if f not in parent_files:
+            raise SplitTaskError(
+                f"하위 태스크 {subtask_idx} target_files 범위 이탈: "
+                f"{f!r} ∉ {sorted(parent_files)}"
+            )
+
+    context_words = _content_words(" ".join([parent.title, parent.description]))
+    parent_criterion_words = [
+        _content_words(criterion) | context_words
+        for criterion in parent.acceptance_criteria
+        if criterion.strip()
+    ]
+    if not parent_criterion_words:
+        parent_criterion_words = [context_words]
+
+    child_criteria = payload.get("acceptance_criteria") or []
+    if not isinstance(child_criteria, list):
+        raise SplitTaskError(
+            f"하위 태스크 {subtask_idx} acceptance_criteria 형식 오류 (리스트 아님)"
+        )
+    for c in child_criteria:
+        c_text = str(c).strip()
+        if not c_text:
+            continue
+        c_words = _content_words(c_text)
+        if not c_words:
+            continue
+        best_overlap = max(
+            len(c_words & parent_words) / len(c_words)
+            for parent_words in parent_criterion_words
+        )
+        if best_overlap < min_criterion_overlap:
+            raise SplitTaskError(
+                f"하위 태스크 {subtask_idx} acceptance_criteria 범위 이탈 "
+                f"(best_overlap={best_overlap:.2f} < {min_criterion_overlap}): {c_text!r}"
+            )
+
+
+def split_task(
+    task: Task,
+    all_tasks: list[Task],
+    spec_content: str,
+    llm: BaseLLMClient,
+    tasks_yaml_path: str | Path,
+    orch_report: str = "",
+) -> list[Task]:
+    """`redesign_task()` 를 호출해 분할(split) 결과만 수용하고 tasks.yaml 에 커밋한다.
+
+    intervention 4회차 실패 직후 `orchestrator/run.py` 에서 호출되는 얇은 래퍼.
+    LLM 프롬프트·JSON 계약은 `redesign_task()` 와 완전히 공유한다.
+
+    동작:
+      1) `redesign_task(...)` 호출 → action='split' + 2~3개 하위 태스크만 수용
+      2) 하위 태스크 id 를 `{orig.id}-a`, `-b`, `-c` 로 정규화 (기존 id 충돌 시 ValueError)
+      3) `depends_on` 을 순차 체인으로 구성 — a = orig.depends_on, b = [a], c = [b]
+      4) 원 태스크 `status = SUPERSEDED` + `failure_reason` 보강
+      5) `all_tasks` 의 원 태스크 인덱스 **직후** 에 하위 태스크 삽입
+      6) `save_tasks(all_tasks, tasks_yaml_path)` 로 파일 커밋
+      7) 하위 Task 객체 리스트 반환
+
+    Raises:
+        SplitTaskError: LLM 응답이 split 이 아니거나, 하위 태스크 개수가 2~3이 아니거나,
+                        새 id 가 기존과 충돌할 때.
+    """
+    result = redesign_task(task, all_tasks, spec_content, llm, orch_report=orch_report)
+
+    if not result.success:
+        raise SplitTaskError(f"LLM 재설계 실패: {result.error or '(사유 없음)'}")
+    if result.action != "split":
+        raise SplitTaskError(
+            f"split 이 아닌 재설계 결과 거부 (action={result.action!r})"
+        )
+    if not (2 <= len(result.tasks) <= 3):
+        raise SplitTaskError(
+            f"하위 태스크 개수 이상 (len={len(result.tasks)}, 허용: 2~3)"
+        )
+
+    for idx, payload in enumerate(result.tasks):
+        _validate_subtask_scope(task, payload, idx)
+
+    suffixes = ["a", "b", "c"][: len(result.tasks)]
+    existing_ids = {t.id for t in all_tasks}
+    sub_ids = [f"{task.id}-{s}" for s in suffixes]
+    for sid in sub_ids:
+        if sid in existing_ids:
+            raise SplitTaskError(f"하위 태스크 id 충돌: {sid}")
+
+    subtasks: list[Task] = []
+    for idx, (sid, payload) in enumerate(zip(sub_ids, result.tasks)):
+        if idx == 0:
+            deps = list(task.depends_on)
+        else:
+            deps = [sub_ids[idx - 1]]
+        subtask = Task(
+            id=sid,
+            title=str(payload.get("title") or f"{task.title} ({suffixes[idx]})"),
+            description=str(payload.get("description") or task.description),
+            acceptance_criteria=list(payload.get("acceptance_criteria") or task.acceptance_criteria),
+            target_files=list(payload.get("target_files") or task.target_files),
+            test_framework=str(payload.get("test_framework") or task.test_framework),
+            depends_on=deps,
+            task_type=str(payload.get("task_type") or task.task_type),
+            language=str(payload.get("language") or task.language),
+        )
+        subtasks.append(subtask)
+
+    task.status = TaskStatus.SUPERSEDED
+    task.failure_reason = (
+        f"{task.failure_reason} [자동 분해: {', '.join(sub_ids)}]".strip()
+    )
+
+    try:
+        orig_index = next(i for i, t in enumerate(all_tasks) if t.id == task.id)
+    except StopIteration as e:
+        raise SplitTaskError(f"원 태스크 {task.id} 가 all_tasks 에 없음") from e
+    for offset, sub in enumerate(subtasks, start=1):
+        all_tasks.insert(orig_index + offset, sub)
+
+    save_tasks(all_tasks, tasks_yaml_path)
+    logger.info(
+        "[%s] 자동 분해 완료 → %s (SUPERSEDED 보존)",
+        task.id, ", ".join(sub_ids),
+    )
+    return subtasks
