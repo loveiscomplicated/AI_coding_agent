@@ -384,6 +384,9 @@ def _build_pr_body(task: Task, result: PipelineResult) -> str:
         file_list = "\n".join(f"- `{f}`" for f in sorted(all_files))
         files_section = f"## 변경 파일\n\n{file_list}"
 
+    dep_injection_section = _build_dep_injection_section(task, result)
+    collect_gate_section = _build_collect_gate_section(result)
+
     retry_info = ""
     if task.retry_count > 0:
         retry_info = f"\n> 구현 재시도 횟수: {task.retry_count}회\n"
@@ -392,13 +395,92 @@ def _build_pr_body(task: Task, result: PipelineResult) -> str:
         f"## 태스크\n\n**{task.title}**\n\n{task.description}",
         f"## 수락 기준\n\n{task.acceptance_criteria_text()}",
         test_section,
+        collect_gate_section,
         files_section,
+        dep_injection_section,
         review_section,
         suggestions_section,
         retry_info,
         "---\n🤖 자동 생성 by AI Coding Agent Pipeline",
     ]
     return "\n\n".join(p for p in parts if p.strip())
+
+
+def _build_collect_gate_section(result: PipelineResult) -> str:
+    """
+    collect-only 게이트 결과를 PR body에 노출한다.
+
+    RunResult.failure_reason 이 `[COLLECTION_ERROR]` 또는 `[NO_TESTS_COLLECTED]`
+    인 경우에만 섹션을 추가 (task-025 같은 재현 근거 증빙용).
+    정상 케이스에서는 빈 문자열을 반환하여 섹션 미노출.
+    """
+    tr = result.test_result
+    if tr is None or not tr.failure_reason:
+        return ""
+
+    if tr.failure_reason == "[NO_TESTS_COLLECTED]":
+        return (
+            "## 수집 게이트 (collect-only)\n\n"
+            "⚠️ **0 tests collected** — pytest/jest/go/gradle 의 사전 검사에서 "
+            "수집된 테스트가 0개로 판정되어 실행 없이 조기 실패했습니다.\n\n"
+            "확인 항목:\n"
+            "- 테스트 파일이 `tests/` 밑에 있는지\n"
+            "- 파일명이 `test_*.py` / `*.test.js` / `*_test.go` 규칙과 일치하는지\n"
+            "- 함수명이 `test_` 접두사(pytest) 또는 `Test` 접두사(go)를 갖는지"
+        )
+    if tr.failure_reason == "[COLLECTION_ERROR]":
+        return (
+            "## 수집 게이트 (collect-only)\n\n"
+            "⛔ **Collection error** — 테스트 파일 import 또는 syntax 오류로 "
+            "수집 자체가 실패했습니다. 실제 실행 전에 조기 차단.\n\n"
+            "첫 오류 일부:\n"
+            f"```\n{_first_error_snippet(tr.stdout)}\n```"
+        )
+    return ""
+
+
+def _first_error_snippet(stdout: str, max_lines: int = 8) -> str:
+    """stdout 에서 첫 ERROR/ImportError/SyntaxError 블록의 앞 몇 줄만 추출."""
+    import re as _re
+    lines = stdout.splitlines()
+    for i, line in enumerate(lines):
+        if _re.search(r"(ERROR|ImportError|SyntaxError|ModuleNotFoundError)", line):
+            snippet = "\n".join(lines[i : i + max_lines])
+            return snippet[:800]
+    return "\n".join(lines[:max_lines])[:800] or "(no stdout)"
+
+
+def _build_dep_injection_section(task: Task, result: PipelineResult) -> str:
+    """의존성 주입 검증 결과를 PR body에 항상 노출한다.
+
+    이 섹션은 `scripts/verify_dep_injection.py` 와 동일한 규칙을 적용한다:
+      - depends_on 이 비어 있으면 N/A
+      - depends_on 이 non-empty & dep_files_injected == 0 → ⚠️ 경고
+      - depends_on 이 non-empty & dep_files_injected >  0 → ✅ 정상
+
+    결과를 PR body에 고정 섹션으로 넣어, 리뷰어가 해당 태스크의 dep injection
+    경로가 살아있었는지 한눈에 확인할 수 있게 한다.
+    """
+    deps = list(task.depends_on or [])
+    injected = int(result.metrics.dep_files_injected or 0)
+
+    if not deps:
+        return (
+            "## 의존성 주입 검증\n\n"
+            "ℹ️ `depends_on` 이 비어 있어 dep injection 검증 대상 아님."
+        )
+    dep_list = ", ".join(f"`{d}`" for d in deps)
+    if injected == 0:
+        return (
+            "## 의존성 주입 검증\n\n"
+            f"⚠️ `{task.id}` depends_on=[{dep_list}] 인데 "
+            f"`dep_files_injected=0`. dep injection 경로 점검 필요."
+        )
+    return (
+        "## 의존성 주입 검증\n\n"
+        f"✅ `{task.id}` depends_on=[{dep_list}] — "
+        f"`dep_files_injected={injected}`"
+    )
 
 
 # ── 예외 ──────────────────────────────────────────────────────────────────────

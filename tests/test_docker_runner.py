@@ -564,3 +564,218 @@ class TestRunResultDataclass:
         )
         assert result.passed is False
         assert len(result.failed_tests) == 1
+
+    def test_failure_reason_defaults_to_empty(self):
+        result = RunResult(passed=True, returncode=0, stdout="", summary="1 passed")
+        assert result.failure_reason == ""
+
+    def test_failure_reason_preserved_when_set(self):
+        result = RunResult(
+            passed=False, returncode=71, stdout="", summary="",
+            failure_reason="[NO_TESTS_COLLECTED]",
+        )
+        assert result.failure_reason == "[NO_TESTS_COLLECTED]"
+
+
+# ── collect-only 사전 검사 (exit 70 / 71) ────────────────────────────────────
+
+
+class TestCollectOnlyPrecheck:
+    """
+    docker-entrypoint.sh 가 `pytest --collect-only` / `go test -list` 로 사전
+    검사 후 사용하는 커스텀 exit code 를 runner.py 가 올바르게 failure_reason
+    으로 매핑하는지 검증한다.
+    """
+
+    def _make_runner(self):
+        return DockerTestRunner(timeout=30)
+
+    def _mock_ok(self, stdout="", stderr=""):
+        return MagicMock(returncode=0, stdout=stdout, stderr=stderr)
+
+    @patch("docker.runner.subprocess.run")
+    def test_collect_only_zero_tests_returns_no_tests_collected(self, mock_run, tmp_path):
+        """exit 71 → failure_reason '[NO_TESTS_COLLECTED]' + passed False."""
+        mock_run.side_effect = [
+            self._mock_ok(),  # docker info
+            self._mock_ok(),  # image inspect
+            MagicMock(
+                returncode=71,
+                stdout="---NO_TESTS_COLLECTED---\ncollected 0 items\n",
+                stderr="",
+            ),
+        ]
+        result = self._make_runner().run(tmp_path, language="python")
+        assert result.passed is False
+        assert result.returncode == 71
+        assert result.failure_reason == "[NO_TESTS_COLLECTED]"
+        assert "No tests were collected" in result.summary
+
+    @patch("docker.runner.subprocess.run")
+    def test_collect_only_import_error_returns_collection_error(self, mock_run, tmp_path):
+        """exit 70 → failure_reason '[COLLECTION_ERROR]' + passed False."""
+        mock_run.side_effect = [
+            self._mock_ok(),
+            self._mock_ok(),
+            MagicMock(
+                returncode=70,
+                stdout="---COLLECTION_ERROR---\nImportError: No module named 'foo'\n",
+                stderr="",
+            ),
+        ]
+        result = self._make_runner().run(tmp_path, language="python")
+        assert result.passed is False
+        assert result.returncode == 70
+        assert result.failure_reason == "[COLLECTION_ERROR]"
+        assert "collection failed" in result.summary
+
+    @patch("docker.runner.subprocess.run")
+    def test_collect_only_success_proceeds_to_run(self, mock_run, tmp_path):
+        """exit 0 → 기존 'N passed' 파싱 유지, failure_reason 빈 문자열."""
+        mock_run.side_effect = [
+            self._mock_ok(),
+            self._mock_ok(),
+            MagicMock(
+                returncode=0,
+                stdout="---COLLECTED: 3---\n3 passed in 0.05s\n",
+                stderr="",
+            ),
+        ]
+        result = self._make_runner().run(tmp_path, language="python")
+        assert result.passed is True
+        assert result.failure_reason == ""
+        assert "3 passed" in result.summary
+
+    @patch("docker.runner.subprocess.run")
+    def test_jest_no_tests_found_returns_no_tests_collected(self, mock_run, tmp_path):
+        """Jest --passWithNoTests=false 가 찍는 'No tests found' 출력 감지."""
+        mock_run.side_effect = [
+            self._mock_ok(),
+            self._mock_ok(),
+            MagicMock(
+                returncode=1,
+                stdout="No tests found, exiting with code 1\n",
+                stderr="",
+            ),
+        ]
+        result = self._make_runner().run(
+            tmp_path, language="javascript", test_framework="jest",
+        )
+        assert result.passed is False
+        assert result.failure_reason == "[NO_TESTS_COLLECTED]"
+        assert "[NO_TESTS_COLLECTED]" in result.summary
+
+    @patch("docker.runner.subprocess.run")
+    def test_go_no_tests_returns_no_tests_collected(self, mock_run, tmp_path):
+        """Go 의 -list pre-check 결과 exit 71 도 동일하게 매핑된다."""
+        mock_run.side_effect = [
+            self._mock_ok(),
+            self._mock_ok(),
+            MagicMock(
+                returncode=71,
+                stdout="---NO_TESTS_COLLECTED---\nok  \texample.com/pkg\t[no test files]\n",
+                stderr="",
+            ),
+        ]
+        result = self._make_runner().run(
+            tmp_path, language="go", test_framework="go",
+        )
+        assert result.passed is False
+        assert result.returncode == 71
+        assert result.failure_reason == "[NO_TESTS_COLLECTED]"
+
+    @patch("docker.runner.subprocess.run")
+    def test_gradle_zero_tests_in_stdout_flags_no_tests_collected(self, mock_run, tmp_path):
+        """Gradle 은 0 테스트여도 exit 가 정상이므로 stdout 패턴으로 감지."""
+        mock_run.side_effect = [
+            self._mock_ok(),
+            self._mock_ok(),
+            MagicMock(
+                returncode=1,
+                stdout="BUILD SUCCESSFUL\n> Task :test\n0 tests completed\n",
+                stderr="",
+            ),
+        ]
+        result = self._make_runner().run(
+            tmp_path, language="kotlin", test_framework="gradle",
+        )
+        assert result.passed is False
+        assert result.failure_reason == "[NO_TESTS_COLLECTED]"
+        assert "[NO_TESTS_COLLECTED]" in result.summary
+
+    @patch("docker.runner.subprocess.run")
+    def test_gradle_build_successful_with_zero_tests_still_flags(self, mock_run, tmp_path):
+        """
+        Gradle 의 `BUILD SUCCESSFUL` + `0 tests completed` (exit 0) 를
+        '통과' 로 오분류하지 않는다. 리뷰어 지적(P1): Gradle 감지가
+        `if not passed:` 아래에 있으면 정상 종료 케이스를 놓친다.
+        """
+        mock_run.side_effect = [
+            self._mock_ok(),
+            self._mock_ok(),
+            MagicMock(
+                returncode=0,   # ← BUILD SUCCESSFUL
+                stdout="> Task :test\n0 tests completed\nBUILD SUCCESSFUL in 3s\n",
+                stderr="",
+            ),
+        ]
+        result = self._make_runner().run(
+            tmp_path, language="kotlin", test_framework="gradle",
+        )
+        assert result.passed is False, "0 tests completed 는 exit 0 이어도 통과 아님"
+        assert result.failure_reason == "[NO_TESTS_COLLECTED]"
+        assert "[NO_TESTS_COLLECTED]" in result.summary
+
+    @patch("docker.runner.subprocess.run")
+    def test_jest_no_tests_matched_variant_also_detected(self, mock_run, tmp_path):
+        """Jest 의 'No tests matched' 변형도 감지 (대소문자/변형 내성)."""
+        mock_run.side_effect = [
+            self._mock_ok(),
+            self._mock_ok(),
+            MagicMock(
+                returncode=1,
+                stdout="No tests matched the regex pattern.\n",
+                stderr="",
+            ),
+        ]
+        result = self._make_runner().run(
+            tmp_path, language="javascript", test_framework="jest",
+        )
+        assert result.failure_reason == "[NO_TESTS_COLLECTED]"
+
+    @patch("docker.runner.subprocess.run")
+    def test_compensation_does_not_flip_no_tests_collected_case(self, mock_run, tmp_path):
+        """
+        Jest/Gradle 출력에 우연히 'N passed' 가 포함되어도 failure_reason 이
+        설정돼 있으면 passed=True 보정 안 함 (no-tests 판정 유지).
+        """
+        mock_run.side_effect = [
+            self._mock_ok(),
+            self._mock_ok(),
+            MagicMock(
+                returncode=1,
+                stdout="No tests found. Previous run summary: 5 passed.\n",
+                stderr="",
+            ),
+        ]
+        result = self._make_runner().run(
+            tmp_path, language="javascript", test_framework="jest",
+        )
+        assert result.passed is False  # 보정으로 True 로 뒤집히면 실패
+        assert result.failure_reason == "[NO_TESTS_COLLECTED]"
+
+    @patch("docker.runner.subprocess.run")
+    def test_existing_ok_n_passed_compensation_still_works(self, mock_run, tmp_path):
+        """기존 'OK: N passed' 보정 로직이 neue failure_reason 분기와 충돌하지 않음."""
+        mock_run.side_effect = [
+            self._mock_ok(),
+            self._mock_ok(),
+            MagicMock(
+                returncode=1,  # exit code 이상
+                stdout="OK: 5 passed, 0 failed\n",
+                stderr="",
+            ),
+        ]
+        result = self._make_runner().run(tmp_path, language="python")
+        assert result.passed is True  # 보정 로직이 살아 있어야 함
+        assert result.failure_reason == ""

@@ -93,3 +93,76 @@ def test_no_write_first_attempt_retries_with_write_hint():
     assert result.should_retry is True
     assert "write_file" in result.hint
     assert result.raw == "[fast-path] max_iter_retry"
+
+
+# ── collect-only 게이트 실패 분류 ([NO_TESTS_COLLECTED] / [COLLECTION_ERROR]) ─
+
+
+def test_classify_failure_no_tests_collected_is_own_category():
+    ft = classify_failure("[NO_TESTS_COLLECTED] No tests were collected")
+    assert ft == FailureType.NO_TESTS_COLLECTED
+
+
+def test_classify_failure_collection_error_is_own_category():
+    ft = classify_failure("[COLLECTION_ERROR] pytest collection failed (syntax)")
+    assert ft == FailureType.COLLECTION_ERROR
+
+
+def test_classify_failure_collection_error_with_importerror_goes_env_error():
+    """
+    [COLLECTION_ERROR] 라도 test_stdout 이 ImportError 면 ENV_ERROR 로 분류.
+    ENV_ERROR 체크가 우선하여 즉시 GIVE_UP 흐름에 태움.
+    """
+    ft = classify_failure(
+        "[COLLECTION_ERROR] collection failed",
+        test_stdout="ImportError: No module named foo",
+    )
+    assert ft == FailureType.ENV_ERROR
+
+
+def test_no_tests_collected_first_attempt_retries_with_testwriter_hint():
+    result = classify_and_analyze(
+        _task(),
+        "[NO_TESTS_COLLECTED] No tests were collected",
+        attempt=1,
+    )
+    assert result.should_retry is True
+    assert "write_file" in result.hint
+    assert "tests/" in result.hint
+    assert result.raw == "[fast-path] no_tests_collected_retry"
+
+
+def test_no_tests_collected_second_attempt_gives_up():
+    result = classify_and_analyze(
+        _task(),
+        "[NO_TESTS_COLLECTED] No tests were collected",
+        attempt=2,
+    )
+    assert result.should_retry is False
+    assert result.raw == "[fast-path] no_tests_collected_give_up"
+
+
+def test_collection_error_tag_routes_to_analyze_llm(monkeypatch):
+    """
+    [COLLECTION_ERROR] (ImportError/ModuleNotFound 없는 경우, 즉 SyntaxError 등)
+    는 analyze() LLM 분석 경로로 간다. monkeypatch 로 analyze 를 가로채서
+    확인.
+    """
+    from orchestrator import intervention as iv
+
+    called = {"count": 0}
+
+    def fake_analyze(task, reason, attempt, previous_hints=None, role_models=None):
+        called["count"] += 1
+        return iv.AnalysisResult(
+            should_retry=True, hint="fake", raw="fake",
+        )
+
+    monkeypatch.setattr(iv, "analyze", fake_analyze)
+    result = classify_and_analyze(
+        _task(),
+        "[COLLECTION_ERROR] SyntaxError in tests/test_x.py line 3",
+        attempt=1,
+    )
+    assert called["count"] == 1
+    assert result.hint == "fake"

@@ -437,3 +437,62 @@ class TestBuildPRBodyDepInjection:
         )
         body = _build_pr_body(task, result)
         assert "의존성 주입 검증" in body
+
+
+# ── PR body: collect-only 게이트 결과 노출 ────────────────────────────────────
+
+
+class TestBuildPRBodyCollectGate:
+    """
+    RunResult.failure_reason 이 [NO_TESTS_COLLECTED] / [COLLECTION_ERROR]
+    인 경우 PR body 에 증빙 섹션이 들어가야 한다 (task-025 재현 근거).
+    """
+
+    def _result(self, task, *, failure_reason: str, stdout: str = "") -> PipelineResult:
+        from orchestrator.pipeline import PipelineMetrics
+        return PipelineResult(
+            task=task,
+            succeeded=False,
+            failure_reason=failure_reason,
+            test_result=RunResult(
+                passed=False,
+                returncode=71 if failure_reason == "[NO_TESTS_COLLECTED]" else 70,
+                stdout=stdout,
+                summary="(n/a)",
+                failure_reason=failure_reason,
+            ),
+            review=None,
+            test_files=[], impl_files=[],
+            metrics=PipelineMetrics(),
+        )
+
+    def test_no_tests_collected_adds_warning_section(self, task):
+        body = _build_pr_body(
+            task,
+            self._result(task, failure_reason="[NO_TESTS_COLLECTED]"),
+        )
+        assert "## 수집 게이트" in body
+        assert "0 tests collected" in body
+        assert "⚠️" in body
+
+    def test_collection_error_adds_error_section_with_snippet(self, task):
+        stdout = (
+            "---COLLECTION_ERROR---\n"
+            "ERROR collecting tests/test_x.py\n"
+            "ImportError: No module named 'missing_pkg'\n"
+        )
+        body = _build_pr_body(
+            task,
+            self._result(
+                task, failure_reason="[COLLECTION_ERROR]", stdout=stdout,
+            ),
+        )
+        assert "## 수집 게이트" in body
+        assert "Collection error" in body
+        assert "⛔" in body
+        assert "ImportError" in body  # 에러 스니펫 포함
+
+    def test_no_collect_gate_section_when_failure_reason_empty(self, task, pipeline_result):
+        """정상 통과 케이스에서는 수집 게이트 섹션 없음 (노이즈 방지)."""
+        body = _build_pr_body(task, pipeline_result)
+        assert "## 수집 게이트" not in body
