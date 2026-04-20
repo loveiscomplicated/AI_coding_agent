@@ -55,6 +55,7 @@ class TaskStatus(Enum):
     COMMITTING     = "committing"
     DONE           = "done"
     FAILED         = "failed"
+    SUPERSEDED     = "superseded"  # intervention 자동 분해로 하위 태스크에 대체됨 (YAML 보존)
 
 
 @dataclass
@@ -85,7 +86,7 @@ class Task:
 
     @property
     def is_done(self) -> bool:
-        return self.status in (TaskStatus.DONE, TaskStatus.FAILED)
+        return self.status in (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.SUPERSEDED)
 
     @property
     def branch_name(self) -> str:
