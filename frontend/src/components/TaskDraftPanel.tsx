@@ -206,9 +206,11 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
   const [critiqueStatus, setCritiqueStatus] = useState<'idle' | 'loading' | 'done'>('idle')
   const [critiqueResult, setCritiqueResult] = useState<CritiqueResult | null>(null)
   const [critiqueResetMsg, setCritiqueResetMsg] = useState(false)
+  const [applyStatus, setApplyStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle')
   const [showRunConfirm, setShowRunConfirm] = useState(false)
   const prevTasksRef = useRef<DraftTask[] | null>(null)
   const critiqueAbortedRef = useRef(false)
+  const applyJustFiredRef = useRef(false)
 
   useEffect(() => {
     fetch(`${API_BASE}/api/config`)
@@ -277,9 +279,15 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
   // 태스크 목록 변경 시 critique 리셋 (DRAFT_DONE 시에는 idle이라 무시됨)
   useEffect(() => {
     if (prevTasksRef.current !== null && critiqueStatus !== 'idle') {
+      if (applyJustFiredRef.current) {
+        applyJustFiredRef.current = false
+        prevTasksRef.current = state.tasks
+        return
+      }
       setCritiqueStatus('idle')
       setCritiqueResult(null)
       setCritiqueResetMsg(true)
+      setApplyStatus('idle')
     }
     prevTasksRef.current = state.tasks
   }, [state.tasks]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -437,6 +445,32 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
       await poll()
     } catch {
       if (!critiqueAbortedRef.current) setCritiqueStatus('idle')
+    }
+  }
+
+  async function applyCritique() {
+    if (!critiqueResult || applyStatus === 'loading') return
+    setApplyStatus('loading')
+    try {
+      const res = await fetch(`${API_BASE}/api/tasks/critique/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tasks: state.tasks,
+          critique: critiqueResult,
+          context_doc: contextDoc,
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }))
+        throw new Error((err as { detail?: string }).detail ?? '적용 실패')
+      }
+      const data = await res.json() as { tasks: DraftTask[]; change_summary: string }
+      applyJustFiredRef.current = true
+      dispatch({ type: 'UPDATE_ALL_TASKS', tasks: data.tasks })
+      setApplyStatus('done')
+    } catch {
+      setApplyStatus('error')
     }
   }
 
@@ -775,15 +809,32 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
               ? 'bg-green-50 dark:bg-green-900/20 border-green-300 dark:border-green-700'
               : 'bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-700'
           }`}>
-            <p className={`text-xs font-medium ${
-              critiqueResult.verdict === 'APPROVED'
-                ? 'text-green-700 dark:text-green-400'
-                : 'text-amber-700 dark:text-amber-400'
-            }`}>
-              {critiqueResult.verdict === 'APPROVED'
-                ? `✅ Momus: 태스크 구조 승인 — ${critiqueResult.summary}`
-                : `⚠️ Momus: 수정 필요 — ${critiqueResult.summary}`}
-            </p>
+            <div className="flex items-start justify-between gap-2">
+              <p className={`text-xs font-medium flex-1 ${
+                critiqueResult.verdict === 'APPROVED'
+                  ? 'text-green-700 dark:text-green-400'
+                  : 'text-amber-700 dark:text-amber-400'
+              }`}>
+                {critiqueResult.verdict === 'APPROVED'
+                  ? `✅ Momus: 태스크 구조 승인 — ${critiqueResult.summary}`
+                  : `⚠️ Momus: 수정 필요 — ${critiqueResult.summary}`}
+              </p>
+              <button
+                onClick={() => void applyCritique()}
+                disabled={applyStatus === 'loading' || state.tasks.length === 0}
+                className="shrink-0 rounded border border-indigo-300 dark:border-indigo-600 px-2.5 py-1 text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 disabled:opacity-50 transition-colors"
+              >
+                {applyStatus === 'loading' ? (
+                  <span className="flex items-center gap-1">
+                    <span className="inline-block w-3 h-3 border border-indigo-400 border-t-transparent rounded-full animate-spin" />
+                    적용 중…
+                  </span>
+                ) : applyStatus === 'done' ? '✓ 적용됨' : '제안 적용'}
+              </button>
+            </div>
+            {applyStatus === 'error' && (
+              <p className="mt-1 text-xs text-red-500 dark:text-red-400">적용 실패. 직접 수정하세요.</p>
+            )}
             {critiqueResult.issues.filter(i => i.task_id === 'GLOBAL').length > 0 && (
               <div className="mt-2 space-y-1" data-testid="global-issues">
                 {critiqueResult.issues.filter(i => i.task_id === 'GLOBAL').map((issue, i) => (

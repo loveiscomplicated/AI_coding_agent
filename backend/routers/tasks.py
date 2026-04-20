@@ -290,6 +290,12 @@ class CritiqueRequest(BaseModel):
     context_doc: str
 
 
+class CritiqueApplyRequest(BaseModel):
+    tasks: list[dict]
+    critique: CritiqueResult
+    context_doc: str = ""
+
+
 # ── 엔드포인트 ────────────────────────────────────────────────────────────────
 
 def _normalize_target_path(fpath: str) -> str:
@@ -579,6 +585,108 @@ def get_critique_status(job_id: str) -> dict:
     if job is None:
         raise HTTPException(status_code=404, detail=f"Critique 잡 '{job_id}'를 찾을 수 없습니다.")
     return {"status": job["status"], "result": job["result"]}
+
+
+_CRITIQUE_APPLY_SYSTEM_PROMPT = """\
+당신은 소프트웨어 태스크 초안을 수정하는 전문가입니다.
+critique 결과(issues + suggestions)를 근거로 태스크 배열을 최소한으로 수정하세요.
+
+[수정 규칙 — 엄격히 준수]
+1. issues를 카테고리별로 처리한다:
+   - dependency: depends_on 필드만 수정 (존재하지 않는 id 제거, 메시지에 언급된 누락 id 추가)
+   - sizing: target_files가 3개 초과인 태스크를 분할하거나 target_files를 3개 이하로 줄임
+   - testability: acceptance_criteria를 "동사+목적어+조건" 형식의 검증 가능한 문장으로 교체
+   - description: description에 누락된 섹션 헤더(### 목적과 배경 / ### 구현 세부사항 / ### 테스트 전략) 보완
+   - scope: context_doc 범위를 벗어난 태스크 설명 수정 또는 태스크 제거
+2. suggestions(자유 텍스트): task_id가 언급되면 해당 태스크의 depends_on/description/acceptance_criteria에 반영. 불명확하면 무시하고 원본 유지.
+3. 수정하지 않은 태스크는 원본 그대로 출력. 필드를 누락하거나 값을 임의로 바꾸지 말 것.
+4. 새 태스크를 추가할 때 id는 기존 최대 번호 + 1부터 "task-NNN" 형식으로 부여한다.
+5. 태스크를 삭제할 때는 다른 태스크의 depends_on에서 해당 id를 제거한다.
+
+[출력 형식 — 순수 JSON만, 마크다운 코드블록 및 설명 텍스트 없음]
+{"tasks": [...], "change_summary": "변경 요약 1-3문장"}
+"""
+
+
+def _parse_and_validate_apply_response(cleaned: str, original_tasks: list[dict]) -> dict:
+    try:
+        data: Any = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"LLM 응답 파싱 실패: {exc}") from exc
+
+    received_tasks = data.get("tasks")
+    if not isinstance(received_tasks, list) or len(received_tasks) == 0:
+        raise HTTPException(status_code=422, detail="LLM이 tasks 배열을 반환하지 않았습니다.")
+
+    original_ids = {t.get("id") for t in original_tasks if t.get("id")}
+    received_ids = {t.get("id") for t in received_tasks if isinstance(t, dict) and t.get("id")}
+
+    missing_ids = original_ids - received_ids
+    if len(missing_ids) > len(original_ids) * 0.5:
+        raise HTTPException(
+            status_code=422,
+            detail=f"LLM 응답에서 태스크 {len(missing_ids)}개가 누락됐습니다. 안전을 위해 적용을 중단합니다.",
+        )
+
+    if len(received_tasks) > len(original_tasks) * 3:
+        raise HTTPException(
+            status_code=422,
+            detail=f"LLM이 태스크를 {len(received_tasks)}개로 과도하게 분할했습니다.",
+        )
+
+    validated: list[dict] = []
+    for task in received_tasks:
+        if not isinstance(task, dict):
+            continue
+        original = next((t for t in original_tasks if t.get("id") == task.get("id")), None)
+        if original:
+            for field in ("id", "title", "description", "acceptance_criteria", "target_files", "depends_on", "task_type"):
+                if field not in task:
+                    default: Any = [] if field in ("acceptance_criteria", "target_files", "depends_on") else ""
+                    task[field] = original.get(field, default)
+        warnings_list: list[str] = []
+        _sanitize_task_draft(task, warnings_list)
+        if warnings_list:
+            task["warnings"] = task.get("warnings", []) + warnings_list
+        validated.append(task)
+
+    valid_ids_set = {t.get("id") for t in validated if t.get("id")}
+    for task in validated:
+        task["depends_on"] = [d for d in task.get("depends_on", []) if d in valid_ids_set]
+
+    return {"tasks": validated, "change_summary": data.get("change_summary", "")}
+
+
+@router.post("/tasks/critique/apply")
+def apply_critique(body: CritiqueApplyRequest) -> dict:
+    """Critique 결과를 기반으로 태스크 초안을 LLM으로 자동 수정한다."""
+    tasks_json = json.dumps(body.tasks, ensure_ascii=False, indent=2)
+    critique_json = json.dumps(body.critique.model_dump(), ensure_ascii=False, indent=2)
+    user_content = (
+        f"## 현재 태스크 목록\n\n{tasks_json}\n\n"
+        f"## Critique 결과\n\n{critique_json}\n\n"
+        f"## 컨텍스트 문서 (참고용)\n\n{body.context_doc or '(없음)'}"
+    )
+
+    client = create_client(
+        LLM_PROVIDER,
+        LLMConfig(model=LLM_MODEL_CAPABLE, max_tokens=16000, system_prompt=_CRITIQUE_APPLY_SYSTEM_PROMPT),
+    )
+    llm_response = client.chat([Message(role="user", content=user_content)])
+
+    raw = ""
+    for block in llm_response.content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            raw = block["text"]
+            break
+        if hasattr(block, "type") and block.type == "text":
+            raw = block.text
+            break
+
+    cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    return _parse_and_validate_apply_response(cleaned, body.tasks)
 
 
 @router.get("/tasks")
