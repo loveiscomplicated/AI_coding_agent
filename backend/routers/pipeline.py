@@ -65,7 +65,10 @@ class RunRequest(BaseModel):
     logs_dir: str | None = None         # None → run_pipeline 기본값 (repo_path/agent-data/logs)
     max_workers: int = 1                # 병렬 에이전트 수 (1=순차)
     discord_channel_id: str | None = None  # 프로젝트 Discord 채널 ID (없으면 자동 생성)
-    max_orchestrator_retries: int = 2   # 오케스트레이터 자동 재시도 최대 횟수
+    max_orchestrator_retries: int = 3   # 오케스트레이터 자동 재시도 최대 횟수 (총 시도 = 이 값 + 1)
+    intervention_auto_split: bool = False
+    # True이면 최종 실패 직전에 LLM 을 호출해 태스크를 2~3개 하위 태스크로 자동 분해한다.
+    # 분해된 하위 태스크는 tasks.yaml 에 기록만 되며, 다음 파이프라인 실행 시 픽업된다.
     auto_merge: bool = False            # 그룹 완료 후 base_branch 에 자동 머지
     provider: str | None = None          # 공통 기본 프로바이더 (None → 서버 환경변수)
     model_fast: str | None = None        # 코딩 에이전트 모델
@@ -161,6 +164,7 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
                 max_workers=body.max_workers,
                 discord_channel_id=int(resolved_channel_id) if resolved_channel_id else None,
                 max_orchestrator_retries=body.max_orchestrator_retries,
+                intervention_auto_split=body.intervention_auto_split,
                 auto_merge=body.auto_merge,
                 provider=body.provider or LLM_PROVIDER,
                 model_fast=body.model_fast or LLM_MODEL_FAST,
