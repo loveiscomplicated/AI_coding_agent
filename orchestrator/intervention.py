@@ -33,6 +33,12 @@ class FailureType(Enum):
     DEPENDENCY_MISSING = "dependency_missing"
     MAX_ITER_EXCEEDED = "max_iter_exceeded"
     REVIEWER_INFRA_ERROR = "reviewer_infra_error"
+    # pytest --collect-only 게이트가 import/syntax 오류를 감지한 경우.
+    # 원인이 대부분 코드 파일이므로 analyze() LLM 이 파일별 수정 힌트 생성.
+    COLLECTION_ERROR = "collection_error"
+    # 0개 수집: TestWriter 가 테스트 파일 자체를 못 썼거나 경로/파일명이 틀림.
+    # write-like 계열처럼 고정 힌트 재시도 후 미해결 시 포기.
+    NO_TESTS_COLLECTED = "no_tests_collected"
     LOGIC_ERROR = "logic_error"
 
 
@@ -56,10 +62,17 @@ def classify_failure(failure_reason: str, test_stdout: str = "") -> FailureType:
         return FailureType.UNSUPPORTED_LANGUAGE
     if "[dependency_missing]" in combined:
         return FailureType.DEPENDENCY_MISSING
+    # [COLLECTION_ERROR] 는 구체적 원인이 ImportError/ModuleNotFound 일 수도, 단순
+    # SyntaxError 일 수도 있다. import 계열이면 ENV_ERROR 분기(아래)에 먼저 잡혀
+    # GIVE_UP 경로로 가고, 그 외 문법 오류는 COLLECTION_ERROR → analyze() 로 간다.
+    if "[no_tests_collected]" in combined:
+        return FailureType.NO_TESTS_COLLECTED
     if "internalerror" in combined:
         return FailureType.ENV_ERROR
     if any(p in combined for p in ["importerror", "modulenotfounderror", "no module named"]):
         return FailureType.ENV_ERROR
+    if "[collection_error]" in combined:
+        return FailureType.COLLECTION_ERROR
     if "[max_iter]" in combined:
         return FailureType.MAX_ITER_EXCEEDED
     # 쓰기 미수행 / 산출물 누락 계열 — 모두 MAX_ITER_EXCEEDED 로 묶어
@@ -127,6 +140,30 @@ def classify_and_analyze(
         )
         logger.info("[%s] MAX_ITER RETRY (고정 힌트, 시도 %d)", task.id, attempt)
         return AnalysisResult(should_retry=True, hint=hint, raw="[fast-path] max_iter_retry")
+
+    if ft == FailureType.NO_TESTS_COLLECTED:
+        # pytest/go/jest/gradle 모두: 테스트 파일이 없거나 discovery 규칙과
+        # 파일명/위치가 안 맞음. TestWriter 가 다시 올바른 경로에 쓰는 것이
+        # 해결책. write-like 와 같은 재시도 패턴 사용.
+        if attempt >= 2:
+            reason = "[NO_TESTS_COLLECTED] 2회 재시도 후에도 테스트 미수집 — 스펙·경로 재검토 필요"
+            logger.warning("[%s] NO_TESTS_COLLECTED GIVE_UP (시도 %d)", task.id, attempt)
+            return AnalysisResult(should_retry=False, hint=reason, raw="[fast-path] no_tests_collected_give_up")
+        hint = (
+            "pytest --collect-only 가 0개 수집했습니다. 원인 후보:\n"
+            " 1) 테스트 파일이 아예 없음 → tests/ 밑에 test_*.py 생성\n"
+            " 2) 파일명/함수명이 discovery 규칙과 불일치 → test_ 접두사 확인\n"
+            " 3) 테스트가 src/ 나 다른 경로에 잘못 배치됨 → tests/ 로 이동\n"
+            "반드시 write_file 로 tests/ 아래에 test_*.py 를 생성하세요."
+        )
+        logger.info("[%s] NO_TESTS_COLLECTED RETRY (고정 힌트, 시도 %d)", task.id, attempt)
+        return AnalysisResult(should_retry=True, hint=hint, raw="[fast-path] no_tests_collected_retry")
+
+    if ft == FailureType.COLLECTION_ERROR:
+        # import/syntax 오류 — ENV_ERROR 로 이미 걸러지지 않은 경우는 문법 오류 가능성.
+        # LLM analyze() 에 파일별 수정 힌트 생성을 맡긴다 (LOGIC_ERROR 와 동일 흐름).
+        logger.info("[%s] COLLECTION_ERROR → LLM analyze (시도 %d)", task.id, attempt)
+        return analyze(task, failure_reason, attempt, previous_hints=previous_hints, role_models=role_models)
 
     # LOGIC_ERROR → 기존 LLM 분석
     return analyze(task, failure_reason, attempt, previous_hints=previous_hints, role_models=role_models)
