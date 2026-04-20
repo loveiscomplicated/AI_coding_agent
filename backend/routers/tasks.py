@@ -15,7 +15,7 @@ import re
 import threading
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -272,14 +272,14 @@ class DraftRequest(BaseModel):
 
 
 class CritiqueIssue(BaseModel):
-    task_id: str
-    severity: str   # "ERROR" | "WARNING"
-    category: str   # "sizing" | "testability" | "dependency" | "scope" | "description"
+    task_id: str  # 문제 있는 태스크 ID. 전체 구조 문제면 "GLOBAL"
+    severity: Literal["ERROR", "WARNING"]
+    category: Literal["sizing", "testability", "dependency", "scope", "description"]
     message: str
 
 
 class CritiqueResult(BaseModel):
-    verdict: str            # "APPROVED" | "NEEDS_REVISION"
+    verdict: Literal["APPROVED", "NEEDS_REVISION"]
     summary: str
     issues: list[CritiqueIssue]
     suggestions: list[str]
@@ -537,6 +537,9 @@ def _run_critique(job_id: str, tasks: list[dict], context_doc: str) -> None:
         try:
             data: Any = json.loads(cleaned)
             result = CritiqueResult(**data)
+            # LLM이 APPROVED + ERROR issue를 동시에 내보내는 모순을 서버에서 보정한다.
+            if any(i.severity == "ERROR" for i in result.issues):
+                result = result.model_copy(update={"verdict": "NEEDS_REVISION"})
         except (json.JSONDecodeError, Exception):
             result = CritiqueResult(
                 verdict="APPROVED",

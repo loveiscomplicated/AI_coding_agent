@@ -1,5 +1,5 @@
 """
-backend/tests/test_critique.py
+tests/test_critique.py
 
 POST /api/tasks/critique 및 GET /api/tasks/critique/{job_id} 엔드포인트 검증.
 """
@@ -25,7 +25,12 @@ _SAMPLE_TASKS = [
     {
         "id": "task-001",
         "title": "샘플 태스크",
-        "description": "### 목적과 배경\n목적.\n\n### 기술 요구사항\n요구.\n\n### 인접 컨텍스트\n후속 태스크 없음.\n\n### 비고려 항목\n명시적 비범위 없음.",
+        "description": (
+            "### 목적과 배경\n목적.\n\n"
+            "### 기술 요구사항\n요구.\n\n"
+            "### 인접 컨텍스트\n후속 태스크 없음.\n\n"
+            "### 비고려 항목\n명시적 비범위 없음."
+        ),
         "acceptance_criteria": ["pytest로 검증 가능한 조건"],
         "target_files": ["a.py"],
         "depends_on": [],
@@ -66,7 +71,7 @@ def _run_critique_and_wait(monkeypatch, response_text: str) -> dict:
         return tasks_router._critique_jobs[job_id]
 
 
-def _valid_critique_json(verdict: str, issues: list[dict]) -> str:
+def _critique_json(verdict: str, issues: list[dict]) -> str:
     return json.dumps({
         "verdict": verdict,
         "summary": "검토 완료",
@@ -80,7 +85,7 @@ def _valid_critique_json(verdict: str, issues: list[dict]) -> str:
 def test_critique_returns_job_id(monkeypatch) -> None:
     """POST /api/tasks/critique 가 즉시 job_id를 반환한다."""
     monkeypatch.setattr(
-        tasks_router, "create_client", lambda provider, cfg: _FakeClient(_valid_critique_json("APPROVED", []))
+        tasks_router, "create_client", lambda provider, cfg: _FakeClient(_critique_json("APPROVED", []))
     )
 
     resp = client.post("/api/tasks/critique", json={
@@ -98,7 +103,7 @@ def test_critique_returns_job_id(monkeypatch) -> None:
 
 def test_critique_polling_done(monkeypatch) -> None:
     """유효한 CritiqueResult JSON 반환 시 status가 'done'이 된다."""
-    job = _run_critique_and_wait(monkeypatch, _valid_critique_json("APPROVED", []))
+    job = _run_critique_and_wait(monkeypatch, _critique_json("APPROVED", []))
 
     assert job["status"] == "done"
     assert job["result"] is not None
@@ -109,17 +114,17 @@ def test_critique_polling_done(monkeypatch) -> None:
 
 def test_critique_approved_when_no_errors(monkeypatch) -> None:
     """issues가 없는 CritiqueResult는 verdict가 APPROVED이다."""
-    job = _run_critique_and_wait(monkeypatch, _valid_critique_json("APPROVED", []))
+    job = _run_critique_and_wait(monkeypatch, _critique_json("APPROVED", []))
 
     result = job["result"]
     assert result["verdict"] == "APPROVED"
     assert result["issues"] == []
 
 
-# ── 4. severity ERROR 포함 → verdict NEEDS_REVISION ──────────────────────────
+# ── 4. severity ERROR 포함 → verdict NEEDS_REVISION (서버 보정 포함) ──────────
 
 def test_critique_needs_revision_when_error_exists(monkeypatch) -> None:
-    """severity ERROR가 포함된 CritiqueResult는 verdict가 NEEDS_REVISION이다."""
+    """severity ERROR가 포함되면 LLM이 APPROVED를 내보내도 서버가 NEEDS_REVISION으로 보정한다."""
     issues = [
         {
             "task_id": "task-001",
@@ -128,7 +133,8 @@ def test_critique_needs_revision_when_error_exists(monkeypatch) -> None:
             "message": "target_files가 3개를 초과합니다.",
         }
     ]
-    job = _run_critique_and_wait(monkeypatch, _valid_critique_json("NEEDS_REVISION", issues))
+    # LLM이 모순된 APPROVED + ERROR issue를 반환하는 케이스
+    job = _run_critique_and_wait(monkeypatch, _critique_json("APPROVED", issues))
 
     result = job["result"]
     assert result["verdict"] == "NEEDS_REVISION"
