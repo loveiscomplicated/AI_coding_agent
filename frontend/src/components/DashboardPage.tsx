@@ -11,6 +11,13 @@ const MAX_RECENT = 5
 
 // ── 타입 ─────────────────────────────────────────────────────────────────────
 
+interface OutlierTask {
+  task_id: string
+  reason: 'high_iteration_count' | 'high_single_iteration_tokens' | string
+  value: number
+  role: string
+}
+
 interface Summary {
   task_status: Record<string, number>
   metrics: {
@@ -29,6 +36,7 @@ interface Summary {
   cost_estimation_quality_breakdown?: { exact: number; fallback: number; missing: number }
   models_with_missing_pricing?: string[]
   milestone_count: number
+  outlier_tasks?: OutlierTask[]
 }
 
 interface DashboardTask {
@@ -1046,6 +1054,53 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
                 </div>
               )}
 
+              {/* ⚠️ 주의 필요 태스크 — outlier 가 있을 때만 표시 */}
+              {summary?.outlier_tasks && summary.outlier_tasks.length > 0 && (
+                <div>
+                  <h2 className="text-sm font-semibold text-gray-700 dark:text-zinc-300 mb-3">
+                    ⚠️ 주의 필요 태스크
+                  </h2>
+                  <div className="rounded-xl border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 divide-y divide-amber-200 dark:divide-amber-800/60 overflow-hidden">
+                    {summary.outlier_tasks.map(o => {
+                      const reasonLabel =
+                        o.reason === 'high_iteration_count'
+                          ? `iteration 과다 (${o.role || '역할 미상'})`
+                          : o.reason === 'high_single_iteration_tokens'
+                            ? '단일 iteration 토큰 초과'
+                            : o.reason
+                      return (
+                        <button
+                          key={`${o.task_id}-${o.reason}`}
+                          type="button"
+                          onClick={() => {
+                            setExpandedTaskIds(prev => {
+                              const next = new Set(prev)
+                              next.add(o.task_id)
+                              return next
+                            })
+                            // 태스크 목록으로 스크롤
+                            const el = document.getElementById(`task-row-${o.task_id}`)
+                            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                          }}
+                          className="w-full text-left flex items-center gap-3 px-4 py-2.5 hover:bg-amber-100/70 dark:hover:bg-amber-900/40 transition-colors"
+                          title="클릭하면 태스크 상세를 열어줍니다"
+                        >
+                          <span className="text-xs font-mono text-amber-700 dark:text-amber-300 flex-shrink-0">
+                            {o.task_id}
+                          </span>
+                          <span className="text-xs text-amber-800 dark:text-amber-200 flex-1 min-w-0 truncate">
+                            {reasonLabel}
+                          </span>
+                          <span className="text-xs font-semibold text-amber-900 dark:text-amber-100 flex-shrink-0">
+                            {o.value.toLocaleString()}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+
               {/* 태스크 목록 */}
               <div>
                 <div className="flex items-center justify-between mb-3">
@@ -1085,7 +1140,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
                   ) : tasks.map(task => {
                     const expanded = expandedTaskIds.has(task.id)
                     return (
-                      <div key={task.id}>
+                      <div key={task.id} id={`task-row-${task.id}`}>
                         {/* 요약 행 */}
                         <button
                           onClick={() => setExpandedTaskIds(prev => {

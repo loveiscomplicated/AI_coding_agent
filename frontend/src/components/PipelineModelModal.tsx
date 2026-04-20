@@ -15,7 +15,6 @@ export interface AvailableModel {
 
 export type RoleOverride = { provider?: string; model?: string }
 export type RoleOverrides = Record<string, RoleOverride>
-
 // ── ModelSelect ───────────────────────────────────────────────────────────────
 
 interface ModelSelectProps {

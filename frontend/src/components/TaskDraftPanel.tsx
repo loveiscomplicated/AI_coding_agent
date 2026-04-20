@@ -356,6 +356,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
     providerCapable: string, modelCapable: string,
     agentCount: number,
     roleModels?: Record<string, {provider?: string; model?: string}>,
+    noPush?: boolean,
   ) {
     setShowModelModal(false)
     dispatch({ type: 'SAVING' })
@@ -391,7 +392,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
           repo_path: state.rootDir === '.' ? '.' : state.rootDir,
           base_branch: state.baseBranch || 'main',
           no_pr: false,
-          no_push: state.noPush,
+          no_push: noPush ?? state.noPush,
           max_workers: agentCount,
           provider_fast: providerFast,
           model_fast: modelFast,
@@ -467,7 +468,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
     {showModelModal && (
       <PipelineModelModal
         models={availableModels}
-        onConfirm={(pf, mf, pc, mc, ac, rm) => handleSaveAndRun(pf, mf, pc, mc, ac, rm)}
+        onConfirm={(pf, mf, pc, mc, ac, rm, np) => handleSaveAndRun(pf, mf, pc, mc, ac, rm, np)}
         onCancel={() => setShowModelModal(false)}
       />
     )}
@@ -638,7 +639,6 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
     </>
   )
 }
-
 // ── TaskCard ──────────────────────────────────────────────────────────────────
 
 interface CardProps {
@@ -808,4 +808,3 @@ function TaskCard({ task, idx, total, onUpdate, onDelete, onMove, onDismissWarni
     </div>
   )
 }
-
