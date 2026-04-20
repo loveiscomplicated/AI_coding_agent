@@ -1240,6 +1240,7 @@ def _run_single_task(
     all_tasks: list[Task],
     tasks_path: Path,
     reports_dir: Path = Path("agent-data/reports"),
+    logs_dir: Path | None = None,
     on_progress=None,   # Callable[[dict], None] | None
 ) -> tuple[bool, str]:
     """
@@ -1253,6 +1254,9 @@ def _run_single_task(
     def emit(event: dict) -> None:
         if on_progress:
             on_progress(event)
+
+    if logs_dir is None:
+        logs_dir = _default_logs_dir(repo_path)
 
     print(f"\n{'─' * 60}")
     print(f"{_BOLD}[{task.id}]{_RESET} {task.title}")

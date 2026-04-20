@@ -16,6 +16,20 @@ const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000') 
 
 // ── 타입 ──────────────────────────────────────────────────────────────────────
 
+interface CritiqueIssue {
+  task_id: string
+  severity: 'ERROR' | 'WARNING'
+  category: 'sizing' | 'testability' | 'dependency' | 'scope' | 'description'
+  message: string
+}
+
+interface CritiqueResult {
+  verdict: 'APPROVED' | 'NEEDS_REVISION'
+  summary: string
+  issues: CritiqueIssue[]
+  suggestions: string[]
+}
+
 export interface DraftTask {
   id: string
   title: string
@@ -189,6 +203,12 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([])
   const [showModelModal, setShowModelModal] = useState(false)
   const [showGraphModal, setShowGraphModal] = useState(false)
+  const [critiqueStatus, setCritiqueStatus] = useState<'idle' | 'loading' | 'done'>('idle')
+  const [critiqueResult, setCritiqueResult] = useState<CritiqueResult | null>(null)
+  const [critiqueResetMsg, setCritiqueResetMsg] = useState(false)
+  const [showRunConfirm, setShowRunConfirm] = useState(false)
+  const prevTasksRef = useRef<DraftTask[] | null>(null)
+  const critiqueAbortedRef = useRef(false)
 
   useEffect(() => {
     fetch(`${API_BASE}/api/config`)
@@ -253,6 +273,16 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
       localStorage.removeItem(DRAFT_STATE_PREFIX + draftKey)
     }
   }, [state, draftKey])
+
+  // 태스크 목록 변경 시 critique 리셋 (DRAFT_DONE 시에는 idle이라 무시됨)
+  useEffect(() => {
+    if (prevTasksRef.current !== null && critiqueStatus !== 'idle') {
+      setCritiqueStatus('idle')
+      setCritiqueResult(null)
+      setCritiqueResetMsg(true)
+    }
+    prevTasksRef.current = state.tasks
+  }, [state.tasks]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // tasks.yaml은 항상 rootDir/agent-data/tasks.yaml
   const tasksFilePath = state.rootDir === '.'
@@ -349,6 +379,64 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
       if (e instanceof Error && e.name !== 'AbortError') throw e
     } finally {
       setBrowsing(false)
+    }
+  }
+
+  async function runCritique() {
+    setCritiqueStatus('loading')
+    setCritiqueResult(null)
+    setCritiqueResetMsg(false)
+    critiqueAbortedRef.current = false
+
+    let contextDocValue = contextDoc
+    if (!contextDocValue) {
+      try {
+        const repoPath = state.rootDir === '.' ? '.' : state.rootDir
+        const docsRes = await fetch(`${API_BASE}/api/utils/context-docs?repo_path=${encodeURIComponent(repoPath)}`)
+        if (docsRes.ok) {
+          const docsData = await docsRes.json()
+          const docs: Array<{ name: string }> = docsData.docs ?? []
+          if (docs.length > 0) {
+            const contentRes = await fetch(`${API_BASE}/api/utils/context-docs/${encodeURIComponent(docs[0].name)}?repo_path=${encodeURIComponent(repoPath)}`)
+            if (contentRes.ok) {
+              const cd = await contentRes.json()
+              contextDocValue = cd.content ?? ''
+            }
+          }
+        }
+      } catch { /* empty contextDoc으로 진행 */ }
+    }
+
+    try {
+      const startRes = await fetch(`${API_BASE}/api/tasks/critique`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tasks: state.tasks, context_doc: contextDocValue }),
+      })
+      if (!startRes.ok) {
+        const err = await startRes.json().catch(() => ({ detail: startRes.statusText }))
+        throw new Error(err.detail ?? 'critique 시작 실패')
+      }
+      const { job_id } = await startRes.json()
+
+      const poll = async (): Promise<void> => {
+        if (critiqueAbortedRef.current) return
+        const res = await fetch(`${API_BASE}/api/tasks/critique/${job_id}`)
+        if (!res.ok) throw new Error('critique 조회 실패')
+        const data = await res.json()
+        if (data.status === 'done') {
+          setCritiqueResult(data.result)
+          setCritiqueStatus('done')
+        } else if (data.status === 'failed') {
+          throw new Error('critique 실패')
+        } else {
+          await new Promise(r => setTimeout(r, 2000))
+          return poll()
+        }
+      }
+      await poll()
+    } catch {
+      if (!critiqueAbortedRef.current) setCritiqueStatus('idle')
     }
   }
 
@@ -488,6 +576,32 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
         }}
       />
     )}
+    {showRunConfirm && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+        <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-xl p-6 max-w-sm w-full mx-4">
+          <p className="text-sm font-medium text-gray-800 dark:text-zinc-100 mb-2">
+            Momus 검토를 건너뛰시겠어요?
+          </p>
+          <p className="text-xs text-gray-500 dark:text-zinc-400 mb-5">
+            검토 없이 파이프라인을 바로 실행할 수 있습니다.
+          </p>
+          <div className="flex gap-2 justify-end">
+            <button
+              className="rounded-lg border border-gray-300 dark:border-zinc-600 px-3 py-1.5 text-sm text-gray-600 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-zinc-800"
+              onClick={() => { setShowRunConfirm(false); void runCritique() }}
+            >
+              🦉 검토 먼저
+            </button>
+            <button
+              className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700"
+              onClick={() => { setShowRunConfirm(false); setShowModelModal(true) }}
+            >
+              그냥 실행
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
     <div className="flex flex-col h-full">
       {/* 헤더 */}
       <div className="flex items-center justify-between px-4 py-3 bg-white dark:bg-zinc-900 border-b border-gray-200 dark:border-zinc-700">
@@ -609,18 +723,97 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
           >
             <span>{state.noPush ? '📦 로컬만' : '🚀 push+PR'}</span>
           </button>
+          {/* Momus 검토 */}
           <button
-            className="rounded-lg bg-blue-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
-            onClick={() => setShowModelModal(true)}
-            disabled={state.phase === 'saving' || state.tasks.length === 0}
+            className="rounded-lg border border-indigo-300 dark:border-indigo-600 px-3 py-1.5 text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 disabled:opacity-50 transition-colors"
+            onClick={() => void runCritique()}
+            disabled={critiqueStatus === 'loading' || state.tasks.length === 0 || state.phase === 'saving'}
           >
-            {state.phase === 'saving' ? '저장 중…' : '저장 & 파이프라인 시작 🚀'}
+            {critiqueStatus === 'loading' ? (
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-3 h-3 border border-indigo-400 border-t-transparent rounded-full animate-spin" />
+                검토 중…
+              </span>
+            ) : '🦉 Momus 검토'}
           </button>
+          {/* 파이프라인 실행 */}
+          <div className="flex flex-col items-end">
+            <button
+              className="rounded-lg bg-blue-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
+              onClick={() => {
+                if (critiqueStatus === 'idle') {
+                  setShowRunConfirm(true)
+                } else {
+                  setShowModelModal(true)
+                }
+              }}
+              disabled={state.phase === 'saving' || state.tasks.length === 0}
+            >
+              {state.phase === 'saving' ? '저장 중…' : '저장 & 파이프라인 시작 🚀'}
+            </button>
+            {critiqueStatus === 'done' && critiqueResult?.verdict === 'NEEDS_REVISION' && (
+              <span className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
+                ⚠️ Momus가 수정을 제안했습니다
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
       {/* 태스크 목록 */}
       <div className="flex-1 overflow-auto p-4 space-y-3">
+        {/* critique 리셋 알림 */}
+        {critiqueResetMsg && (
+          <p className="text-xs text-gray-400 dark:text-zinc-500 italic -mb-1">
+            태스크가 변경되어 이전 검토 결과가 초기화됐습니다.
+          </p>
+        )}
+        {/* critique 결과 배너 */}
+        {critiqueStatus === 'done' && critiqueResult && (
+          <div className={`rounded-lg border p-3 ${
+            critiqueResult.verdict === 'APPROVED'
+              ? 'bg-green-50 dark:bg-green-900/20 border-green-300 dark:border-green-700'
+              : 'bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-700'
+          }`}>
+            <p className={`text-xs font-medium ${
+              critiqueResult.verdict === 'APPROVED'
+                ? 'text-green-700 dark:text-green-400'
+                : 'text-amber-700 dark:text-amber-400'
+            }`}>
+              {critiqueResult.verdict === 'APPROVED'
+                ? `✅ Momus: 태스크 구조 승인 — ${critiqueResult.summary}`
+                : `⚠️ Momus: 수정 필요 — ${critiqueResult.summary}`}
+            </p>
+            {critiqueResult.issues.filter(i => i.task_id === 'GLOBAL').length > 0 && (
+              <div className="mt-2 space-y-1" data-testid="global-issues">
+                {critiqueResult.issues.filter(i => i.task_id === 'GLOBAL').map((issue, i) => (
+                  <div key={i} className={`flex items-start gap-1.5 text-xs ${
+                    issue.severity === 'ERROR' ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'
+                  }`}>
+                    <span className={`shrink-0 px-1 py-0.5 rounded text-[9px] font-medium border ${
+                      issue.severity === 'ERROR'
+                        ? 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20'
+                        : 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20'
+                    }`}>[{issue.category}]</span>
+                    <span>{issue.message}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {critiqueResult.suggestions.length > 0 && (
+              <details className="mt-2">
+                <summary className="text-xs cursor-pointer text-gray-500 dark:text-zinc-400 hover:text-gray-700 dark:hover:text-zinc-200 select-none">
+                  제안 사항 ({critiqueResult.suggestions.length}개)
+                </summary>
+                <ul className="mt-1 space-y-0.5 pl-3">
+                  {critiqueResult.suggestions.map((s, i) => (
+                    <li key={i} className="text-xs text-gray-600 dark:text-zinc-400">• {s}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </div>
+        )}
         {state.tasks.map((task, idx) => (
           <TaskCard
             key={task.id}
@@ -631,6 +824,9 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
             onDelete={() => dispatch({ type: 'DELETE_TASK', idx })}
             onMove={dir => dispatch({ type: 'MOVE_TASK', idx, dir })}
             onDismissWarning={wIdx => dispatch({ type: 'DISMISS_WARNING', taskIdx: idx, warningIdx: wIdx })}
+            critiqueIssues={critiqueResult?.issues.filter(
+              issue => issue.task_id !== 'GLOBAL' && issue.task_id === task.id
+            )}
           />
         ))}
 
@@ -655,9 +851,10 @@ interface CardProps {
   onDelete: () => void
   onMove: (dir: -1 | 1) => void
   onDismissWarning: (warningIdx: number) => void
+  critiqueIssues?: CritiqueIssue[]
 }
 
-function TaskCard({ task, idx, total, onUpdate, onDelete, onMove, onDismissWarning }: CardProps) {
+function TaskCard({ task, idx, total, onUpdate, onDelete, onMove, onDismissWarning, critiqueIssues }: CardProps) {
   function updateField<K extends keyof DraftTask>(key: K, value: DraftTask[K]) {
     onUpdate({ ...task, [key]: value })
   }
@@ -810,6 +1007,26 @@ function TaskCard({ task, idx, total, onUpdate, onDelete, onMove, onDismissWarni
         <p className="text-xs text-gray-400 dark:text-zinc-500">
           선행 태스크: {task.depends_on.join(', ')}
         </p>
+      )}
+
+      {/* critique 이슈 (해당 태스크) */}
+      {(critiqueIssues?.length ?? 0) > 0 && (
+        <div className="space-y-1">
+          {critiqueIssues!.map((issue, i) => (
+            <div key={i} className={`flex items-start gap-1.5 text-xs rounded border px-2 py-1.5 ${
+              issue.severity === 'ERROR'
+                ? 'text-red-600 dark:text-red-400 border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20'
+                : 'text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/10'
+            }`}>
+              <span className={`shrink-0 px-1 py-0.5 rounded text-[9px] font-medium border ${
+                issue.severity === 'ERROR'
+                  ? 'border-red-300 dark:border-red-700'
+                  : 'border-amber-300 dark:border-amber-700'
+              }`}>[{issue.category}]</span>
+              <span>{issue.message}</span>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   )
