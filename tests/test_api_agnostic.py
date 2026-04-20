@@ -420,7 +420,9 @@ class TestRunPipelineArgs:
         from orchestrator.run import run_pipeline
         sig = inspect.signature(run_pipeline)
         assert sig.parameters["provider"].default == "claude"
-        assert sig.parameters["max_orchestrator_retries"].default == 2
+        # 3회차 재시도에서 intervention 스켈레톤 주입 → 4회차 실행을 허용하도록 기본값 3
+        assert sig.parameters["max_orchestrator_retries"].default == 3
+        assert sig.parameters["intervention_auto_split"].default is False
 
     def test_parse_args_accepts_provider_flag(self):
         from orchestrator.run import _parse_args

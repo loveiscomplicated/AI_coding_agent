@@ -34,6 +34,13 @@ function renderModal(tasks?: PipelineTaskSummary[]) {
   return { onConfirm, onCancel }
 }
 
+async function enableAutoSplit() {
+  const user = userEvent.setup()
+  const toggle = screen.getByRole('switch', { name: /최종 실패 시 태스크 자동 분해/i })
+  await user.click(toggle)
+  return { user, toggle }
+}
+
 describe('PipelineModelModal — 복잡도 기반 자동 선택 토글', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -178,5 +185,28 @@ describe('PipelineModelModal — 복잡도 기반 자동 선택 토글', () => {
 
     expect(onConfirm).toHaveBeenCalledTimes(1)
     expect(onConfirm.mock.calls[0][7]).toBe(false)
+  })
+})
+
+describe('PipelineModelModal — intervention auto split 토글', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockRejectedValue(new Error('network disabled in tests')),
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('토글 ON 시 구조 변경 경고 문구가 표시된다', async () => {
+    renderModal()
+    await enableAutoSplit()
+
+    expect(
+      screen.getByText(/실행 중 태스크 구조가 변경됩니다/i),
+    ).toBeInTheDocument()
   })
 })

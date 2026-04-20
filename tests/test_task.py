@@ -106,6 +106,19 @@ class TestTaskProperties:
         task.status = TaskStatus.FAILED
         assert task.is_done is True
 
+    def test_is_done_for_superseded_status(self, minimal_task_dict):
+        task = Task.from_dict(minimal_task_dict)
+        task.status = TaskStatus.SUPERSEDED
+        assert task.is_done is True
+
+    def test_superseded_status_serializable(self, minimal_task_dict, tmp_path):
+        task = Task.from_dict(minimal_task_dict)
+        task.status = TaskStatus.SUPERSEDED
+        path = tmp_path / "tasks.yaml"
+        save_tasks([task], path)
+        loaded = load_tasks(path)
+        assert loaded[0].status == TaskStatus.SUPERSEDED
+
     def test_is_not_done_for_in_progress(self, minimal_task_dict):
         task = Task.from_dict(minimal_task_dict)
         task.status = TaskStatus.IMPLEMENTING
