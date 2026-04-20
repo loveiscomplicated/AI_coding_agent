@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from orchestrator.run import PauseController, _catchup_merge, run_pipeline
@@ -56,6 +57,20 @@ class _PauseCtrlStopped:
 
 def _noop_client(*args, **kwargs):
     return MagicMock()
+
+
+def _failed_result(task: Task, reason: str = "boom"):
+    return SimpleNamespace(
+        task=task,
+        succeeded=False,
+        failure_reason=reason,
+        test_result=None,
+        review=None,
+        test_files=[],
+        impl_files=[],
+        metrics=MagicMock(),
+        models_used={},
+    )
 
 
 def test_run_pipeline_emits_frontend_skipped_and_returns_early(tmp_path):
@@ -270,3 +285,114 @@ def test_run_pipeline_restarts_dead_listener_thread(tmp_path):
 
     # 최초 시작 1회 + _check_listener_alive 재시작 1회 이상
     assert _DeadThread.created >= 2
+
+
+def test_run_pipeline_task023_style_loop_injects_skeleton_then_auto_splits(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    task = Task(
+        id="task-023",
+        title="title-task-023",
+        description="desc",
+        acceptance_criteria=["ok"],
+        target_files=["src/task023.py"],
+        task_type="backend",
+        status=TaskStatus.PENDING,
+    )
+    tasks = [task]
+    events: list[dict] = []
+    seen_file_contents: list[str] = []
+
+    class _FakePipeline:
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, task, ws, on_progress=None, pause_ctrl=None, all_tasks=None, repo_path=None):
+            self.calls += 1
+            target = ws.src_dir / "task023.py"
+            seen_file_contents.append(target.read_text(encoding="utf-8"))
+            return _failed_result(task, reason=f"boom-{self.calls}")
+
+    fake_pipeline = _FakePipeline()
+
+    def fake_analyze(task, failure_reason, attempt, test_stdout="", previous_hints=None, role_models=None):
+        skeletons = {}
+        if attempt == 3:
+            skeletons = {
+                "src/task023.py": (
+                    '"""task-023 skeleton."""\n'
+                    "def foo() -> None:\n"
+                    '    raise NotImplementedError("TODO: task task-023")\n'
+                )
+            }
+        return SimpleNamespace(
+            should_retry=True,
+            hint=f"hint-{attempt}",
+            raw=f"raw-{attempt}",
+            token_usage=(0, 0, 0, 0),
+            call_log=[],
+            skeleton_files=skeletons,
+        )
+
+    def fake_split(task, all_tasks, spec_content, llm, tasks_yaml_path, orch_report=""):
+        sub_a = Task(
+            id="task-023-a",
+            title="a",
+            description="d",
+            acceptance_criteria=["ok-a"],
+            target_files=["src/task023.py"],
+            depends_on=list(task.depends_on),
+        )
+        sub_b = Task(
+            id="task-023-b",
+            title="b",
+            description="d",
+            acceptance_criteria=["ok-b"],
+            target_files=["src/task023.py"],
+            depends_on=["task-023-a"],
+        )
+        task.status = TaskStatus.SUPERSEDED
+        task.failure_reason = "[자동 분해: task-023-a, task-023-b]"
+        orig_index = all_tasks.index(task)
+        all_tasks.insert(orig_index + 1, sub_a)
+        all_tasks.insert(orig_index + 2, sub_b)
+        return [sub_a, sub_b]
+
+    with (
+        patch("orchestrator.run.load_tasks", return_value=tasks),
+        patch("orchestrator.run.resolve_execution_groups", return_value=[tasks]),
+        patch("orchestrator.run.create_client", side_effect=_noop_client),
+        patch("orchestrator.run.create_hotline_llms", return_value=(MagicMock(), MagicMock())),
+        patch("orchestrator.run.create_intervention_llms", return_value=(MagicMock(), MagicMock())),
+        patch("orchestrator.run.DockerTestRunner", return_value=MagicMock()),
+        patch("orchestrator.run.TDDPipeline", return_value=fake_pipeline),
+        patch("orchestrator.run._ensure_gitignore"),
+        patch("orchestrator.run._accumulate_external_tokens"),
+        patch("orchestrator.run.orch_classify_and_analyze", side_effect=fake_analyze),
+        patch("orchestrator.run.create_redesign_llm", return_value=MagicMock()),
+        patch("orchestrator.run._split_task", side_effect=fake_split),
+        patch("orchestrator.run._load_spec_content", return_value="spec"),
+        patch("orchestrator.run.save_tasks"),
+    ):
+        result = run_pipeline(
+            tasks_path=tmp_path / "tasks.yaml",
+            repo_path=repo,
+            on_progress=events.append,
+            intervention_auto_split=True,
+            max_orchestrator_retries=3,
+        )
+
+    assert result["success"] == 0
+    assert result["fail"] == 0
+    assert len(seen_file_contents) == 4
+    assert seen_file_contents[0] == ""
+    assert seen_file_contents[1] == ""
+    assert seen_file_contents[2] == ""
+    assert '"""task-023 skeleton."""' in seen_file_contents[3]
+    assert 'raise NotImplementedError("TODO: task task-023")' in seen_file_contents[3]
+    event_types = [e.get("type") for e in events]
+    assert "orchestrator_retry" in event_types
+    assert "orchestrator_skeleton_generated" in event_types
+    assert "task_split" in event_types
+    assert task.status == TaskStatus.SUPERSEDED
+    assert [t.id for t in tasks] == ["task-023", "task-023-a", "task-023-b"]

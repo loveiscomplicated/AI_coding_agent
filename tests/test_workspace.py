@@ -596,3 +596,109 @@ class TestTestSkeletonInjection:
             assert ws.list_test_files() == []
         finally:
             ws.cleanup()
+
+
+# ── intervention 스켈레톤 주입 ────────────────────────────────────────────────
+
+
+_SK_PY_CONTENT = (
+    "def foo() -> None:\n"
+    '    raise NotImplementedError("TODO: task task-001")\n'
+)
+
+
+class TestInterventionSkeletonInjection:
+    """`WorkspaceManager(skeleton_files=...)` 경로: 3회차 재시도 직전에
+    intervention 이 생성한 스텁을 빈 placeholder 파일에만 주입."""
+
+    def test_skeleton_files_none_is_noop(self, simple_task, tmp_path):
+        """skeleton_files 미지정 시 기존 동작 (빈 placeholder 생성)."""
+        ws = WorkspaceManager(simple_task, tmp_path, base_dir=tmp_path / "ws")
+        ws.create()
+        try:
+            dest = ws.src_dir / "auth.py"
+            assert dest.exists()
+            # repo 에 파일 없음 → 빈 placeholder 그대로
+            assert dest.stat().st_size == 0
+        finally:
+            ws.cleanup()
+
+    def test_skeleton_injected_into_empty_placeholder(self, simple_task, tmp_path):
+        """repo 에 target_file 이 없을 때 intervention 스켈레톤이 주입된다."""
+        ws = WorkspaceManager(
+            simple_task, tmp_path,
+            base_dir=tmp_path / "ws",
+            skeleton_files={"src/auth.py": _SK_PY_CONTENT},
+        )
+        ws.create()
+        try:
+            dest = ws.src_dir / "auth.py"
+            assert dest.exists()
+            content = dest.read_text(encoding="utf-8")
+            assert "NotImplementedError" in content
+            assert "def foo" in content
+        finally:
+            ws.cleanup()
+
+    def test_existing_non_empty_file_not_overwritten(self, simple_task, repo_with_files):
+        """repo 에 이미 내용을 가진 파일이 있으면 skeleton 으로 덮어쓰지 않는다
+        — 에이전트가 이전 재시도에서 작성한 부분 작업물 보호."""
+        ws = WorkspaceManager(
+            simple_task, repo_with_files,
+            base_dir=repo_with_files / "ws",
+            skeleton_files={"src/auth.py": _SK_PY_CONTENT},
+        )
+        ws.create()
+        try:
+            dest = ws.src_dir / "auth.py"
+            content = dest.read_text(encoding="utf-8")
+            # 원본 내용 보존 (repo_with_files fixture 가 쓴 "def login(): pass")
+            assert "login" in content
+            assert "NotImplementedError" not in content
+        finally:
+            ws.cleanup()
+
+    def test_skeleton_path_outside_target_files_rejected(self, simple_task, tmp_path):
+        """target_files 에 없는 경로는 스킵 (LLM 환각/오염 방지)."""
+        ws = WorkspaceManager(
+            simple_task, tmp_path,
+            base_dir=tmp_path / "ws",
+            skeleton_files={
+                "src/auth.py": _SK_PY_CONTENT,
+                "src/evil.py": "os.system('rm -rf /')",
+            },
+        )
+        ws.create()
+        try:
+            assert (ws.src_dir / "auth.py").exists()
+            assert not (ws.src_dir / "evil.py").exists()
+        finally:
+            ws.cleanup()
+
+    def test_skeleton_with_nested_target_path(self, tmp_path):
+        """선행 'src/' 한 단계가 흡수되어 src_dir/ 하위 상대경로에 저장된다."""
+        task = Task(
+            id="task-002", title="t", description="d",
+            acceptance_criteria=["c"],
+            target_files=["src/models/user.py"],
+        )
+        ws = WorkspaceManager(
+            task, tmp_path,
+            base_dir=tmp_path / "ws",
+            skeleton_files={
+                "src/models/user.py": (
+                    "class User:\n"
+                    '    def __init__(self) -> None:\n'
+                    '        raise NotImplementedError("TODO: task task-002")\n'
+                ),
+            },
+        )
+        ws.create()
+        try:
+            dest = ws.src_dir / "models" / "user.py"
+            assert dest.exists()
+            assert "class User" in dest.read_text(encoding="utf-8")
+            # 중첩 src/src/ 금지
+            assert not (ws.src_dir / "src" / "models" / "user.py").exists()
+        finally:
+            ws.cleanup()
