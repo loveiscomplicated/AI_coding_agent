@@ -139,11 +139,22 @@ class PipelineResult:
     models_used: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def failed(cls, task: Task, reason: str, metrics: "PipelineMetrics | None" = None) -> "PipelineResult":
+    def failed(
+        cls,
+        task: Task,
+        reason: str,
+        metrics: "PipelineMetrics | None" = None,
+        test_result: RunResult | None = None,
+    ) -> "PipelineResult":
         task.status = TaskStatus.FAILED
         task.failure_reason = reason
-        return cls(task=task, succeeded=False, failure_reason=reason,
-                   metrics=metrics or PipelineMetrics())
+        return cls(
+            task=task,
+            succeeded=False,
+            failure_reason=reason,
+            test_result=test_result,
+            metrics=metrics or PipelineMetrics(),
+        )
 
 
 # ── 파이프라인 ────────────────────────────────────────────────────────────────
@@ -638,6 +649,21 @@ class TDDPipeline:
                         "message": f"테스트 통과 — {docker_result.summary}"})
                     break
 
+                # ── 수집 실패(재시도 무의미) 조기 분기 ─────────────────────────
+                # [COLLECTION_ERROR] / [NO_TESTS_COLLECTED] 는 Implementer 재시도로
+                # 해결되지 않는다. intervention.classify_failure 가 태그+test_stdout
+                # 을 보고 적절한 상위 분기(TestWriter 재실행 등)를 선택하도록
+                # test_result 도 함께 전달한다.
+                if docker_result.failure_reason in ("[COLLECTION_ERROR]", "[NO_TESTS_COLLECTED]"):
+                    metrics.failed_stage = "testing"
+                    metrics.impl_retries = attempt
+                    return PipelineResult.failed(
+                        task,
+                        f"{docker_result.failure_reason} {docker_result.summary}",
+                        metrics=metrics,
+                        test_result=docker_result,
+                    )
+
                 task.retry_count = attempt + 1
                 task.last_error = docker_result.stdout
                 logger.warning("[%s] 테스트 실패, 재시도 %d회", task.id, task.retry_count)
@@ -649,11 +675,16 @@ class TDDPipeline:
                 if attempt == self.max_retries - 1:
                     metrics.failed_stage = "testing"
                     metrics.impl_retries = attempt
+                    _fr_prefix = (
+                        f"{docker_result.failure_reason} "
+                        if docker_result.failure_reason else ""
+                    )
                     return PipelineResult.failed(
                         task,
-                        f"테스트가 {self.max_retries}회 모두 실패했습니다.\n"
+                        f"{_fr_prefix}테스트가 {self.max_retries}회 모두 실패했습니다.\n"
                         f"마지막 오류:\n{docker_result.summary}",
                         metrics=metrics,
+                        test_result=docker_result,
                     )
 
             # ── Step 3: 코드 리뷰 ─────────────────────────────────────────────
