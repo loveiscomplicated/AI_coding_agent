@@ -79,6 +79,10 @@ class RunRequest(BaseModel):
     role_compaction_tuning_preset: str = ROLE_COMPACTION_PRESET_BALANCED
     role_compaction_tuning_overrides: dict[str, str] | None = None
     # 예: {"implementer": "aggressive", "reviewer": "default"}
+    auto_select_by_complexity: bool = False
+    # True이면 각 태스크의 complexity 라벨로 모델을 자동 선택한다.
+    # role_models 는 complexity mapping 의 상위 override로 유지된다 — 명시된 역할만
+    # role_models로 덮어쓰고, 나머지 역할은 complexity mapping 적용.
 
 
 def _parse_role_models(raw: dict[str, dict] | None) -> dict[str, RoleModelConfig] | None:
@@ -167,6 +171,7 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
                 role_compaction_tuning_enabled=body.role_compaction_tuning_enabled,
                 role_compaction_tuning_preset=body.role_compaction_tuning_preset,
                 role_compaction_tuning_overrides=body.role_compaction_tuning_overrides,
+                auto_select_by_complexity=body.auto_select_by_complexity,
             )
             with _lock:
                 _jobs[job_id]["status"] = "done"

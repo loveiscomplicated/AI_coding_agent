@@ -106,6 +106,64 @@ _DRAFT_SYSTEM_PROMPT = """\
 - 값: "python", "kotlin", "javascript", "typescript", "go", "ruby", "java" 등 소문자
 - 같은 프로젝트라도 태스크별로 언어가 다를 수 있다 (예: 백엔드 Go, 프론트엔드 TypeScript).
 
+[복잡도 평가 (complexity)]
+각 태스크에 `complexity` 필드를 `simple` / `standard` / `complex` 중 하나로 평가한다.
+파이프라인은 이 라벨을 보고 태스크별로 적절한 모델을 자동 선택할 수 있다.
+
+판정은 아래 3단계 절차를 **순서대로** 적용하라. 재현성이 중요하다.
+
+### 1단계 — 하드 규칙 (수치 기준, tier 1차 결정)
+각 축(파일 수, 선행 의존 수, 수락 기준 수)을 아래 표로 tier에 매핑하고
+**세 축 중 가장 높은 tier** 를 선택한다 (= max).
+
+**중요**: 이 프로젝트는 태스크 설계 규칙상 target_files는 3개 이하(초과 시 태스크 분할),
+acceptance_criteria는 3–5개가 권장된다(5 초과 시 경고). 따라서 **이 두 축은 simple/standard
+만 구분**하고, **complex tier 판정은 depends_on 축 또는 2단계 승격으로만 달성**된다.
+세 축의 임계값을 강제로 맞춰서 가짜 complex 판정이 나오지 않도록 설계된 것이다.
+
+| 축                  | simple | standard     | complex (이 축에서 도달 가능?)    |
+|---------------------|--------|--------------|-----------------------------------|
+| target_files 수     | 1      | 2 또는 3     | — (≤3 강제 제약)                  |
+| depends_on 수       | 0–1    | 2–3          | ≥ 4                               |
+| acceptance_criteria | ≤ 3    | 4 또는 5     | — (≤5 권장 제약)                  |
+
+max 규칙: 세 축 중 가장 높은 tier를 선택. 두 축이 complex를 주지 못해도 depends_on 축
+하나가 complex면 최종 complex이다.
+
+예:
+- files=1, deps=0, criteria=2 → (simple, simple, simple) → **simple**
+- files=2, deps=2, criteria=4 → (standard, standard, standard) → **standard**
+- files=3, deps=4, criteria=3 → (standard, complex, simple) → **complex**
+- files=1, deps=0, criteria=5 → (simple, simple, standard) → **standard**
+- files=3, deps=3, criteria=5 → (standard, standard, standard) → **standard** (보조 지표 승격만 남음)
+
+### 2단계 — 보조 규칙 (1단계 결과가 simple/standard일 때만 승격 검토)
+아래 보조 지표 중 **2개 이상** 해당하면 1단계 tier를 **한 단계 위로 승격**한다 (cap=complex).
+이미 complex라면 승격 없음.
+
+- 외부 라이브러리의 **비표준/내부 API 사용** (예: torch의 custom nn.Module 서브클래스, SQLAlchemy의 dialect-level hook)
+- **동시성/락/트랜잭션/원자성** 이 요구됨 (멀티스레드, async lock, DB 트랜잭션)
+- **도메인 특수 지식 필요** (암호학·신경과학·통계 모델·네트워크 프로토콜·컴파일러 이론 등)
+- **여러 서로 다른 외부 라이브러리** 를 한 태스크에서 동시 통합
+
+판단이 애매한 보조 지표는 세지 마라 — 2개를 확실하게 긍정할 때만 승격한다.
+
+### 3단계 — 기본값
+위 단계로도 확정 못 하면 `standard`.
+
+### 예시 판정 (절차 그대로 따라가며)
+1. "두 수의 최대공약수 함수 구현" (files=1, deps=0, criteria=2):
+   - 1단계 → simple.  2단계 보조 0 → 승격 없음. **simple**
+2. "YAML 파서 + 스키마 검증기" (files=2, deps=1, criteria=4):
+   - 1단계 축: (standard, simple, standard) → max = standard.
+   - 2단계 보조 0~1 → 승격 없음. **standard**
+3. "nn.Module 서브클래스 + 커스텀 loss" (files=2, deps=2, criteria=4):
+   - 1단계 → standard.  2단계 보조: (비표준 API) + (도메인) = 2 → 승격. **complex**
+4. "LSM 모델 클래스 (입력→리퀴드→리드아웃)" (files=3, deps=4, criteria=5):
+   - 1단계 → complex.  2단계 cap. **complex**
+5. "분산 락 매커니즘 (Redis 기반)" (files=2, deps=2, criteria=5):
+   - 1단계 → standard.  2단계 보조: (동시성) + (외부 lib) = 2 → 승격. **complex**
+
 [target_files 규칙]
 - 프로젝트의 language 필드에 맞는 파일 확장자와 네이밍 컨벤션을 사용하라.
   - Python: snake_case .py (예: fake_map_service.py)
@@ -148,7 +206,7 @@ _DRAFT_SYSTEM_PROMPT = """\
 description 필드는 위의 4개 섹션(### 목적과 배경 / ### 기술 요구사항 / ### 인접 컨텍스트 / ### 비고려 항목)을
 모두 포함한 긴 문자열이어야 합니다. JSON 문자열 내 개행은 "\\n"으로 이스케이프하세요.
 
-{"tasks": [{"id": "task-001", "title": "...", "description": "### 목적과 배경\\n...\\n\\n### 기술 요구사항\\n...\\n\\n### 인접 컨텍스트\\n...\\n\\n### 비고려 항목\\n...", "acceptance_criteria": ["..."], "target_files": ["Coordinate.kt", "Place.kt"], "depends_on": [], "task_type": "backend", "language": "kotlin"}]}
+{"tasks": [{"id": "task-001", "title": "...", "description": "### 목적과 배경\\n...\\n\\n### 기술 요구사항\\n...\\n\\n### 인접 컨텍스트\\n...\\n\\n### 비고려 항목\\n...", "acceptance_criteria": ["..."], "target_files": ["Coordinate.kt", "Place.kt"], "depends_on": [], "task_type": "backend", "language": "kotlin", "complexity": "standard"}]}
 """
 
 router = APIRouter()
@@ -325,6 +383,16 @@ def _run_draft(job_id: str, context_doc: str) -> None:
                 warnings.append(f"target_files {len(task['target_files'])}개 — 3개 이하로 태스크를 분할하세요")
             if len(task.get("acceptance_criteria") or []) > 5:
                 warnings.append(f"acceptance_criteria {len(task['acceptance_criteria'])}개 — 5개 이하로 줄이세요")
+
+            # complexity 값 검증 — 비정상 값 제거, 누락 시 경고만 (파이프라인에서 standard로 fallback)
+            _cx = task.get("complexity")
+            if _cx is not None and _cx not in ("simple", "standard", "complex"):
+                warnings.append(f"{task.get('id', '(id 없음)')}: complexity 값 비정상 '{_cx}' — 무시됨")
+                task.pop("complexity", None)
+            if "complexity" not in task:
+                warnings.append(
+                    f"{task.get('id', '(id 없음)')}: complexity 누락 — 복잡도 자동 선택 시 standard로 실행됨"
+                )
 
             # ── 후처리: target_files 경로 정규화 + 언어 불일치 보정 ────────
             _sanitize_task_draft(task, warnings)
