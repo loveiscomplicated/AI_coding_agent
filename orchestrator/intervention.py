@@ -163,10 +163,27 @@ def classify_and_analyze(
         # import/syntax 오류 — ENV_ERROR 로 이미 걸러지지 않은 경우는 문법 오류 가능성.
         # LLM analyze() 에 파일별 수정 힌트 생성을 맡긴다 (LOGIC_ERROR 와 동일 흐름).
         logger.info("[%s] COLLECTION_ERROR → LLM analyze (시도 %d)", task.id, attempt)
-        return analyze(task, failure_reason, attempt, previous_hints=previous_hints, role_models=role_models)
+        result = analyze(task, failure_reason, attempt, previous_hints=previous_hints, role_models=role_models)
+    else:
+        # LOGIC_ERROR → 기존 LLM 분석
+        result = analyze(task, failure_reason, attempt, previous_hints=previous_hints, role_models=role_models)
 
-    # LOGIC_ERROR → 기존 LLM 분석
-    return analyze(task, failure_reason, attempt, previous_hints=previous_hints, role_models=role_models)
+    # 3회차 재시도에서는 텍스트 힌트에 더해 스켈레톤 파일을 생성한다.
+    # run.py 가 AnalysisResult.skeleton_files 를 다음 WorkspaceManager 에 주입.
+    if result.should_retry and attempt >= 3 and task.target_files:
+        failure_context = f"{failure_reason[:500]}\n\n현재 힌트:\n{result.hint}"
+        skeletons, sk_usage, sk_log = generate_skeleton_files(
+            task, failure_context, role_models=role_models,
+        )
+        if skeletons:
+            result.skeleton_files = skeletons
+            # token_usage 는 tuple[int,int,int,int] — 요소별 합산
+            result.token_usage = tuple(  # type: ignore[assignment]
+                a + b for a, b in zip(result.token_usage, sk_usage)
+            )
+            result.call_log = result.call_log + sk_log
+
+    return result
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +281,75 @@ GIVE_UP: <포기 이유 한 줄>
 상위 오류가 있으면 하위 오류는 언급하지 마세요 (파일이 없으면 로직을 고쳐봤자 의미 없음).
 """
 
+_SKELETON_SYSTEM = """\
+당신은 다언어 스켈레톤 파일 생성기입니다.
+태스크 설명과 수락 기준, 실패 원인을 읽고 target_files 각각에 대해
+**구현 없는 스텁**을 생성하세요.
+
+규칙 (엄수):
+- 함수/클래스 signature 는 task 설명과 acceptance_criteria 에서 합리적으로 유추
+- 타입 힌트 / 타입 어노테이션 필수, 필요한 import 포함
+- 각 함수/클래스/메소드에는 짧은 docstring 또는 언어 관용의 문서 주석을 포함
+  (한 줄 요약이면 충분하며, 구현 설명은 금지)
+- 모든 함수/메소드 body 는 사용자 메시지의 "파일별 STUB 라인 표"에서
+  해당 파일에 지정된 라인 **한 줄**만 사용
+- 각 파일은 자신의 확장자에 맞는 문법을 유지해야 하며, 다른 파일의 STUB 라인을
+  재사용하면 안 된다
+- 실제 로직·예시·주석 설명 금지 (에이전트가 구현함)
+- target_files 에 없는 경로는 절대 생성하지 말 것
+- 파일 확장자에 맞는 언어 문법 유지 (ex. `.py` 는 Python, `.ts` 는 TypeScript)
+
+응답 형식 (엄수):
+각 파일을 다음 블록으로 구분하여 출력하세요. 코드블록 마커(```) 금지.
+
+===FILE: <relative_path>===
+<파일 전체 내용>
+===END===
+
+파일 여러 개면 위 블록을 반복하세요. 블록 외 설명 텍스트 금지.
+"""
+
+
+_STUB_BY_LANGUAGE: dict[str, str] = {
+    "python": 'raise NotImplementedError("TODO: task {task_id}")',
+    "kotlin": 'TODO("TODO: task {task_id}")',
+    "typescript": 'throw new Error("TODO: task {task_id}");',
+    "javascript": 'throw new Error("TODO: task {task_id}");',
+    "go": 'panic("TODO: task {task_id}")',
+    "java": 'throw new UnsupportedOperationException("TODO: task {task_id}");',
+    "rust": 'unimplemented!("TODO: task {task_id}")',
+}
+
+
+def _stub_line_for_language(language: str, task_id: str) -> str:
+    """task.language 에 해당하는 단일 라인 스텁을 반환. 미지원 언어는 python 폴백."""
+    normalized = (language or "python").strip().lower()
+    template = _STUB_BY_LANGUAGE.get(normalized, _STUB_BY_LANGUAGE["python"])
+    return template.format(task_id=task_id)
+
+
+_LANGUAGE_BY_EXTENSION: dict[str, str] = {
+    ".py": "python",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".go": "go",
+    ".java": "java",
+    ".rs": "rust",
+}
+
+
+def _stub_line_for_target_file(rel_path: str, task_language: str, task_id: str) -> str:
+    """파일 확장자를 우선으로 스텁 라인을 고른다. 모를 때만 task.language 로 폴백."""
+    suffix = Path(rel_path).suffix.lower()
+    language = _LANGUAGE_BY_EXTENSION.get(suffix, task_language)
+    return _stub_line_for_language(language, task_id)
+
 _REPORT_SYSTEM = """\
 당신은 소프트웨어 개발 프로젝트 관리자입니다.
 AI 코딩 에이전트가 태스크를 여러 번 시도했지만 실패했습니다.
@@ -295,6 +381,9 @@ class AnalysisResult:
     raw: str
     token_usage: tuple[int, int, int, int] = (0, 0, 0, 0)
     call_log: list[dict] = field(default_factory=list)
+    # 3회차 이상 재시도 시 LLM이 생성한 target_files 스켈레톤. {relative_path: content}.
+    # run.py 가 다음 WorkspaceManager 에 전달하여 빈 placeholder 파일에만 주입한다.
+    skeleton_files: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -473,6 +562,157 @@ id: {task.id}
         token_usage=token_usage,
         call_log=call_log,
     )
+
+
+# ── 스켈레톤 파일 생성 (3회차 재시도 전용) ───────────────────────────────────
+
+_SKELETON_BLOCK_RE = re.compile(
+    r"===FILE:\s*(.+?)\s*===\s*\n(.*?)\n===END===",
+    re.DOTALL,
+)
+
+
+def _parse_skeleton_response(raw: str, allowed_paths: set[str]) -> dict[str, str]:
+    """LLM 응답에서 `===FILE: path===\\n...\\n===END===` 블록을 추출해 dict로 반환.
+
+    `allowed_paths` 에 없는 경로는 경고 로그 후 스킵 (LLM 환각 방지).
+    """
+    result: dict[str, str] = {}
+    for match in _SKELETON_BLOCK_RE.finditer(raw):
+        path = match.group(1).strip()
+        content = match.group(2)
+        if path not in allowed_paths:
+            logger.warning("스켈레톤 응답 경로가 target_files 에 없음, 스킵: %s", path)
+            continue
+        result[path] = content
+    if not result:
+        logger.warning("스켈레톤 파싱 결과 비어있음. raw[:300]=%s", raw[:300])
+    return result
+
+
+def _ensure_full_skeleton_coverage(
+    skeletons: dict[str, str],
+    expected_paths: list[str],
+) -> dict[str, str]:
+    """target_files 전체를 덮지 못한 스켈레톤 응답은 보수적으로 폐기한다."""
+    missing = [path for path in expected_paths if path not in skeletons]
+    if not missing:
+        return skeletons
+    logger.warning(
+        "스켈레톤 응답 일부 누락 — 전체 폐기: missing=%s produced=%s",
+        missing,
+        sorted(skeletons.keys()),
+    )
+    return {}
+
+
+def _resolve_intervention_llm_for_skeleton(
+    task: Task,
+    role_models: dict[str, RoleModelConfig] | None,
+) -> BaseLLMClient | None:
+    """skeleton 생성용 LLM 클라이언트를 선택한다.
+
+    선택 우선순위는 `analyze()` 와 동일:
+      1) role_models['intervention'] override
+      2) auto_select_by_complexity + task.complexity
+      3) 전역 _model_capable (_analyze_llm 은 system prompt 가 달라 재사용 불가)
+    """
+    intervention_override = (role_models or {}).get(ROLE_INTERVENTION)
+    use_override = intervention_override and (
+        intervention_override.provider or intervention_override.model
+    )
+
+    base_provider = ""
+    base_model = ""
+    if _auto_select_by_complexity and _complexity_map:
+        from agents.roles import resolve_complexity_model
+        base_provider, base_model = resolve_complexity_model(
+            ROLE_INTERVENTION, task.complexity, _complexity_map
+        )
+    elif _model_capable:
+        base_provider = _provider_capable or _provider
+        base_model = _model_capable
+
+    if use_override:
+        from agents.roles import compose_role_override
+        provider, model = compose_role_override(
+            intervention_override, base_provider, base_model,
+        )
+    else:
+        provider, model = base_provider, base_model
+
+    if not (provider and model):
+        logger.error("스켈레톤 LLM 해석 실패: provider=%r model=%r", provider, model)
+        return None
+
+    return create_client(
+        provider,
+        LLMConfig(model=model, system_prompt=_SKELETON_SYSTEM, max_tokens=2048),
+    )
+
+
+def generate_skeleton_files(
+    task: Task,
+    failure_context: str,
+    role_models: dict[str, RoleModelConfig] | None = None,
+) -> tuple[dict[str, str], tuple[int, int, int, int], list[dict]]:
+    """3회차 재시도 전에 target_files 각각의 스텁을 LLM으로 생성한다.
+
+    Returns:
+        (skeletons, token_usage, call_log)
+        skeletons: {relative_path: file_content}. 파싱 실패 시 빈 dict.
+        token_usage: (input, output, cached_read, cached_write)
+        call_log: 모델 호출 메타데이터 (_accumulate_external_tokens 에 누적 가능)
+    """
+    if not task.target_files:
+        return {}, (0, 0, 0, 0), []
+
+    llm = _resolve_intervention_llm_for_skeleton(task, role_models)
+    if llm is None:
+        return {}, (0, 0, 0, 0), []
+
+    target_list = "\n".join(f"- {p}" for p in task.target_files)
+    stub_table = "\n".join(
+        f"- {path}: {_stub_line_for_target_file(path, task.language, task.id)}"
+        for path in task.target_files
+    )
+    user_msg = f"""## 태스크
+id: {task.id}
+제목: {task.title}
+설명: {task.description}
+language: {task.language}
+
+## 수락 기준
+{task.acceptance_criteria_text()}
+
+## target_files
+{target_list}
+
+## 직전 실패 컨텍스트
+{failure_context[:1500]}
+
+## 파일별 STUB 라인 (각 파일의 모든 함수/메소드 body 로 해당 라인 한 줄만 사용)
+{stub_table}
+
+위 target_files 각각에 대해 스텁을 생성하세요.
+각 파일은 위 표에서 자기 경로에 대응하는 STUB 라인만 사용해야 합니다.
+모든 함수/클래스/메소드에는 짧은 docstring 또는 언어별 문서 주석을 포함하세요.
+target_files 에 있는 모든 경로를 빠짐없이 생성해야 하며, 하나라도 누락하면 실패입니다.
+"""
+
+    try:
+        response = llm.chat([Message(role="user", content=user_msg)])
+    except Exception as e:
+        logger.error("[%s] 스켈레톤 LLM 호출 실패: %s", task.id, e)
+        return {}, (0, 0, 0, 0), []
+
+    raw = _extract_text(response)
+    token_usage, call_log = _usage_from_response(response)
+    skeletons = _parse_skeleton_response(raw, allowed_paths=set(task.target_files))
+    skeletons = _ensure_full_skeleton_coverage(skeletons, task.target_files)
+    logger.info("[%s] 스켈레톤 생성: %d/%d 파일",
+                task.id, len(skeletons), len(task.target_files))
+    return skeletons, token_usage, call_log
 
 
 def generate_report_with_metrics(
