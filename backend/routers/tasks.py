@@ -25,7 +25,7 @@ from llm import LLMConfig, Message, create_client
 from orchestrator.task import Task, load_tasks, save_tasks
 from orchestrator.task_redesign import create_redesign_llm, redesign_task
 from project_paths import resolve_data_dir, resolve_tasks_path
-from tools.hotline_tools import get_redesign_model
+from tools.hotline_tools import get_redesign_model, get_task_draft_model
 
 # ── 초안 생성 잡 저장소 ──────────────────────────────────────────────────────
 _draft_jobs: dict[str, dict] = {}
@@ -341,9 +341,12 @@ def _sanitize_task_draft(task: dict, warnings: list[str]) -> None:
 def _run_draft(job_id: str, context_doc: str) -> None:
     """백그라운드 스레드에서 LLM 초안 생성을 실행한다."""
     try:
+        draft_info = get_task_draft_model()
+        draft_provider = draft_info["provider"] or LLM_PROVIDER
+        draft_model = draft_info["model"] or LLM_MODEL_CAPABLE
         client = create_client(
-            LLM_PROVIDER,
-            LLMConfig(model=LLM_MODEL_CAPABLE, max_tokens=16000, system_prompt=_DRAFT_SYSTEM_PROMPT),
+            draft_provider,
+            LLMConfig(model=draft_model, max_tokens=16000, system_prompt=_DRAFT_SYSTEM_PROMPT),
         )
         llm_response = client.chat([Message(role="user", content=context_doc)])
         raw = ""

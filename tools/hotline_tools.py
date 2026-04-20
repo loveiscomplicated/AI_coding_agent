@@ -42,6 +42,10 @@ _hotline_conv_model: str = ""
 _redesign_provider: str = ""
 _redesign_model: str = ""
 
+# 태스크 초안 생성용 LLM 설정 (런타임 변경 지원용)
+_task_draft_provider: str = ""
+_task_draft_model: str = ""
+
 
 def set_llm(conv_llm: BaseLLMClient, sum_llm: BaseLLMClient) -> None:
     """
@@ -83,6 +87,18 @@ def set_redesign_model(model: str, provider: str) -> None:
     global _redesign_provider, _redesign_model
     _redesign_provider = provider
     _redesign_model = model
+
+
+def get_task_draft_model() -> dict:
+    """현재 태스크 초안 생성용 LLM provider/model을 반환한다."""
+    return {"provider": _task_draft_provider, "model": _task_draft_model}
+
+
+def set_task_draft_model(model: str, provider: str) -> None:
+    """태스크 초안 생성용 LLM 모델을 런타임에 변경한다."""
+    global _task_draft_provider, _task_draft_model
+    _task_draft_provider = provider
+    _task_draft_model = model
 
 
 def create_hotline_llms(provider: str, model: str) -> tuple[BaseLLMClient, BaseLLMClient]:

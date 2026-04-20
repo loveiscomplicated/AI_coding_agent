@@ -12,7 +12,11 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.config import LLM_PROVIDER, LLM_MODEL_FAST, LLM_MODEL_CAPABLE
-from tools.hotline_tools import get_conv_model, set_conv_model, get_redesign_model, set_redesign_model
+from tools.hotline_tools import (
+    get_conv_model, set_conv_model,
+    get_redesign_model, set_redesign_model,
+    get_task_draft_model, set_task_draft_model,
+)
 
 router = APIRouter()
 
@@ -32,6 +36,8 @@ class LLMSettingsRequest(BaseModel):
     hotline_conv_provider: str
     redesign_model: str = ""
     redesign_provider: str = ""
+    task_draft_model: str = ""
+    task_draft_provider: str = ""
 
 
 @router.get("/config/llm")
@@ -39,17 +45,20 @@ def get_llm_settings() -> dict:
     """런타임 LLM 설정을 반환한다."""
     conv_info = get_conv_model()
     redesign_info = get_redesign_model()
+    draft_info = get_task_draft_model()
     return {
         "hotline_conv_model": conv_info["model"] or LLM_MODEL_CAPABLE,
         "hotline_conv_provider": conv_info["provider"] or LLM_PROVIDER,
         "redesign_model": redesign_info["model"] or LLM_MODEL_CAPABLE,
         "redesign_provider": redesign_info["provider"] or LLM_PROVIDER,
+        "task_draft_model": draft_info["model"] or LLM_MODEL_CAPABLE,
+        "task_draft_provider": draft_info["provider"] or LLM_PROVIDER,
     }
 
 
 @router.patch("/config/llm")
 def update_llm_settings(body: LLMSettingsRequest) -> dict:
-    """Discord 대화용 및 태스크 재설계용 LLM 모델을 런타임에 변경한다."""
+    """Discord 대화용, 태스크 재설계용, 태스크 초안 생성용 LLM 모델을 런타임에 변경한다."""
     model = body.hotline_conv_model.strip()
     provider = body.hotline_conv_provider.strip()
     if not model:
@@ -63,11 +72,18 @@ def update_llm_settings(body: LLMSettingsRequest) -> dict:
     if redesign_m and redesign_p:
         set_redesign_model(redesign_m, redesign_p)
 
+    draft_m = body.task_draft_model.strip()
+    draft_p = body.task_draft_provider.strip()
+    if draft_m and draft_p:
+        set_task_draft_model(draft_m, draft_p)
+
     return {
         "hotline_conv_model": model,
         "hotline_conv_provider": provider,
         "redesign_model": redesign_m or model,
         "redesign_provider": redesign_p or provider,
+        "task_draft_model": draft_m or model,
+        "task_draft_provider": draft_p or provider,
     }
 
 
