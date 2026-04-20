@@ -134,6 +134,17 @@ async def list_models() -> dict[str, Any]:
     }
 
 
+@router.get("/complexity-map")
+async def get_complexity_map() -> dict[str, dict[str, dict[str, str]]]:
+    """복잡도 기반 자동 선택에 사용되는 tier → (fast/capable provider·model) 매핑을 반환한다.
+
+    백엔드의 COMPLEXITY_MODEL_MAP(환경 변수 override 반영 결과)을 그대로 노출하여
+    프론트엔드가 런타임 실제 매핑을 표시할 수 있게 한다.
+    """
+    from backend.config import COMPLEXITY_MODEL_MAP
+    return {"map": COMPLEXITY_MODEL_MAP}
+
+
 # ── 요청 모델 ─────────────────────────────────────────────────────────────────
 
 

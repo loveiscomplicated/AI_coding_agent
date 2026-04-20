@@ -51,3 +51,50 @@ DISCORD_GUILD_ID: int | None = (
     if os.environ.get("DISCORD_GUILD_ID")
     else None
 )
+
+
+# ── 복잡도 기반 자동 모델 매핑 ────────────────────────────────────────────────
+# 태스크의 `complexity` 라벨(simple/standard/complex)에 따라 fast/capable 모델을
+# 자동으로 선택한다. 파이프라인 모달의 "복잡도 기반 자동 선택" 토글과 연동된다.
+# 환경 변수로 런타임 오버라이드 가능: COMPLEXITY_SIMPLE_FAST=openai:gpt-4.1-mini
+
+def _parse_complexity_env(env_name: str) -> tuple[str, str] | None:
+    raw = os.environ.get(env_name)
+    if not raw or ":" not in raw:
+        return None
+    provider, model = raw.split(":", 1)
+    provider = provider.strip()
+    model = model.strip()
+    if not provider or not model:
+        return None
+    return provider, model
+
+
+COMPLEXITY_MODEL_MAP: dict[str, dict[str, str]] = {
+    "simple": {
+        "provider_fast": "openai",
+        "model_fast": "gpt-4.1-mini",
+        "provider_capable": "gemini",
+        "model_capable": "gemini-2.5-flash-lite",
+    },
+    "standard": {
+        "provider_fast": "openai",
+        "model_fast": "gpt-5-mini",
+        "provider_capable": "gemini",
+        "model_capable": "gemini-2.5-flash",
+    },
+    "complex": {
+        "provider_fast": "openai",
+        "model_fast": "gpt-5",
+        "provider_capable": "gemini",
+        "model_capable": "gemini-3-pro-preview",
+    },
+}
+
+for _tier in ("simple", "standard", "complex"):
+    for _kind in ("fast", "capable"):
+        _override = _parse_complexity_env(f"COMPLEXITY_{_tier.upper()}_{_kind.upper()}")
+        if _override:
+            _p, _m = _override
+            COMPLEXITY_MODEL_MAP[_tier][f"provider_{_kind}"] = _p
+            COMPLEXITY_MODEL_MAP[_tier][f"model_{_kind}"] = _m

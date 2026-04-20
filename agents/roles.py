@@ -160,6 +160,44 @@ def resolve_model_for_role(
     return resolved_provider, resolved_model
 
 
+def resolve_complexity_model(
+    role: str,
+    complexity: str | None,
+    complexity_map: dict[str, dict[str, str]],
+) -> tuple[str, str]:
+    """태스크 복잡도에 기반한 (provider, model) 반환.
+
+    - `complexity`가 "simple"/"standard"/"complex" 중 하나면 해당 tier 사용
+    - 그 외 값(None 포함)은 "standard"로 fallback
+    - orchestrator/intervention 역할은 capable, 나머지 코딩 역할은 fast 사용
+    """
+    tier = complexity if complexity in complexity_map else "standard"
+    bucket = complexity_map[tier]
+    if role in (ROLE_ORCHESTRATOR, ROLE_INTERVENTION):
+        return bucket["provider_capable"], bucket["model_capable"]
+    return bucket["provider_fast"], bucket["model_fast"]
+
+
+def compose_role_override(
+    role_cfg: "RoleModelConfig | None",
+    base_provider: str,
+    base_model: str,
+) -> tuple[str, str]:
+    """부분 오버라이드 합성: role_cfg에 지정된 필드만 base를 덮어쓴다.
+
+    role_cfg가 ``{provider: 'anthropic'}`` 처럼 일부만 지정되어 있으면 provider는
+    override 값을, model은 base(복잡도 매핑 또는 기본 fast/capable) 값을 사용한다.
+    파이프라인 전반(코딩 역할, intervention, merge_agent)에서 동일한 합성 규칙을
+    사용하여 계약 일관성을 보장한다.
+    """
+    if role_cfg is None:
+        return base_provider, base_model
+    return (
+        role_cfg.provider or base_provider,
+        role_cfg.model or base_model,
+    )
+
+
 # ── 역할 데이터 클래스 ────────────────────────────────────────────────────────
 
 
