@@ -169,12 +169,17 @@ class WorkspaceManager:
         repo_path: str | Path,
         keep_on_failure: bool = True,
         base_dir: str | Path | None = None,
+        skeleton_files: dict[str, str] | None = None,
     ):
         self.task = task
         self.repo_path = Path(repo_path).resolve()
         self.keep_on_failure = keep_on_failure
         self._base_dir = Path(base_dir) if base_dir else self.repo_path / ".agent-workspace"
         self._path: Path | None = None
+        # intervention.generate_skeleton_files() 의 결과물. 3회차 재시도 시 run.py 가
+        # 다음 workspace 생성자에 주입한다. 빈 placeholder (0바이트/미존재) 인 경우만 기록
+        # — 에이전트가 이미 작성한 파일은 덮어쓰지 않는다.
+        self._skeleton_files: dict[str, str] = skeleton_files or {}
 
     # ── 컨텍스트 매니저 ───────────────────────────────────────────────────────
 
@@ -213,6 +218,7 @@ class WorkspaceManager:
         (self._path / "context").mkdir(exist_ok=True)
 
         self._copy_target_files()
+        self._inject_intervention_skeletons()
         self._inject_test_skeletons()
         self._copy_requirements()
         self._copy_project_structure()
@@ -320,6 +326,45 @@ class WorkspaceManager:
             except OSError:
                 missing.append(rel_path)
         return missing
+
+    def _inject_intervention_skeletons(self) -> None:
+        """intervention.generate_skeleton_files() 가 생성한 target_file 스텁을 주입한다.
+
+        호출 순서: `_copy_target_files()` 직후. `_copy_target_files()` 는 repo 에
+        파일이 없으면 ``dest.touch()`` 로 0바이트 placeholder 를 만들어둔다. 이
+        메소드는 그 placeholder (또는 아예 없는 경로) 에만 스켈레톤 내용을
+        주입하고, 에이전트가 이미 내용을 쓴 (``st_size > 0``) 파일은 절대
+        덮어쓰지 않는다 — 직전 재시도에서 쓴 부분 작업물 보호.
+
+        ``_skeleton_files`` 의 키는 ``task.target_files`` 에 포함된 repo 상대
+        경로여야 한다. 포함되지 않은 경로는 경고 로그 후 스킵 (LLM 환각 방지).
+        """
+        if not self._skeleton_files:
+            return
+
+        allowed = set(self.task.target_files)
+        for rel_path, content in self._skeleton_files.items():
+            if rel_path not in allowed:
+                logger.warning(
+                    "[%s] 스켈레톤 경로가 target_files 외부 — 스킵: %s",
+                    self.task.id, rel_path,
+                )
+                continue
+            dest = self.src_dir / strip_src_prefix(rel_path)
+            if dest.exists():
+                try:
+                    size = dest.stat().st_size
+                except OSError:
+                    size = 0
+                if size > 0:
+                    logger.info(
+                        "[%s] 기존 작업물 보호 — 스켈레톤 주입 스킵: %s (size=%d)",
+                        self.task.id, dest, size,
+                    )
+                    continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content, encoding="utf-8")
+            logger.info("[%s] intervention 스켈레톤 주입: %s", self.task.id, dest)
 
     def _inject_test_skeletons(self) -> None:
         """
