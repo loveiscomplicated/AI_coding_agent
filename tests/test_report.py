@@ -422,3 +422,73 @@ class TestCostCalculation:
         path.write_text(_yaml.safe_dump(legacy), encoding="utf-8")
         loaded = load_report("task-legacy", reports_dir=tmp_path)
         assert loaded.cost_estimation_quality == "missing"
+
+
+# ── T2: iteration 시계열 요약 집계 ──────────────────────────────────────────
+
+class TestIterationTimeSeriesAggregation:
+    """build_report 가 metrics.call_logs 에서 iteration 요약을 집계하는지 검증."""
+
+    def test_iteration_count_by_role_aggregated(self):
+        """role 별 LLM 호출 수를 정확히 집계한다. compaction 이벤트는 제외."""
+        task = make_task()
+        result = _FakePipelineResult(succeeded=True)
+        # test_writer: 2회, implementer: 3회 + compaction 이벤트 1개
+        result.metrics.call_logs = {
+            "test_writer": [
+                {"iteration": 1, "input_tokens": 100, "output_tokens": 10, "cached_read_tokens": 0},
+                {"iteration": 2, "input_tokens": 120, "output_tokens": 15, "cached_read_tokens": 0},
+            ],
+            "implementer": [
+                {"iteration": 1, "input_tokens": 200, "output_tokens": 20, "cached_read_tokens": 0},
+                {"iteration": 2, "input_tokens": 300, "output_tokens": 30, "cached_read_tokens": 50},
+                {"iteration": 2, "event": "compaction", "net_tokens_saved": 1000},
+                {"iteration": 3, "input_tokens": 50, "output_tokens": 10, "cached_read_tokens": 500},
+            ],
+        }
+
+        report = build_report(task, result)
+        assert report.iteration_count_by_role == {
+            "test_writer": 2,
+            "implementer": 3,  # compaction 이벤트는 제외
+        }
+
+    def test_max_single_iteration_tokens_recorded(self):
+        """역할 무관 최대 단일 iteration 토큰 (input+output+cached_read) 을 기록한다."""
+        task = make_task()
+        result = _FakePipelineResult(succeeded=True)
+        result.metrics.call_logs = {
+            "test_writer": [
+                {"iteration": 1, "input_tokens": 100, "output_tokens": 10, "cached_read_tokens": 0},
+            ],
+            "implementer": [
+                {"iteration": 1, "input_tokens": 5000, "output_tokens": 500, "cached_read_tokens": 1000},
+                {"iteration": 2, "input_tokens": 200, "output_tokens": 20, "cached_read_tokens": 0},
+            ],
+        }
+
+        report = build_report(task, result)
+        # implementer iter 1: 5000 + 500 + 1000 = 6500
+        assert report.max_single_iteration_tokens == 6500
+
+    def test_zero_values_when_no_call_logs(self):
+        task = make_task()
+        result = _FakePipelineResult(succeeded=True)
+        # call_logs 비어있음
+        report = build_report(task, result)
+        assert report.max_single_iteration_tokens == 0
+        assert report.iteration_count_by_role == {}
+
+    def test_roundtrip_preserves_iteration_metrics(self, tmp_path):
+        report = TaskReport(
+            task_id="task-007",
+            title="시계열 테스트",
+            status="COMPLETED",
+            completed_at="2026-04-20T00:00:00+00:00",
+            max_single_iteration_tokens=45000,
+            iteration_count_by_role={"implementer": 47, "test_writer": 8},
+        )
+        save_report(report, reports_dir=tmp_path)
+        loaded = load_report("task-007", reports_dir=tmp_path)
+        assert loaded.max_single_iteration_tokens == 45000
+        assert loaded.iteration_count_by_role == {"implementer": 47, "test_writer": 8}

@@ -48,6 +48,10 @@ _APPROVAL_REQUIRED = {"write_file", "edit_file", "append_to_file", "execute_comm
 # 파일 쓰기 도구 (코드블록 감지 → 도구 사용 유도에 사용)
 _WRITE_TOOLS = frozenset({"write_file", "edit_file", "append_to_file"})
 
+# compaction 전역 기본 임계치. 역할별 오버라이드가 없을 때 사용된다.
+# 낮출 때는 10_000 아래로 내리지 말 것 — 요약 비용이 절감을 초과한다.
+CONFIG_DEFAULT_THRESHOLD = 30000
+
 
 # ── 타입 정의 ─────────────────────────────────────────────────────────────────
 
@@ -174,11 +178,12 @@ class ReactLoop:
         context_pruner=None,             # [Module 3] SemanticContextPruner | None
         # ── 시맨틱 auto-compaction ──────────────────────────────────────────
         compaction_enabled: bool = True,
-        compaction_threshold_tokens: int = 30000,
+        compaction_threshold_tokens: int = CONFIG_DEFAULT_THRESHOLD,
         fast_client_for_compaction=None,
         compaction_keep_first_n: int = 2,
         compaction_keep_last_n: int = 4,
         compaction_cooldown_iters: int = 2,   # 연쇄 compaction 방지
+        role_name: str | None = None,  # call_log 엔트리에 기록되는 역할 태그
     ):
         self.llm: BaseLLMClient = llm
         self.max_iterations = max_iterations
@@ -204,6 +209,7 @@ class ReactLoop:
         self.compaction_keep_first_n = int(compaction_keep_first_n)
         self.compaction_keep_last_n = int(compaction_keep_last_n)
         self.compaction_cooldown_iters = int(compaction_cooldown_iters)
+        self.role_name = role_name
         # run 별로 리셋되는 쿨다운 상태 (_maybe_compact 에서만 수정)
         self._last_compaction_iter: int | None = None
         self.TOOLS_SCHEMA = self.get_tools_schema()
@@ -294,21 +300,32 @@ class ReactLoop:
             total_cached_read_tokens += _cached_read_tokens
             total_cached_write_tokens += _cached_write_tokens
 
-            # per-call 로그 기록
+            # per-call 로그 기록 — T2: cumulative_total / elapsed_ms / role 추가.
+            # cumulative_total 은 input+output+cached_read 누적 (총 컨텍스트 소모량).
+            # elapsed_ms 는 LLM 호출 단독 시간 (iteration 후반에 덮어쓰지 않는다 —
+            # compaction/tool 실행 시간은 별도 compaction 이벤트로 기록되므로,
+            # 이 값은 "한 번의 LLM 호출이 얼마나 걸렸는가" 만 나타낸다).
             _tool_names = [
                 b.name if hasattr(b, "name") else b.get("name", "")
                 for b in (response.content or [])
                 if (hasattr(b, "type") and getattr(b, "type") == "tool_use")
                 or (isinstance(b, dict) and b.get("type") == "tool_use")
             ]
+            _call_elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            _cumulative_total = (
+                total_input_tokens + total_output_tokens + total_cached_read_tokens
+            )
             call_log.append({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "iteration": i + 1,
+                "role": self.role_name or "",
                 "model": getattr(response, "model", ""),
                 "input_tokens": _input_tokens,
                 "output_tokens": _output_tokens,
                 "cached_read_tokens": _cached_read_tokens,
                 "cached_write_tokens": _cached_write_tokens,
+                "cumulative_total": _cumulative_total,
+                "elapsed_ms": _call_elapsed_ms,
                 "tool_calls": _tool_names,
             })
 

@@ -186,6 +186,7 @@ def build_report(
     coding_agent_model: str = "",
     orchestrator_summary: str = "",
     models_used: dict[str, str] | None = None,
+    call_logs_dir: Path | None = None,
 ) -> TaskReport:
     """PipelineResult → TaskReport 변환."""
     test_count = 0
@@ -256,7 +257,27 @@ def build_report(
     if m.call_logs:
         from core.token_log import write_call_log
         for _log_role, _entries in m.call_logs.items():
-            write_call_log(task.id, _log_role, _entries)
+            write_call_log(task.id, _log_role, _entries, log_dir=call_logs_dir)
+
+    # T2: iteration 시계열 요약 집계.
+    # max_single_iteration_tokens 는 역할 무관 전체에서의 최대 단일 iteration 토큰.
+    # iteration_count_by_role 은 compaction 이벤트를 제외한 실제 LLM 호출 수.
+    _max_single_iter_tokens = 0
+    _iter_count_by_role: dict[str, int] = {}
+    for _log_role, _entries in (m.call_logs or {}).items():
+        for _entry in _entries:
+            # compaction 이벤트는 LLM chat 호출이 아니므로 iteration 카운트 제외.
+            if _entry.get("event") == "compaction":
+                continue
+            _iter_count_by_role[_log_role] = _iter_count_by_role.get(_log_role, 0) + 1
+            # iteration 당 토큰: input + output + cached_read (총 컨텍스트 소모량).
+            _iter_tokens = (
+                (_entry.get("input_tokens") or 0)
+                + (_entry.get("output_tokens") or 0)
+                + (_entry.get("cached_read_tokens") or 0)
+            )
+            if _iter_tokens > _max_single_iter_tokens:
+                _max_single_iter_tokens = _iter_tokens
     report = TaskReport(
         task_id=task.id,
         title=task.title,
@@ -293,6 +314,8 @@ def build_report(
         cache_hit_rate=_cache_hit_rate,
         token_usage=_token_usage or None,
         cost_estimation_quality=_cost_quality,
+        max_single_iteration_tokens=_max_single_iter_tokens,
+        iteration_count_by_role=_iter_count_by_role,
     )
 
     # 불가능한 상태 조합 감지 — explicit raise (Python -O 에서도 활성화)

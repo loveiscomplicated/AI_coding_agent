@@ -688,3 +688,239 @@ class TestOnToolApproval:
 
         assert len(received) == 1
         assert received[0].is_error is True
+
+
+# ── T2: 역할별 compaction threshold + iteration 시계열 ─────────────────────
+
+
+class TestRoleCompactionThreshold:
+    """ScopedReactLoop 가 role.compaction_threshold 를 ReactLoop 에 전달하는지 검증."""
+
+    def _make_llm(self):
+        from unittest.mock import MagicMock
+        llm = MagicMock()
+        llm.config = MagicMock()
+        llm.config.system_prompt = "original"
+        type(llm).__name__ = "ClaudeClient"
+        return llm
+
+    def test_builtin_role_uses_default_threshold_when_tuning_disabled(self, tmp_path):
+        """내장 역할의 미검증 튜닝값은 기본적으로 비활성화되어 30k fallback 사용."""
+        from agents.roles import IMPLEMENTER
+        from agents.scoped_loop import ScopedReactLoop
+        from core.loop import CONFIG_DEFAULT_THRESHOLD
+
+        loop = ScopedReactLoop(
+            llm=self._make_llm(),
+            role=IMPLEMENTER,
+            workspace_dir=tmp_path,
+        )
+        assert loop.compaction_threshold_tokens == CONFIG_DEFAULT_THRESHOLD
+        assert loop.role_name == "implementer"
+
+    def test_builtin_thresholds_enabled_by_env_flag(self, tmp_path, monkeypatch):
+        from agents.roles import IMPLEMENTER, REVIEWER, TEST_WRITER
+        from agents.scoped_loop import ScopedReactLoop
+
+        monkeypatch.setenv("ENABLE_ROLE_COMPACTION_TUNING", "1")
+
+        impl_loop = ScopedReactLoop(
+            llm=self._make_llm(),
+            role=IMPLEMENTER,
+            workspace_dir=tmp_path,
+        )
+        tw_loop = ScopedReactLoop(
+            llm=self._make_llm(),
+            role=TEST_WRITER,
+            workspace_dir=tmp_path,
+        )
+        rev_loop = ScopedReactLoop(
+            llm=self._make_llm(),
+            role=REVIEWER,
+            workspace_dir=tmp_path,
+        )
+
+        assert impl_loop.compaction_threshold_tokens == 18000
+        assert tw_loop.compaction_threshold_tokens == 20000
+        assert rev_loop.compaction_threshold_tokens == 25000
+
+    def test_builtin_thresholds_enabled_by_run_preset(self, tmp_path):
+        from agents.roles import IMPLEMENTER, REVIEWER, TEST_WRITER
+        from agents.scoped_loop import ScopedReactLoop
+
+        impl_loop = ScopedReactLoop(
+            llm=self._make_llm(),
+            role=IMPLEMENTER,
+            workspace_dir=tmp_path,
+            role_compaction_tuning_enabled=True,
+            role_compaction_tuning_preset="balanced",
+        )
+        tw_loop = ScopedReactLoop(
+            llm=self._make_llm(),
+            role=TEST_WRITER,
+            workspace_dir=tmp_path,
+            role_compaction_tuning_enabled=True,
+            role_compaction_tuning_preset="balanced",
+        )
+        rev_loop = ScopedReactLoop(
+            llm=self._make_llm(),
+            role=REVIEWER,
+            workspace_dir=tmp_path,
+            role_compaction_tuning_enabled=True,
+            role_compaction_tuning_preset="balanced",
+        )
+
+        assert impl_loop.compaction_threshold_tokens == 20000
+        assert tw_loop.compaction_threshold_tokens == 22000
+        assert rev_loop.compaction_threshold_tokens == 26000
+
+    def test_role_specific_env_override(self, tmp_path, monkeypatch):
+        from agents.roles import TEST_WRITER
+        from agents.scoped_loop import ScopedReactLoop
+
+        monkeypatch.setenv("TEST_WRITER_COMPACTION_THRESHOLD", "22000")
+        loop = ScopedReactLoop(
+            llm=self._make_llm(),
+            role=TEST_WRITER,
+            workspace_dir=tmp_path,
+        )
+        assert loop.compaction_threshold_tokens == 22000
+
+    def test_run_override_can_force_default_under_global_preset(self, tmp_path):
+        from agents.roles import IMPLEMENTER
+        from agents.scoped_loop import ScopedReactLoop
+        from core.loop import CONFIG_DEFAULT_THRESHOLD
+
+        loop = ScopedReactLoop(
+            llm=self._make_llm(),
+            role=IMPLEMENTER,
+            workspace_dir=tmp_path,
+            role_compaction_tuning_enabled=True,
+            role_compaction_tuning_preset="aggressive",
+            role_compaction_tuning_overrides={"implementer": "default"},
+        )
+        assert loop.compaction_threshold_tokens == CONFIG_DEFAULT_THRESHOLD
+
+    def test_run_override_can_use_different_preset_per_role(self, tmp_path):
+        from agents.roles import REVIEWER
+        from agents.scoped_loop import ScopedReactLoop
+
+        loop = ScopedReactLoop(
+            llm=self._make_llm(),
+            role=REVIEWER,
+            workspace_dir=tmp_path,
+            role_compaction_tuning_enabled=True,
+            role_compaction_tuning_preset="balanced",
+            role_compaction_tuning_overrides={"reviewer": "conservative"},
+        )
+        assert loop.compaction_threshold_tokens == 28000
+
+    def test_custom_role_threshold_respected_without_flag(self, tmp_path):
+        from agents.roles import RoleConfig, READ_TOOLS
+        from agents.scoped_loop import ScopedReactLoop
+
+        custom_role = RoleConfig(
+            name="custom",
+            system_prompt="hi",
+            allowed_tools=tuple(READ_TOOLS),
+            compaction_threshold=12345,
+        )
+        loop = ScopedReactLoop(
+            llm=self._make_llm(),
+            role=custom_role,
+            workspace_dir=tmp_path,
+        )
+        assert loop.compaction_threshold_tokens == 12345
+
+    def test_compaction_uses_default_when_role_none(self, tmp_path):
+        """role.compaction_threshold=None → CONFIG_DEFAULT_THRESHOLD(30000)."""
+        from agents.roles import RoleConfig, READ_TOOLS
+        from agents.scoped_loop import ScopedReactLoop
+        from core.loop import CONFIG_DEFAULT_THRESHOLD
+
+        role_no_override = RoleConfig(
+            name="custom",
+            system_prompt="hi",
+            allowed_tools=tuple(READ_TOOLS),
+            # compaction_threshold 미지정 → None
+        )
+        assert role_no_override.compaction_threshold is None
+
+        loop = ScopedReactLoop(
+            llm=self._make_llm(),
+            role=role_no_override,
+            workspace_dir=tmp_path,
+        )
+        assert loop.compaction_threshold_tokens == CONFIG_DEFAULT_THRESHOLD
+        assert CONFIG_DEFAULT_THRESHOLD == 30000
+
+    def test_explicit_kwargs_override_role(self, tmp_path):
+        """호출자가 명시적으로 compaction_threshold_tokens 를 넘기면 역할보다 우선한다."""
+        from agents.roles import IMPLEMENTER
+        from agents.scoped_loop import ScopedReactLoop
+
+        loop = ScopedReactLoop(
+            llm=self._make_llm(),
+            role=IMPLEMENTER,
+            workspace_dir=tmp_path,
+            compaction_threshold_tokens=5000,
+        )
+        assert loop.compaction_threshold_tokens == 5000
+
+
+class TestCallLogTimeSeries:
+    """call_log 에 cumulative_total / elapsed_ms / role 이 기록되는지 검증."""
+
+    def _response(self, input_tokens, output_tokens, cached_read=0):
+        return SimpleNamespace(
+            stop_reason="end_turn",
+            content=[{"type": "text", "text": "done"}],
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_read_tokens=cached_read,
+            cached_write_tokens=0,
+            model="mock-model",
+        )
+
+    def test_call_log_has_cumulative_total_and_elapsed_ms(self):
+        llm = _SequentialMockLLM([self._response(100, 20, cached_read=5)])
+        loop = ReactLoop(llm=llm, role_name="implementer")
+        result = loop.run("ping")
+
+        assert len(result.call_log) == 1
+        entry = result.call_log[0]
+        assert entry["role"] == "implementer"
+        assert entry["input_tokens"] == 100
+        assert entry["output_tokens"] == 20
+        assert entry["cached_read_tokens"] == 5
+        assert entry["cumulative_total"] == 125  # 100 + 20 + 5
+        assert "elapsed_ms" in entry and entry["elapsed_ms"] >= 0
+        assert isinstance(entry["elapsed_ms"], int)
+
+    def test_cumulative_total_monotonically_increases(self):
+        # 각 응답에서 토큰 누적 확인
+        llm = _SequentialMockLLM([
+            SimpleNamespace(
+                stop_reason="tool_use",
+                content=[{"type": "tool_use", "id": "x1", "name": "read_file", "input": {}}],
+                input_tokens=50, output_tokens=10, cached_read_tokens=0,
+                cached_write_tokens=0, model="mock",
+            ),
+            self._response(60, 15, cached_read=10),
+        ])
+        loop = ReactLoop(llm=llm)
+        # 첫 tool_use → tool 실행 시도 (registry 에 없음 → 에러 is_error=True)
+        # 그래도 call_log 는 쌓인다. 두 번째 end_turn 에서 루프 종료.
+        result = loop.run("work")
+        assert len(result.call_log) >= 1
+        cumulatives = [
+            e["cumulative_total"] for e in result.call_log
+            if e.get("event") != "compaction"
+        ]
+        assert cumulatives == sorted(cumulatives)
+
+    def test_role_defaults_to_empty_when_not_set(self):
+        llm = _SequentialMockLLM([self._response(10, 5)])
+        loop = ReactLoop(llm=llm)  # role_name 미지정
+        result = loop.run("hi")
+        assert result.call_log[0]["role"] == ""
