@@ -37,6 +37,50 @@ case "$TEST_FRAMEWORK" in
     # 예: tests/에서 `from eggDoneness import ...` → src/eggDoneness.py 를 찾음
     PYTHONPATH="/workspace/src:/workspace:${PYTHONPATH:-}"
     export PYTHONPATH
+
+    # ── Pre-check: collect-only (task-025 guard) ────────────────────────────
+    # fixture 초기화 없이 import/discovery 만 수행.
+    # exit 70 = import/syntax 오류, exit 71 = 0개 수집.
+    _collect_out=/tmp/collect.out
+    if [ -n "${TEST_FILES:-}" ]; then
+        # shellcheck disable=SC2086
+        python -m pytest --collect-only -q $TEST_FILES > "$_collect_out" 2>&1
+    else
+        python -m pytest --collect-only -q > "$_collect_out" 2>&1
+    fi
+    _collect_rc=$?
+    # exit 5 = pytest native "no tests collected" → 71 로 정규화
+    if [ "$_collect_rc" -ne 0 ] && [ "$_collect_rc" -ne 5 ]; then
+        echo "---COLLECTION_ERROR---"
+        cat "$_collect_out"
+        exit 70
+    fi
+    # pytest 출력: "N tests collected" / "collected N items" / "no tests collected" 등
+    # 주의: 정규식 미매칭을 "0개" 로 오판하면 버전 변경 시 정상 태스크가 차단된다.
+    # 파싱 실패(빈 문자열)와 "0 명시 매칭" 을 구분한다.
+    _count=$(grep -Eo '([0-9]+) (tests?|items?)' "$_collect_out" \
+             | awk '{print $1}' | tail -n 1)
+    if [ "$_collect_rc" -eq 5 ]; then
+        # pytest native "no tests collected" — 명시적 시그널.
+        echo "---NO_TESTS_COLLECTED---"
+        cat "$_collect_out"
+        exit 71
+    fi
+    if [ -n "$_count" ] && [ "$_count" = "0" ]; then
+        # 파서가 '0' 을 명시적으로 매칭한 경우에만 NO_TESTS_COLLECTED.
+        echo "---NO_TESTS_COLLECTED---"
+        cat "$_collect_out"
+        exit 71
+    fi
+    if [ -z "$_count" ]; then
+        # 파싱 실패: pytest 버전/플러그인 차이로 포맷이 달라졌을 수 있다.
+        # 정상 수집됐는데 정규식만 못 잡았을 가능성이 높으므로 게이트 통과시키고
+        # 진짜 실행에 맡긴다. 수집 단계 rc 가 0 이었으므로 안전한 기본값.
+        echo "---COLLECTED: unknown (parser could not extract count, proceeding)---"
+    else
+        echo "---COLLECTED: ${_count}---"
+    fi
+
     # TEST_FILES가 지정되면 해당 파일만 실행, 아니면 전체 실행
     if [ -n "${TEST_FILES:-}" ]; then
         exec python -m pytest $TEST_FILES -v --tb=short 2>&1
@@ -49,7 +93,9 @@ case "$TEST_FRAMEWORK" in
     WS=$(_copy_workspace)
     cd "$WS"
     [ -f package.json ] && npm install --silent 2>/dev/null
-    exec jest --no-coverage --forceExit 2>&1
+    # --passWithNoTests=false: 매칭되는 테스트가 없으면 exit 1 + "No tests found" 출력.
+    # runner.py 가 stdout 에서 "No tests found" 를 보고 [NO_TESTS_COLLECTED] 태깅.
+    exec jest --no-coverage --forceExit --passWithNoTests=false 2>&1
     ;;
 
   # ── JavaScript / Vitest ─────────────────────────────────────────────────────
@@ -63,6 +109,25 @@ case "$TEST_FRAMEWORK" in
   # ── Go / go test ────────────────────────────────────────────────────────────
   go)
     cd /workspace
+    # ── Pre-check: go test -list 는 컴파일은 하지만 테스트는 실행하지 않는다.
+    # 0개면 exit 71, 빌드 실패면 exit 70.
+    _list_out=/tmp/go_list.out
+    go test -list '.*' ./... > "$_list_out" 2>&1
+    _list_rc=$?
+    # Test/Example/Benchmark/Fuzz 함수 한 줄씩 나오는지 카운트
+    # (Go 1.18+ 의 `Fuzz*` 함수도 실제 테스트 target 이므로 포함)
+    _test_count=$(grep -Ec '^(Test|Example|Benchmark|Fuzz)[A-Z_0-9]' "$_list_out" 2>/dev/null || echo 0)
+    if [ "$_list_rc" -ne 0 ] && [ "${_test_count:-0}" = "0" ]; then
+        echo "---COLLECTION_ERROR---"
+        cat "$_list_out"
+        exit 70
+    fi
+    if [ "${_test_count:-0}" = "0" ]; then
+        echo "---NO_TESTS_COLLECTED---"
+        cat "$_list_out"
+        exit 71
+    fi
+    echo "---COLLECTED: ${_test_count}---"
     exec go test ./... -v 2>&1
     ;;
 

@@ -69,6 +69,7 @@ class RunResult:
     stdout: str                          # 테스트 전체 출력
     summary: str                         # "5 passed, 2 failed in 0.12s" 마지막 줄
     failed_tests: list[str] = field(default_factory=list)  # 실패한 테스트 이름
+    failure_reason: str = ""             # "[COLLECTION_ERROR]" | "[NO_TESTS_COLLECTED]" | ""
 
 
 class DockerTestRunner:
@@ -219,13 +220,54 @@ class DockerTestRunner:
             )
 
         stdout = result.stdout + result.stderr
-        passed = result.returncode == 0
         summary = _parse_summary(stdout)
         failed_tests = _parse_failed_tests(stdout)
+        failure_reason = ""
+
+        # ── entrypoint 의 custom exit code 매핑 (pytest / go pre-check) ────
+        # 70 = collection error (import/syntax), 71 = 0 tests collected.
+        # 기존 "OK: N passed" / "N passed" 보정은 아래에서 계속 유효하지만,
+        # 70/71 은 그 이전에 조기 반환하여 오판 여지를 없앤다.
+        if result.returncode == 70:
+            return RunResult(
+                passed=False,
+                returncode=70,
+                stdout=stdout,
+                summary="pytest collection failed (import or syntax error)",
+                failed_tests=[],
+                failure_reason="[COLLECTION_ERROR]",
+            )
+        if result.returncode == 71:
+            return RunResult(
+                passed=False,
+                returncode=71,
+                stdout=stdout,
+                summary="No tests were collected — check test file location and naming",
+                failed_tests=[],
+                failure_reason="[NO_TESTS_COLLECTED]",
+            )
+
+        # ── stdout 기반 감지 (Jest / Gradle — custom exit code 불필요) ────
+        # exit code 와 무관하게 stdout 패턴으로 감지. 특히 Gradle 은
+        # "BUILD SUCCESSFUL" + "0 tests completed" 로 정상 종료(exit 0)
+        # 할 수 있으므로 `if not passed:` 로 감싸면 안 된다.
+        # 정규식은 각 프레임워크 고유 표현이므로 pytest/정상 출력에서 오탐 낮음:
+        #   Jest  : "No tests found" 또는 "No tests matched"
+        #   Gradle: "N tests completed" 에서 N=0, 또는 "tests: 0"
+        if re.search(r"\bNo tests (found|matched)\b", stdout, re.IGNORECASE):
+            failure_reason = "[NO_TESTS_COLLECTED]"
+            summary = f"[NO_TESTS_COLLECTED] {summary or 'jest: no matching tests'}"
+        elif re.search(r"\b0 tests completed\b|\btests:\s*0\b", stdout, re.IGNORECASE):
+            failure_reason = "[NO_TESTS_COLLECTED]"
+            summary = f"[NO_TESTS_COLLECTED] {summary or 'gradle: 0 tests executed'}"
+
+        # failure_reason 이 설정됐으면 (Gradle BUILD SUCCESSFUL 포함) passed=False.
+        passed = result.returncode == 0 and not failure_reason
 
         # 실제로 전부 통과했는데 exit code만 비정상인 경우 보정.
         # 원인 예시: LLM 생성 테스트의 잘못된 sys.exit(), pytest INTERNALERROR/SystemExit
-        if not passed and summary:
+        # no-tests-collected 가 설정된 경우는 제외 (0개를 '통과' 로 오판 방지).
+        if not passed and summary and not failure_reason:
             if re.match(r"^OK:", summary):
                 passed = True
             elif (re.search(r"\d+ passed", summary)
@@ -239,6 +281,7 @@ class DockerTestRunner:
             stdout=stdout,
             summary=summary,
             failed_tests=failed_tests,
+            failure_reason=failure_reason,
         )
 
     # ── 내부 헬퍼 ─────────────────────────────────────────────────────────────
