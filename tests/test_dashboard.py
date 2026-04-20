@@ -184,3 +184,214 @@ tasks:
     assert res.status_code == 200
     body = res.json()
     assert body["tasks"][0]["report"]["cost_usd"] is None
+
+
+# ── T2: outlier 태스크 탐지 ─────────────────────────────────────────────────
+
+def test_outlier_tasks_detected_high_iteration(tmp_path, client):
+    """역할별 iteration 평균 + 2σ 를 초과하는 태스크가 high_iteration_count 로 잡힌다.
+
+    분포: [5,5,5,5,5,5,5,5,5,60] → mean=10.5, σ≈16.5, threshold≈43.5 → 60 이 outlier.
+    정상값을 여러 개 두어 σ 가 outlier 하나에 지배되지 않도록 한다.
+    """
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    for i, count in enumerate([5, 5, 5, 5, 5, 5, 5, 5, 5, 60], start=1):
+        _save(
+            reports_dir, f"task-{i:03d}",
+            cost_usd=0.01, cost_estimation_quality="exact",
+            models_used={"implementer": "openai/gpt-5"},
+            iteration_count_by_role={"implementer": count},
+        )
+
+    res = client.get(
+        "/api/dashboard/summary",
+        params={"reports_dir": str(reports_dir), "tasks_path": str(tmp_path / "tasks.yaml")},
+    )
+    body = res.json()
+    outliers = body["outlier_tasks"]
+    assert len(outliers) == 1
+    assert outliers[0]["task_id"] == "task-010"
+    assert outliers[0]["reason"] == "high_iteration_count"
+    assert outliers[0]["value"] == 60
+    assert outliers[0]["role"] == "implementer"
+
+
+def test_outlier_tasks_detected_high_single_iteration_tokens(tmp_path, client):
+    """max_single_iteration_tokens > 50000 이면 outlier 로 잡힌다 (평균과 무관)."""
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    # 모두 iteration count 는 비슷하지만 task-002 는 단일 iter 토큰이 폭주.
+    _save(
+        reports_dir, "task-001",
+        cost_usd=0.01, cost_estimation_quality="exact",
+        models_used={"implementer": "openai/gpt-5"},
+        iteration_count_by_role={"implementer": 5},
+        max_single_iteration_tokens=10_000,
+    )
+    _save(
+        reports_dir, "task-002",
+        cost_usd=0.01, cost_estimation_quality="exact",
+        models_used={"implementer": "openai/gpt-5"},
+        iteration_count_by_role={"implementer": 5},
+        max_single_iteration_tokens=60_000,
+    )
+
+    res = client.get(
+        "/api/dashboard/summary",
+        params={"reports_dir": str(reports_dir), "tasks_path": str(tmp_path / "tasks.yaml")},
+    )
+    body = res.json()
+    outliers = body["outlier_tasks"]
+    assert len(outliers) == 1
+    assert outliers[0]["task_id"] == "task-002"
+    assert outliers[0]["reason"] == "high_single_iteration_tokens"
+    assert outliers[0]["value"] == 60_000
+
+
+def test_outlier_tasks_empty_when_all_normal(tmp_path, client):
+    """모든 태스크가 정상 범위면 outlier_tasks 는 빈 리스트."""
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    for i, count in enumerate([5, 6, 7, 5, 6], start=1):
+        _save(
+            reports_dir, f"task-10{i}",
+            cost_usd=0.01, cost_estimation_quality="exact",
+            models_used={"implementer": "openai/gpt-5"},
+            iteration_count_by_role={"implementer": count},
+            max_single_iteration_tokens=10_000,
+        )
+    res = client.get(
+        "/api/dashboard/summary",
+        params={"reports_dir": str(reports_dir), "tasks_path": str(tmp_path / "tasks.yaml")},
+    )
+    body = res.json()
+    assert body["outlier_tasks"] == []
+
+
+def test_outlier_tasks_empty_when_no_reports(tmp_path, client):
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    res = client.get(
+        "/api/dashboard/summary",
+        params={"reports_dir": str(reports_dir), "tasks_path": str(tmp_path / "tasks.yaml")},
+    )
+    body = res.json()
+    assert body["outlier_tasks"] == []
+
+
+def test_outlier_small_sample_uses_absolute_fallback(tmp_path, client):
+    """표본 N<10 에서는 mean+2σ 대신 절대 임계(30)를 사용해 runaway 를 잡는다.
+
+    재현: [5, 100] → μ=52.5, σ=47.5, μ+2σ=147.5. 통계만으로는 100 이 outlier
+    로 잡히지 않아 초기 프로젝트에서 가장 중요한 탈선을 놓치게 된다. 절대
+    fallback 이 걸리면 100 > 30 으로 잡혀야 한다.
+    """
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    for i, count in enumerate([5, 100], start=1):
+        _save(
+            reports_dir, f"task-{i:03d}",
+            cost_usd=0.01, cost_estimation_quality="exact",
+            models_used={"implementer": "openai/gpt-5"},
+            iteration_count_by_role={"implementer": count},
+        )
+    res = client.get(
+        "/api/dashboard/summary",
+        params={"reports_dir": str(reports_dir), "tasks_path": str(tmp_path / "tasks.yaml")},
+    )
+    body = res.json()
+    outliers = body["outlier_tasks"]
+    assert len(outliers) == 1
+    assert outliers[0]["task_id"] == "task-002"
+    assert outliers[0]["reason"] == "high_iteration_count"
+    assert outliers[0]["value"] == 100
+    assert outliers[0]["role"] == "implementer"
+
+
+def test_outlier_small_sample_normal_values_not_flagged(tmp_path, client):
+    """표본 N<10 에서도 절대 임계(30) 아래는 outlier 가 아니어야 한다."""
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    for i, count in enumerate([5, 10, 15, 25], start=1):
+        _save(
+            reports_dir, f"task-{i:03d}",
+            cost_usd=0.01, cost_estimation_quality="exact",
+            models_used={"implementer": "openai/gpt-5"},
+            iteration_count_by_role={"implementer": count},
+        )
+    res = client.get(
+        "/api/dashboard/summary",
+        params={"reports_dir": str(reports_dir), "tasks_path": str(tmp_path / "tasks.yaml")},
+    )
+    assert res.json()["outlier_tasks"] == []
+
+
+def test_outlier_picks_role_with_largest_exceedance_not_raw_count(tmp_path, client):
+    """두 역할이 동시에 초과할 때 raw count 가 아닌 exceedance 로 대표 역할 선택.
+
+    분포 설계:
+      - implementer counts (N=10): [3]*9 + [30] → μ=5.7, σ≈8.1, threshold≈21.9
+        → 한 태스크에서 count=30 → exceedance ≈ 8.1
+      - reviewer counts    (N=10): [50]*9 + [60] → μ=51, σ=3, threshold=57
+        → 같은 태스크에서 count=60 → exceedance = 3
+
+    raw count 비교이면 60(reviewer) 이 30(implementer) 보다 크므로 reviewer 가
+    대표로 잘못 뽑힌다. exceedance 비교이면 implementer(8.1) > reviewer(3) 이므로
+    implementer 가 올바른 대표가 된다.
+    """
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    # 배경 분포 (9건씩)
+    for i in range(1, 10):
+        _save(
+            reports_dir, f"task-{i:03d}",
+            cost_usd=0.01, cost_estimation_quality="exact",
+            models_used={"implementer": "openai/gpt-5", "reviewer": "openai/gpt-5"},
+            iteration_count_by_role={"implementer": 3, "reviewer": 50},
+        )
+    # 두 역할 모두 임계를 초과하는 문제 태스크
+    _save(
+        reports_dir, "task-010",
+        cost_usd=0.01, cost_estimation_quality="exact",
+        models_used={"implementer": "openai/gpt-5", "reviewer": "openai/gpt-5"},
+        iteration_count_by_role={"implementer": 30, "reviewer": 60},
+    )
+    res = client.get(
+        "/api/dashboard/summary",
+        params={"reports_dir": str(reports_dir), "tasks_path": str(tmp_path / "tasks.yaml")},
+    )
+    outliers = res.json()["outlier_tasks"]
+    task_010 = [o for o in outliers if o["task_id"] == "task-010"]
+    assert len(task_010) == 1
+    assert task_010[0]["role"] == "implementer"
+    assert task_010[0]["value"] == 30
+
+
+def test_outlier_prefers_iteration_count_over_token_threshold(tmp_path, client):
+    """같은 태스크가 두 기준 모두 해당할 때 high_iteration_count 로만 1건 보고.
+
+    분포는 위 high_iteration 테스트와 동일 ([5×9, 60]) — 정상값 풍부해서 60 이 outlier.
+    60 번째 태스크만 단일 iter 토큰도 초과시킨다.
+    """
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    counts = [5, 5, 5, 5, 5, 5, 5, 5, 5, 60]
+    for i, count in enumerate(counts, start=1):
+        _save(
+            reports_dir, f"task-{i:03d}",
+            cost_usd=0.01, cost_estimation_quality="exact",
+            models_used={"implementer": "openai/gpt-5"},
+            iteration_count_by_role={"implementer": count},
+            max_single_iteration_tokens=80_000 if count == 60 else 5_000,
+        )
+    res = client.get(
+        "/api/dashboard/summary",
+        params={"reports_dir": str(reports_dir), "tasks_path": str(tmp_path / "tasks.yaml")},
+    )
+    body = res.json()
+    outliers = body["outlier_tasks"]
+    task_010_entries = [o for o in outliers if o["task_id"] == "task-010"]
+    # 두 기준 모두 해당해도 1건만 보고
+    assert len(task_010_entries) == 1
+    assert task_010_entries[0]["reason"] == "high_iteration_count"

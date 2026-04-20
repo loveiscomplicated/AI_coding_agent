@@ -71,6 +71,10 @@ class TaskReport:
     cache_hit_rate: float = 0.0
     token_usage: dict[str, dict[str, int]] | None = None
     token_usage_detail: dict[str, dict[str, int]] | None = None
+    # T2: iteration 시계열 요약 — raw call_log 는 JSONL 로 별도 저장되며,
+    # 여기에는 outlier 탐지에 필요한 파생 지표만 기록한다 (파일 폭증 방지).
+    max_single_iteration_tokens: int = 0
+    iteration_count_by_role: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.token_usage is None and self.token_usage_detail is not None:
@@ -106,6 +110,8 @@ class TaskReport:
                 "total_cached_read_tokens": self.total_cached_read_tokens,
                 "total_cached_write_tokens": self.total_cached_write_tokens,
                 "cache_hit_rate": self.cache_hit_rate,
+                "max_single_iteration_tokens": self.max_single_iteration_tokens,
+                "iteration_count_by_role": dict(self.iteration_count_by_role),
             },
             "pipeline_result": {
                 "test_output_summary": self.test_output_summary,
@@ -158,6 +164,8 @@ class TaskReport:
             total_cached_read_tokens=m.get("total_cached_read_tokens", 0),
             total_cached_write_tokens=m.get("total_cached_write_tokens", 0),
             cache_hit_rate=m.get("cache_hit_rate", 0.0),
+            max_single_iteration_tokens=m.get("max_single_iteration_tokens", 0),
+            iteration_count_by_role=dict(m.get("iteration_count_by_role", {})),
             token_usage=data.get("token_usage", data.get("token_usage_detail")),
             test_output_summary=p.get("test_output_summary", ""),
             reviewer_feedback=p.get("reviewer_feedback", ""),
