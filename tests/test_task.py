@@ -314,3 +314,57 @@ class TestLanguageTestFrameworkMap:
     def test_all_values_are_nonempty_strings(self):
         for lang, fw in LANGUAGE_TEST_FRAMEWORK_MAP.items():
             assert isinstance(fw, str) and fw, f"언어 '{lang}'의 매핑값이 비어 있음"
+
+
+# ── complexity 필드 ──────────────────────────────────────────────────────────
+
+
+class TestComplexityField:
+    def test_task_loads_yaml_without_complexity(self, minimal_task_dict):
+        """기존 YAML(complexity 필드 부재) 로드 시 task.complexity는 None."""
+        task = Task.from_dict(minimal_task_dict)
+        assert task.complexity is None
+
+    def test_loads_all_valid_complexity_values(self, minimal_task_dict):
+        for value in ("simple", "standard", "complex"):
+            data = dict(minimal_task_dict, complexity=value)
+            task = Task.from_dict(data)
+            assert task.complexity == value, f"complexity='{value}' 보존 실패"
+
+    def test_invalid_complexity_coerces_to_none(self, minimal_task_dict):
+        """비정상 값은 None으로 정규화된다 (Literal 보호)."""
+        data = dict(minimal_task_dict, complexity="trivial")
+        task = Task.from_dict(data)
+        assert task.complexity is None
+
+    def test_task_saves_complexity_to_yaml(self, tmp_path, minimal_task_dict):
+        data = dict(minimal_task_dict, complexity="complex")
+        task = Task.from_dict(data)
+        path = tmp_path / "tasks.yaml"
+        save_tasks([task], path)
+
+        raw = path.read_text(encoding="utf-8")
+        assert "complexity: complex" in raw
+
+        loaded = load_tasks(path)
+        assert loaded[0].complexity == "complex"
+
+    def test_omits_complexity_key_when_none(self, tmp_path, minimal_task_dict):
+        """complexity=None 태스크는 YAML에 complexity 키를 기록하지 않는다 (하위 호환)."""
+        task = Task.from_dict(minimal_task_dict)
+        assert task.complexity is None
+
+        path = tmp_path / "tasks.yaml"
+        save_tasks([task], path)
+        raw = path.read_text(encoding="utf-8")
+        assert "complexity" not in raw
+
+        # 재로드해도 None 유지
+        reloaded = load_tasks(path)
+        assert reloaded[0].complexity is None
+
+    def test_complexity_round_trips_through_to_dict(self, minimal_task_dict):
+        data = dict(minimal_task_dict, complexity="simple")
+        task = Task.from_dict(data)
+        restored = Task.from_dict(task.to_dict())
+        assert restored.complexity == "simple"

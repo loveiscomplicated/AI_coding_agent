@@ -48,6 +48,7 @@ interface DashboardTask {
   status: string
   depends_on: string[]
   pr_url: string
+  complexity?: 'simple' | 'standard' | 'complex' | null
   report: {
     test_count: number
     retry_count: number
@@ -605,7 +606,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
     }
   }
 
-  async function resumePipeline(providerFast: string, modelFast: string, providerCapable: string, modelCapable: string, agentCount: number, roleModels?: Record<string, {provider?: string; model?: string}>, noPush?: boolean) {
+  async function resumePipeline(providerFast: string, modelFast: string, providerCapable: string, modelCapable: string, agentCount: number, roleModels?: Record<string, {provider?: string; model?: string}>, noPush?: boolean, autoSelectByComplexity?: boolean) {
     if (!project) return
     setShowResumeModal(false)
     setResuming(true)
@@ -626,6 +627,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
           model_fast: modelFast,
           provider_capable: providerCapable,
           model_capable: modelCapable,
+          auto_select_by_complexity: autoSelectByComplexity ?? false,
           ...(roleModels && Object.keys(roleModels).length > 0 ? { role_models: roleModels } : {}),
         }),
       })
@@ -1477,6 +1479,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
       {showResumeModal && availableModels.length > 0 && (
         <PipelineModelModal
           models={availableModels}
+          tasks={tasks.map(t => ({ id: t.id, complexity: t.complexity ?? null }))}
           onConfirm={resumePipeline}
           onCancel={() => setShowResumeModal(false)}
         />

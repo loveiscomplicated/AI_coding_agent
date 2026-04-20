@@ -25,6 +25,7 @@ export interface DraftTask {
   depends_on: string[]
   task_type: 'backend' | 'frontend'
   warnings?: string[]
+  complexity?: 'simple' | 'standard' | 'complex' | null
 }
 
 type Phase = 'generating' | 'editing' | 'saving' | 'running' | 'done' | 'error'
@@ -357,6 +358,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
     agentCount: number,
     roleModels?: Record<string, {provider?: string; model?: string}>,
     noPush?: boolean,
+    autoSelectByComplexity?: boolean,
   ) {
     setShowModelModal(false)
     dispatch({ type: 'SAVING' })
@@ -398,6 +400,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
           model_fast: modelFast,
           provider_capable: providerCapable,
           model_capable: modelCapable,
+          auto_select_by_complexity: autoSelectByComplexity ?? false,
           ...(roleModels && Object.keys(roleModels).length > 0 ? { role_models: roleModels } : {}),
         }),
       })
@@ -468,7 +471,8 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
     {showModelModal && (
       <PipelineModelModal
         models={availableModels}
-        onConfirm={(pf, mf, pc, mc, ac, rm, np) => handleSaveAndRun(pf, mf, pc, mc, ac, rm, np)}
+        tasks={state.tasks}
+        onConfirm={(pf, mf, pc, mc, ac, rm, np, abc) => handleSaveAndRun(pf, mf, pc, mc, ac, rm, np, abc)}
         onCancel={() => setShowModelModal(false)}
       />
     )}
