@@ -24,7 +24,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from agents.roles import RoleModelConfig
+from agents.roles import ROLE_COMPACTION_PRESET_BALANCED, RoleModelConfig
 from backend.config import DISCORD_BOT_TOKEN, DISCORD_GUILD_ID, LLM_PROVIDER, LLM_MODEL_FAST, LLM_MODEL_CAPABLE
 from hotline.notifier import DiscordNotifier
 from orchestrator.run import PauseController, run_pipeline
@@ -62,6 +62,7 @@ class RunRequest(BaseModel):
     no_push: bool = False
     verbose: bool = False
     reports_dir: str | None = None      # None → run_pipeline 기본값 (repo_path/agent-data/reports)
+    logs_dir: str | None = None         # None → run_pipeline 기본값 (repo_path/agent-data/logs)
     max_workers: int = 1                # 병렬 에이전트 수 (1=순차)
     discord_channel_id: str | None = None  # 프로젝트 Discord 채널 ID (없으면 자동 생성)
     max_orchestrator_retries: int = 2   # 오케스트레이터 자동 재시도 최대 횟수
@@ -74,6 +75,10 @@ class RunRequest(BaseModel):
     role_models: dict[str, dict[str, str | None]] | None = None
     # 역할별 모델 오버라이드. 예: {"reviewer": {"provider": "claude", "model": "claude-sonnet-4-20250514"}}
     # 지원 키: "test_writer", "implementer", "reviewer", "orchestrator", "merge_agent", "intervention"
+    role_compaction_tuning_enabled: bool = False
+    role_compaction_tuning_preset: str = ROLE_COMPACTION_PRESET_BALANCED
+    role_compaction_tuning_overrides: dict[str, str] | None = None
+    # 예: {"implementer": "aggressive", "reviewer": "default"}
 
 
 def _parse_role_models(raw: dict[str, dict] | None) -> dict[str, RoleModelConfig] | None:
@@ -146,6 +151,7 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
                 no_push=body.no_push,
                 verbose=body.verbose,
                 reports_dir=Path(body.reports_dir) if body.reports_dir else None,
+                logs_dir=Path(body.logs_dir) if body.logs_dir else None,
                 on_progress=on_progress,
                 pause_controller=pause_ctrl,
                 max_workers=body.max_workers,
@@ -158,6 +164,9 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
                 provider_fast=body.provider_fast,
                 provider_capable=body.provider_capable,
                 role_models=_parse_role_models(body.role_models),
+                role_compaction_tuning_enabled=body.role_compaction_tuning_enabled,
+                role_compaction_tuning_preset=body.role_compaction_tuning_preset,
+                role_compaction_tuning_overrides=body.role_compaction_tuning_overrides,
             )
             with _lock:
                 _jobs[job_id]["status"] = "done"

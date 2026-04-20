@@ -23,8 +23,8 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agents.roles import RoleConfig, WRITE_TOOLS
-from core.loop import ReactLoop, ToolCall, ToolResult, LoopResult
+from agents.roles import RoleConfig, WRITE_TOOLS, resolve_role_compaction_threshold
+from core.loop import ReactLoop, ToolCall, ToolResult, LoopResult, CONFIG_DEFAULT_THRESHOLD
 from tools.registry import TOOL_REGISTRY, _build_tools_schema
 
 logger = logging.getLogger(__name__)
@@ -72,12 +72,34 @@ class ScopedReactLoop(ReactLoop):
         on_progress=None,
         write_deadline: int | None = None,
         stop_check=None,
+        role_compaction_tuning_enabled: bool = False,
+        role_compaction_tuning_preset: str = "balanced",
+        role_compaction_tuning_overrides: dict[str, str] | None = None,
         **kwargs,
     ):
         if on_progress is not None:
             kwargs["on_iteration"] = lambda data: on_progress(
                 {"type": "agent_iteration", **data}
             )
+        # 역할별 compaction threshold — role.compaction_threshold 가 None 이면
+        # 전역 기본값(CONFIG_DEFAULT_THRESHOLD) 사용. 내장 역할의 튜닝값은
+        # per-run preset 또는 ENABLE_ROLE_COMPACTION_TUNING=1 일 때만 활성화된다.
+        # 호출자가 kwargs 로 이미 compaction_threshold_tokens 를 명시했다면 그 값을
+        # 우선한다 (테스트 등).
+        if "compaction_threshold_tokens" not in kwargs:
+            resolved_threshold = resolve_role_compaction_threshold(
+                role,
+                tuning_enabled=role_compaction_tuning_enabled,
+                tuning_preset=role_compaction_tuning_preset,
+                role_tuning_overrides=role_compaction_tuning_overrides,
+            )
+            kwargs["compaction_threshold_tokens"] = (
+                resolved_threshold
+                if resolved_threshold is not None
+                else CONFIG_DEFAULT_THRESHOLD
+            )
+        # call_log 에 role 태그를 심어 TaskReport 집계가 가능하도록 한다.
+        kwargs.setdefault("role_name", role.name)
         super().__init__(llm=llm, max_iterations=max_iterations, write_deadline=write_deadline, stop_check=stop_check, **kwargs)
         self._role = role
         self._workspace_dir = Path(workspace_dir).resolve()

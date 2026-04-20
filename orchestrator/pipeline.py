@@ -189,6 +189,9 @@ class TDDPipeline:
         model_capable: str | None = None,
         provider_fast: str | None = None,
         provider_capable: str | None = None,
+        role_compaction_tuning_enabled: bool = False,
+        role_compaction_tuning_preset: str = "balanced",
+        role_compaction_tuning_overrides: dict[str, str] | None = None,
     ):
         self.agent_llm = agent_llm
         self.implementer_llm = implementer_llm or agent_llm
@@ -205,6 +208,9 @@ class TDDPipeline:
         self.model_capable = model_capable
         self.provider_fast = provider_fast
         self.provider_capable = provider_capable
+        self.role_compaction_tuning_enabled = role_compaction_tuning_enabled
+        self.role_compaction_tuning_preset = role_compaction_tuning_preset
+        self.role_compaction_tuning_overrides = role_compaction_tuning_overrides or {}
 
     # ── 역할별 LLM 생성 ──────────────────────────────────────────────────────
 
@@ -800,6 +806,9 @@ class TDDPipeline:
             on_progress=on_progress,
             write_deadline=self.test_writer_write_deadline,
             stop_check=stop_check,
+            role_compaction_tuning_enabled=self.role_compaction_tuning_enabled,
+            role_compaction_tuning_preset=self.role_compaction_tuning_preset,
+            role_compaction_tuning_overrides=self.role_compaction_tuning_overrides,
         )
         prompt = _build_test_writer_prompt(
             task, workspace,
@@ -838,6 +847,9 @@ class TDDPipeline:
             on_progress=on_progress,
             write_deadline=self.implementer_write_deadline,
             stop_check=stop_check,
+            role_compaction_tuning_enabled=self.role_compaction_tuning_enabled,
+            role_compaction_tuning_preset=self.role_compaction_tuning_preset,
+            role_compaction_tuning_overrides=self.role_compaction_tuning_overrides,
         )
         prompt = _build_implementer_prompt(task, workspace, reviewer_feedback=reviewer_feedback,
                                            description_override=enriched_desc)
@@ -864,6 +876,9 @@ class TDDPipeline:
             max_iterations=self.reviewer_max_iterations,
             on_progress=on_progress,
             stop_check=stop_check,
+            role_compaction_tuning_enabled=self.role_compaction_tuning_enabled,
+            role_compaction_tuning_preset=self.role_compaction_tuning_preset,
+            role_compaction_tuning_overrides=self.role_compaction_tuning_overrides,
         )
         prompt = _build_reviewer_prompt(task, workspace, docker_result)
         logger.debug("[%s] Reviewer 시작", task.id)

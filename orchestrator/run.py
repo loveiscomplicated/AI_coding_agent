@@ -393,6 +393,11 @@ def _default_reports_dir(repo_path: Path) -> Path:
     return resolve_reports_dir("agent-data/reports", base=repo_path)
 
 
+def _default_logs_dir(repo_path: Path) -> Path:
+    """기본 call_log 디렉토리를 반환한다."""
+    return repo_path / "agent-data" / "logs"
+
+
 # ── 파이프라인 실행 (CLI + API 공용) ──────────────────────────────────────────
 
 def run_pipeline(
@@ -405,6 +410,7 @@ def run_pipeline(
     verbose: bool = False,
     on_progress: object = None,
     reports_dir: Path | None = None,
+    logs_dir: Path | None = None,
     pause_controller: "PauseController | None" = None,
     max_workers: int = 1,
     discord_channel_id: int | None = None,
@@ -416,6 +422,9 @@ def run_pipeline(
     provider_fast: str | None = None,    # None이면 provider 사용
     provider_capable: str | None = None, # None이면 provider 사용
     role_models: dict[str, RoleModelConfig] | None = None,  # 역할별 모델 오버라이드
+    role_compaction_tuning_enabled: bool = False,
+    role_compaction_tuning_preset: str = "balanced",
+    role_compaction_tuning_overrides: dict[str, str] | None = None,
 ) -> dict:
     """
     파이프라인 실행 핵심 로직. CLI와 FastAPI 백엔드 양쪽에서 호출된다.
@@ -431,6 +440,8 @@ def run_pipeline(
     # reports_dir 기본값: 대상 레포 안의 agent-data/reports (legacy data/reports 자동 fallback)
     if reports_dir is None:
         reports_dir = _default_reports_dir(repo_path)
+    if logs_dir is None:
+        logs_dir = _default_logs_dir(repo_path)
 
     # 파이프라인 시작 전 PROJECT_STRUCTURE.md 초기 생성 (없거나 오래된 경우)
     try:
@@ -503,6 +514,9 @@ def run_pipeline(
         model_capable=model_capable,
         provider_fast=provider_fast,
         provider_capable=provider_capable,
+        role_compaction_tuning_enabled=role_compaction_tuning_enabled,
+        role_compaction_tuning_preset=role_compaction_tuning_preset,
+        role_compaction_tuning_overrides=role_compaction_tuning_overrides,
     )
     git = GitWorkflow(repo_path, base_branch=base_branch)
     _merge_provider, _merge_model = resolve_model_for_role(
@@ -712,7 +726,8 @@ def run_pipeline(
                                   "reason": str(e), "elapsed": round(elapsed, 1)})
                             _notify_failure(notifier, task, str(e), elapsed)
                             report = build_report(task, result, elapsed_seconds=elapsed, pr_url="",
-                                                  models_used=result.models_used or None)
+                                                  models_used=result.models_used or None,
+                                                  call_logs_dir=logs_dir)
                             save_report(report, reports_dir=reports_dir)
                             with _save_lock:
                                 save_tasks(all_tasks, tasks_path)
@@ -732,7 +747,8 @@ def run_pipeline(
                         _notify(notifier, f"✅ [{task.id}] \"{task.title}\" 완료! (⏱ {elapsed:.0f}s)")
 
                     report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url,
-                                          models_used=result.models_used or None)
+                                          models_used=result.models_used or None,
+                                          call_logs_dir=logs_dir)
                     save_report(report, reports_dir=reports_dir)
                     with _save_lock:
                         save_tasks(all_tasks, tasks_path)
@@ -908,6 +924,7 @@ def run_pipeline(
                     coding_agent_model=model_fast if hints_tried else "",
                     orchestrator_summary=_extract_orch_summary(orch_report_text),
                     models_used=result.models_used or None,
+                    call_logs_dir=logs_dir,
                 )
                 save_report(report, reports_dir=reports_dir)
                 with _save_lock:
@@ -1167,7 +1184,8 @@ def _run_single_task(
                     _notify_failure(notifier, task, str(e), elapsed)
 
         report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url,
-                              models_used=result.models_used or None)
+                              models_used=result.models_used or None,
+                              call_logs_dir=logs_dir)
         report_path = save_report(report, reports_dir=reports_dir)
         print(f"  [{task.id}] 리포트: {report_path}")
 

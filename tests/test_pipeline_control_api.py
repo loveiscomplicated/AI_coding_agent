@@ -84,3 +84,41 @@ def test_pipeline_control_applied_false_when_command_not_matched(client):
     assert res.json()["applied"] is False
     with pipeline_router._lock:
         assert pipeline_router._jobs[job_id]["paused"] is False
+
+
+def test_pipeline_run_passes_role_compaction_config_to_worker(client, monkeypatch, tmp_path):
+    captured: dict = {}
+
+    def fake_run_pipeline(**kwargs):
+        captured.update(kwargs)
+        return {"success": 1, "fail": 0, "tasks": []}
+
+    class _ImmediateThread:
+        def __init__(self, target, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(pipeline_router, "run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr(pipeline_router.threading, "Thread", _ImmediateThread)
+
+    res = client.post("/api/pipeline/run", json={
+        "tasks_path": str(tmp_path / "tasks.yaml"),
+        "repo_path": str(tmp_path),
+        "logs_dir": str(tmp_path / "logs"),
+        "role_compaction_tuning_enabled": True,
+        "role_compaction_tuning_preset": "aggressive",
+        "role_compaction_tuning_overrides": {
+            "implementer": "default",
+            "reviewer": "conservative",
+        },
+    })
+    assert res.status_code == 200
+    assert captured["role_compaction_tuning_enabled"] is True
+    assert captured["role_compaction_tuning_preset"] == "aggressive"
+    assert captured["role_compaction_tuning_overrides"] == {
+        "implementer": "default",
+        "reviewer": "conservative",
+    }
+    assert str(captured["logs_dir"]).endswith("/logs")
