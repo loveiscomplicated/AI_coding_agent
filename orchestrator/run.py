@@ -58,7 +58,7 @@ from orchestrator.task_redesign import (
     create_redesign_llm,
     split_task as _split_task,
 )
-from agents.roles import RoleModelConfig, resolve_model_for_role, ROLE_MERGE_AGENT
+from agents.roles import RoleModelConfig, resolve_model_for_role, ROLE_MERGE_AGENT, ROLE_ORCHESTRATOR, compose_role_override
 from orchestrator.pipeline import TDDPipeline
 from orchestrator.report import build_report, load_reports, save_report
 from orchestrator.task import Task, TaskStatus, load_tasks, save_tasks
@@ -565,7 +565,6 @@ def run_pipeline(
     # base: 토글 ON → standard tier fast / 토글 OFF → resolve_model_for_role로 기본값 해석.
     # 그 위에 role_models['merge_agent']가 지정되어 있으면 부분 override를 합성한다
     # (API 계약: role_models는 auto_select 여부와 무관하게 최상위 override).
-    from agents.roles import compose_role_override
     if auto_select_by_complexity and _complexity_map:
         _base_merge_provider = _complexity_map["standard"]["provider_fast"]
         _base_merge_model = _complexity_map["standard"]["model_fast"]
@@ -593,7 +592,14 @@ def run_pipeline(
     _set_hotline_tasks_path(tasks_path)
     # 토글 ON 시 cross-task LLM(hotline + intervention 전역 fallback)도 standard tier capable을 사용.
     # 실제 per-task intervention 모델은 intervention.analyze()에서 다시 task.complexity로 해석한다.
-    if auto_select_by_complexity and _complexity_map:
+    # 단, 사용자가 오케스트레이터 role override를 명시한 경우 그것을 우선한다.
+    _orch_override = (role_models or {}).get(ROLE_ORCHESTRATOR)
+    _orch_override_active = _orch_override and (_orch_override.provider or _orch_override.model)
+    if _orch_override_active:
+        _cross_provider, _cross_capable_model = compose_role_override(
+            _orch_override, _provider_capable, model_capable
+        )
+    elif auto_select_by_complexity and _complexity_map:
         _cross_provider = _complexity_map["standard"]["provider_capable"]
         _cross_capable_model = _complexity_map["standard"]["model_capable"]
     else:

@@ -389,6 +389,16 @@ class TDDPipeline:
             logger.info("[%s] 즉시 중단 요청 — 파이프라인 종료", task.id)
             result = PipelineResult.failed(task, "[ABORTED] 사용자 즉시 중단 요청")
 
+        # 실제 API 응답 모델명(버전 suffix 포함)으로 덮어쓴다.
+        # call_log가 없는 역할(파이프라인이 해당 역할 전 실패)은 사전 계산값 유지.
+        for _role_key in [ROLE_TEST_WRITER, ROLE_IMPLEMENTER, ROLE_REVIEWER]:
+            _logs = result.metrics.call_logs.get(_role_key, [])
+            if _logs:
+                _actual_model = _logs[-1].get("model", "")
+                if _actual_model and _role_key in models_used:
+                    _provider = models_used[_role_key].split("/")[0]
+                    models_used[_role_key] = f"{_provider}/{_actual_model}"
+
         result.models_used = models_used
         return result
 
