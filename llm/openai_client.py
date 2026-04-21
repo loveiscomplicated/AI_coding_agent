@@ -44,7 +44,7 @@ import time
 from typing import Generator
 
 try:
-    from openai import OpenAI, RateLimitError, BadRequestError
+    from openai import OpenAI, RateLimitError
 except ImportError:
     raise ImportError("openai 패키지가 없어요. 실행: uv add openai")
 
@@ -200,8 +200,6 @@ class OpenaiClient(BaseLLMClient):
         tools = kwargs.get("tools")
         if tools:
             create_kwargs["tools"] = tools
-        if self.config.temperature is not None:
-            create_kwargs["temperature"] = self.config.temperature
 
         bucket = get_bucket("openai", self.config.model)
         estimate = estimate_tokens_from_messages(
@@ -227,17 +225,6 @@ class OpenaiClient(BaseLLMClient):
                         e,
                     )
                     time.sleep(delay)
-                except BadRequestError as e:
-                    # reasoning 모델(o1/o3)은 temperature 파라미터 자체를 거부함
-                    if "temperature" in str(e) and "temperature" in create_kwargs:
-                        logger.warning(
-                            "모델 %s이 temperature를 지원하지 않습니다. temperature 없이 재시도합니다.",
-                            self.config.model,
-                        )
-                        del create_kwargs["temperature"]
-                        response = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
-                        break
-                    raise
         except Exception:
             bucket.reconcile(handle, 0)
             raise
@@ -292,8 +279,6 @@ class OpenaiClient(BaseLLMClient):
         tools = kwargs.get("tools")
         if tools:
             create_kwargs["tools"] = tools
-        if self.config.temperature is not None:
-            create_kwargs["temperature"] = self.config.temperature
 
         bucket = get_bucket("openai", self.config.model)
         estimate = estimate_tokens_from_messages(
@@ -319,16 +304,6 @@ class OpenaiClient(BaseLLMClient):
                         e,
                     )
                     time.sleep(delay)
-                except BadRequestError as e:
-                    if "temperature" in str(e) and "temperature" in create_kwargs:
-                        logger.warning(
-                            "모델 %s이 temperature를 지원하지 않습니다. temperature 없이 재시도합니다.",
-                            self.config.model,
-                        )
-                        del create_kwargs["temperature"]
-                        stream = self._client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
-                        break
-                    raise
         except Exception:
             bucket.reconcile(handle, 0)
             raise
