@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Mapping
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 
@@ -64,6 +65,14 @@ ROLE_REVIEWER = "reviewer"
 ROLE_ORCHESTRATOR = "orchestrator"
 ROLE_MERGE_AGENT = "merge_agent"
 ROLE_INTERVENTION = "intervention"
+MODEL_ROLE_KEYS = (
+    ROLE_TEST_WRITER,
+    ROLE_IMPLEMENTER,
+    ROLE_REVIEWER,
+    ROLE_ORCHESTRATOR,
+    ROLE_MERGE_AGENT,
+    ROLE_INTERVENTION,
+)
 ROLE_COMPACTION_BUILTINS = frozenset({
     ROLE_TEST_WRITER,
     ROLE_IMPLEMENTER,
@@ -115,67 +124,68 @@ ROLE_COMPACTION_PRESETS: dict[str, dict[str, int]] = {
 
 @dataclass
 class RoleModelConfig:
-    """역할별 모델 오버라이드 설정. None인 필드는 기본값(model_fast/model_capable) 사용."""
+    """역할별 모델 설정 또는 override."""
 
     provider: str | None = None
     model: str | None = None
 
 
+RoleModelMap = Mapping[str, RoleModelConfig | Mapping[str, str]]
+ComplexityRoleModelMap = Mapping[str, RoleModelMap]
+
+
+def _extract_role_model(config: RoleModelConfig | Mapping[str, str]) -> tuple[str | None, str | None]:
+    if isinstance(config, RoleModelConfig):
+        return config.provider, config.model
+    return config.get("provider"), config.get("model")
+
+
+def _require_resolved_role_model(
+    role: str,
+    role_models: RoleModelMap | None,
+) -> tuple[str, str]:
+    if not role_models or role not in role_models:
+        raise KeyError(f"role '{role}' 모델 설정이 없습니다")
+    provider, model = _extract_role_model(role_models[role])
+    if not provider or not model:
+        raise ValueError(f"role '{role}' 모델 설정이 불완전합니다: provider={provider!r}, model={model!r}")
+    return provider, model
+
+
 def resolve_model_for_role(
     role: str,
     role_models: dict[str, RoleModelConfig] | None,
-    provider: str,
-    model_fast: str,
-    model_capable: str,
-    provider_fast: str | None = None,
-    provider_capable: str | None = None,
+    default_role_models: RoleModelMap,
 ) -> tuple[str, str]:
     """역할에 맞는 (provider, model) 튜플을 반환한다.
 
-    우선순위: role_models[role] → fast/capable 기본값 → 공통 provider
+    우선순위: role_models[role] → default_role_models[role]
 
     Args:
         role: 역할 키 (ROLE_TEST_WRITER 등)
         role_models: 역할별 모델 오버라이드 딕셔너리. None이면 기본값만 사용.
-        provider: 공통 기본 프로바이더
-        model_fast: 코딩 에이전트 기본 모델
-        model_capable: 오케스트레이터 기본 모델
-        provider_fast: 코딩 에이전트 프로바이더 (None이면 provider 사용)
-        provider_capable: 오케스트레이터 프로바이더 (None이면 provider 사용)
+        default_role_models: 역할별 기본 모델 맵. 각 역할은 완전한 provider/model을 가져야 한다.
 
     Returns:
         (provider, model) 튜플
     """
-    role_cfg = (role_models or {}).get(role)
-
-    if role in (ROLE_ORCHESTRATOR, ROLE_INTERVENTION):
-        # 오케스트레이터/개입 분석은 capable 모델이 기본
-        resolved_provider = (role_cfg and role_cfg.provider) or provider_capable or provider
-        resolved_model = (role_cfg and role_cfg.model) or model_capable
-    else:
-        # 코딩 에이전트(TestWriter, Implementer, Reviewer, MergeAgent)는 fast 모델이 기본
-        resolved_provider = (role_cfg and role_cfg.provider) or provider_fast or provider
-        resolved_model = (role_cfg and role_cfg.model) or model_fast
-
-    return resolved_provider, resolved_model
+    base_provider, base_model = _require_resolved_role_model(role, default_role_models)
+    return compose_role_override((role_models or {}).get(role), base_provider, base_model)
 
 
 def resolve_complexity_model(
     role: str,
     complexity: str | None,
-    complexity_map: dict[str, dict[str, str]],
+    complexity_map: ComplexityRoleModelMap,
 ) -> tuple[str, str]:
     """태스크 복잡도에 기반한 (provider, model) 반환.
 
     - `complexity`가 "simple"/"standard"/"complex" 중 하나면 해당 tier 사용
     - 그 외 값(None 포함)은 "standard"로 fallback
-    - orchestrator/intervention 역할은 capable, 나머지 코딩 역할은 fast 사용
+    - 선택된 tier 내부에서 `role` 키의 provider/model을 그대로 사용
     """
     tier = complexity if complexity in complexity_map else "standard"
-    bucket = complexity_map[tier]
-    if role in (ROLE_ORCHESTRATOR, ROLE_INTERVENTION):
-        return bucket["provider_capable"], bucket["model_capable"]
-    return bucket["provider_fast"], bucket["model_fast"]
+    return _require_resolved_role_model(role, complexity_map[tier])
 
 
 def compose_role_override(
