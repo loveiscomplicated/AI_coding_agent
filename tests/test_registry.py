@@ -49,7 +49,8 @@ class TestToolsSchema:
         for tool_name, meta in TOOL_REGISTRY.items():
             schema_entry = next(e for e in TOOLS_SCHEMA if e["name"] == tool_name)
             required_in_schema = schema_entry["input_schema"].get("required", [])
-            for param, (_, _, is_required, _) in meta["params"].items():
+            for param, param_tuple in meta["params"].items():
+                _, _, is_required, _ = param_tuple[:4]
                 if is_required:
                     assert (
                         param in required_in_schema
@@ -60,7 +61,8 @@ class TestToolsSchema:
         for tool_name, meta in TOOL_REGISTRY.items():
             schema_entry = next(e for e in TOOLS_SCHEMA if e["name"] == tool_name)
             props = schema_entry["input_schema"]["properties"]
-            for param, (_, _, is_required, default) in meta["params"].items():
+            for param, param_tuple in meta["params"].items():
+                _, _, is_required, _ = param_tuple[:4]
                 if not is_required:
                     desc = props[param]["description"]
                     assert "기본값" in desc, f"{tool_name}.{param} 에 기본값 힌트 없음"
