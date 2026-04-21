@@ -60,7 +60,7 @@ export const DEFAULT_COMPLEXITY_MAP: ComplexityMap = {
 
 export interface PipelineTaskSummary {
   id: string
-  complexity?: 'simple' | 'standard' | 'complex' | null
+  complexity?: string | null
 }
 
 const SELECT_CLS =
@@ -369,6 +369,10 @@ export function PipelineModelModal({ models, onConfirm, onCancel, tasks }: Pipel
               data-testid="complexity-mapping-table"
               className="pt-2 border-t border-gray-100 dark:border-zinc-800 space-y-2"
             >
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                복잡도: <span className="font-mono">simple</span> / <span className="font-mono">non-simple</span> (자동 계산).
+                실패 시 다음 tier로 escalation (트리거: LOGIC_ERROR / MAX_ITER / CHANGES_REQUESTED).
+              </p>
               {(['simple', 'standard', 'complex'] as const).map(tier => (
                 <div
                   key={tier}

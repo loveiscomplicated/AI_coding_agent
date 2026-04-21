@@ -48,7 +48,7 @@ interface DashboardTask {
   status: string
   depends_on: string[]
   pr_url: string
-  complexity?: 'simple' | 'standard' | 'complex' | null
+  complexity?: string | null
   report: {
     test_count: number
     retry_count: number
@@ -57,6 +57,10 @@ interface DashboardTask {
     completed_at: string
     total_tokens: number
     cost_usd: number | null
+    models_escalated?: boolean
+    successful_tier?: string | null
+    escalation_trigger?: string | null
+    tier_attempts?: Array<{ tier: string; success: boolean; failure_type: string | null }>
   } | null
 }
 
@@ -1174,6 +1178,14 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
                               </span>
                             )}
                             <VerdictBadge verdict={task.report?.reviewer_verdict ?? ''} />
+                            {task.report?.models_escalated && (
+                              <span
+                                className="text-xs"
+                                title={`escalation: ${task.report.escalation_trigger ?? ''} → ${task.report.successful_tier ?? 'failed'}`}
+                              >
+                                ⬆️
+                              </span>
+                            )}
                             {task.report && (
                               <span className="text-xs text-gray-400 dark:text-zinc-500">
                                 {task.report.time_elapsed_seconds}s
