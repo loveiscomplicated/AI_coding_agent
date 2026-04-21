@@ -864,7 +864,7 @@ def run_pipeline(
     
                     if orch_attempt > 0:
                         emit({"type": "step", "task_id": task.id, "step": "orch_retry",
-                              "message": f"오케스트레이터 재시도 {orch_attempt}/{max_orchestrator_retries}…"})
+                              "message": f"오케스트레이터 재시도 {orch_attempt}/{_per_tier_retries}…"})
     
                     def _progress(event: dict, _tid=task.id) -> None:
                         emit({**event, "task_id": _tid})
@@ -957,10 +957,10 @@ def run_pipeline(
                     if is_max_iter:
                         logger.warning(
                             "[%s] ⚠️ 최대 반복 횟수 초과 (오케스트레이터 시도 %d/%d): %s",
-                            task.id, orch_attempt + 1, max_orchestrator_retries + 1, task.title,
+                            task.id, orch_attempt + 1, _per_tier_retries + 1, task.title,
                         )
     
-                    is_last_attempt = (orch_attempt >= max_orchestrator_retries)
+                    is_last_attempt = (orch_attempt >= _per_tier_retries)
     
                     if not is_last_attempt:
                         # ── 오케스트레이터 개입 전 중단 체크 ─────────────────────
@@ -971,15 +971,15 @@ def run_pipeline(
                         reason_snippet = failure_reason.replace("[MAX_ITER] ", "")[:200]
                         logger.warning(
                             "[%s] 실패 (시도 %d/%d) — 오케스트레이터 분석 시작\n  원인: %s",
-                            task.id, orch_attempt + 1, max_orchestrator_retries + 1, reason_snippet,
+                            task.id, orch_attempt + 1, _per_tier_retries + 1, reason_snippet,
                         )
                         _notify(notifier,
-                                f"🔍 [{task.id}] 실패 (시도 {orch_attempt + 1}/{max_orchestrator_retries + 1})"
+                                f"🔍 [{task.id}] 실패 (시도 {orch_attempt + 1}/{_per_tier_retries + 1})"
                                 f" — 오케스트레이터 분석 중…\n"
                                 f"원인: {reason_snippet}")
                         emit({"type": "orchestrator_analyzing", "task_id": task.id,
                               "title": task.title, "attempt": orch_attempt + 1,
-                              "max_attempts": max_orchestrator_retries + 1,
+                              "max_attempts": _per_tier_retries + 1,
                               "failure_reason": failure_reason, "is_max_iter": is_max_iter})
     
                         test_stdout = result.test_result.stdout if result.test_result else ""
@@ -1034,7 +1034,7 @@ def run_pipeline(
                             emit({"type": "orchestrator_retry", "task_id": task.id,
                                   "title": task.title, "attempt": orch_attempt + 1,
                                   "next_attempt": orch_attempt + 2,
-                                  "max_attempts": max_orchestrator_retries + 1,
+                                  "max_attempts": _per_tier_retries + 1,
                                   "hint": analysis.hint, "failure_reason": failure_reason})
                             continue  # 다음 orch_attempt — 새 WorkspaceManager로 재실행
     
@@ -1042,11 +1042,11 @@ def run_pipeline(
                             # GIVE_UP — 더 이상 시도하지 않음
                             logger.warning(
                                 "[%s] 오케스트레이터 → GIVE_UP (시도 %d/%d)\n  이유: %s",
-                                task.id, orch_attempt + 1, max_orchestrator_retries + 1, analysis.hint[:150],
+                                task.id, orch_attempt + 1, _per_tier_retries + 1, analysis.hint[:150],
                             )
                             _notify(notifier,
                                     f"🛑 [{task.id}] 오케스트레이터 포기 결정 "
-                                    f"(시도 {orch_attempt + 1}/{max_orchestrator_retries + 1})\n"
+                                    f"(시도 {orch_attempt + 1}/{_per_tier_retries + 1})\n"
                                     f"이유: {analysis.hint[:300]}")
                             emit({"type": "orchestrator_giveup", "task_id": task.id,
                                   "title": task.title, "attempt": orch_attempt + 1,
