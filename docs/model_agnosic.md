@@ -11,9 +11,9 @@
   ├──────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────┤
   │ tools/hotline_tools.py                   │ 동일 패턴. set_llm() + create_hotline_llms() 팩토리 추가                                                 │
   ├──────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ orchestrator/run.py                      │ create_client("claude", ...) 하드코딩 제거. --provider, --model-fast, --model-capable CLI 인자 추가      │
+  │ orchestrator/run.py                      │ create_client("claude", ...) 하드코딩 제거. 역할별 모델 설정 기반으로 run_pipeline 구성                  │
   ├──────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ backend/config.py                        │ ANTHROPIC_API_KEY 하드 의존 제거 → LLM_PROVIDER, LLM_MODEL_FAST, LLM_MODEL_CAPABLE env vars 추가         │
+  │ backend/config.py                        │ ANTHROPIC_API_KEY 하드 의존 제거 → LLM_PROVIDER, LLM_DEFAULT_MODEL, LLM_ROLE_<ROLE> env vars 추가       │
   ├──────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────┤
   │ backend/routers/chat.py                  │ AsyncAnthropic 제거 → BaseLLMClient.stream()을 thread+asyncio.Queue로 비동기 래핑. model 필드 optional화 │
   ├──────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────┤
@@ -28,12 +28,22 @@
 
   이제 다른 provider로 실행하려면:
   # OpenAI 사용
-  python -m orchestrator.run --tasks data/tasks.yaml --provider openai --model-fast gpt-4o-mini --model-capable gpt-4o
+  python -m orchestrator.run --tasks data/tasks.yaml \
+    --role-model test_writer=openai:gpt-4o-mini \
+    --role-model implementer=openai:gpt-4o-mini \
+    --role-model reviewer=openai:gpt-4o-mini \
+    --role-model orchestrator=openai:gpt-4o
 
   # Ollama 사용
-  python -m orchestrator.run --tasks data/tasks.yaml --provider ollama --model-fast qwen2.5-coder:7b --model-capable qwen2.5-coder:32b
+  python -m orchestrator.run --tasks data/tasks.yaml \
+    --role-model test_writer=ollama:qwen2.5-coder:7b \
+    --role-model implementer=ollama:qwen2.5-coder:7b \
+    --role-model reviewer=ollama:qwen2.5-coder:7b \
+    --role-model orchestrator=ollama:qwen2.5-coder:32b
 
   백엔드도 .env에서:
   LLM_PROVIDER=openai
-  LLM_MODEL_FAST=gpt-4o-mini
-  LLM_MODEL_CAPABLE=gpt-4o
+  LLM_DEFAULT_MODEL=gpt-4o
+  LLM_TITLE_MODEL=gpt-4o-mini
+  LLM_ROLE_IMPLEMENTER=openai:gpt-4o-mini
+  LLM_ROLE_ORCHESTRATOR=openai:gpt-4o

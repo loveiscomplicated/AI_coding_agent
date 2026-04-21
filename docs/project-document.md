@@ -51,8 +51,10 @@ AI 에이전트 팀을 활용한 소프트웨어 개발 파이프라인 구축. 
 | 오케스트레이터 | 태스크 분해, 컨텍스트 관리, 보고서 생성 | 설정 가능 (기본: claude-opus-4-6) | 중간 비용, 저빈도 |
 | 실행 에이전트 | 코드 작성, 테스트 생성, 코드 리뷰 | 설정 가능 (기본: claude-haiku-4-5-20251001) | 저비용, 고빈도 |
 
-모델은 환경 변수(`LLM_PROVIDER`, `LLM_MODEL_FAST`, `LLM_MODEL_CAPABLE`)로 설정한다.
-필요하면 `provider_fast`, `provider_capable`, `role_models`로 역할별 프로바이더/모델을 분리할 수 있다.
+모델은 환경 변수(`LLM_PROVIDER`, `LLM_DEFAULT_MODEL`, `LLM_TITLE_MODEL`)와
+역할별 모델 환경 변수(`LLM_ROLE_<ROLE>=provider:model`)로 설정한다.
+파이프라인 실행 시에는 `default_role_models`, `role_models`로 역할별
+프로바이더/모델을 직접 지정할 수 있다.
 지원 프로바이더: `claude`, `openai`, `glm`, `ollama`, `gemini`.
 
 ### 2.3 에이전트 샌드박스 구조
@@ -96,12 +98,12 @@ agent-data/tasks.yaml (수동 정의 또는 Sonnet 자동 생성 후 승인, leg
     │       - 선행 태스크 미완료 → filesystem 확인 → 없으면 [DEPENDENCY_MISSING] 즉시 실패
     │       - inject_dependency_context: target_files 경로 실패 시 git diff fallback
     │
-    ├─► STEP 1: TestWriter (LLM_MODEL_FAST + ScopedReactLoop)
+    ├─► STEP 1: TestWriter (test_writer role model + ScopedReactLoop)
     │       input:  task.description + acceptance_criteria + enriched description (선행 산출물 정보)
     │       output: workspace/tests/ 에 language/test_framework 기반 테스트 파일 작성
     │       tools:  read_file, write_file, list_directory, search_files
     │
-    ├─► STEP 2: Implementer (LLM_MODEL_FAST + ScopedReactLoop)
+    ├─► STEP 2: Implementer (implementer role model + ScopedReactLoop)
     │       input:  task + 테스트 파일들
     │       output: workspace/src/ 에 구현 파일 작성
     │       tools:  read_file, write_file, edit_file, list_directory, search_files
@@ -116,7 +118,7 @@ agent-data/tasks.yaml (수동 정의 또는 Sonnet 자동 생성 후 승인, leg
     │       FAIL (오케스트레이터 개입) → Sonnet 분석 → RETRY(힌트) or GIVE_UP
     │       PASS → 다음 단계
     │
-    ├─► STEP 4: Reviewer (LLM_MODEL_FAST + ScopedReactLoop, 읽기 전용)
+    ├─► STEP 4: Reviewer (reviewer role model + ScopedReactLoop, 읽기 전용)
     │       input:  task + 테스트 + 구현 + RunResult
     │       output: APPROVED / CHANGES_REQUESTED / ERROR + 피드백
     │       ※ CHANGES_REQUESTED여도 PR은 생성 — 사람이 최종 판단
@@ -232,7 +234,7 @@ AI_coding_agent/
 | 오케스트레이터 개입 | FailureType 분류 → ENV_ERROR/UNSUPPORTED_LANGUAGE 즉시 포기, LOGIC_ERROR만 LLM 분석 | 불필요한 LLM 호출 방지 |
 | 의존성 pre-check | 선행 태스크 DONE이면 스킵, 미완료만 filesystem 확인 | auto_merge 없이도 정상 동작 |
 | 태스크 초안 target_files | `src/` 접두어 제거 → 슬래시 1개면 1-level 경로 보존 → 2개 이상이면 basename 추출 | 패키지 구조 파괴 방지 + 깊은 패키지 경로 정리 |
-| 모델 선택 | 환경 변수 + 역할별 override (`provider_fast`, `provider_capable`, `role_models`) | coding/orchestrator/intervention을 독립 튜닝 가능 |
+| 모델 선택 | 환경 변수 + 역할별 기본값/override (`LLM_ROLE_<ROLE>`, `default_role_models`, `role_models`) | 모든 역할을 독립 튜닝 가능 |
 | git push 스킵 | no_push=True 시 로컬 브랜치·커밋만 생성, push/PR 건너뜀 (UI 토글로 제어) | 원격 공개 없이 로컬 검증 가능 |
 | LLM 토큰·비용 추적 | 역할별 input/output/cached_read/cached_write + JSONL call log 저장 | 비용·캐시 hit·모델별 사용량 가시화 |
 | LLM API 429/TPM 방어 | `llm/rate_limiter.py`의 sliding-window 예약 + 429 poison + 클라이언트별 재시도 | 병렬 에이전트 thundering herd 방지 |
@@ -551,8 +553,8 @@ Phase 3 추가 구현 ✅ 완료 (2026-03-31)
   ├── PipelineModelModal ✅
   │     frontend/src/components/PipelineModelModal.tsx
   │     GET /api/models 로 프로바이더별 모델 목록 조회 (claude/openai/glm/ollama/gemini 동적 열거)
-  │     파이프라인 실행 전 fast/capable 모델, 프로바이더, 병렬 에이전트 수 선택
-  │     역할별 override(test_writer / implementer / reviewer) 지정 가능
+  │     파이프라인 실행 전 역할별 기본 모델, 병렬 에이전트 수 선택
+  │     역할별 override(test_writer / implementer / reviewer / orchestrator / merge_agent / intervention) 지정 가능
   ├── 오케스트레이터 개입 로직 ✅
   │     orchestrator/intervention.py — analyze() / generate_report() / save_report()
   │     에이전트 실패 시 LLM이 근본 원인 분석 → RETRY(힌트 주입) or GIVE_UP 결정

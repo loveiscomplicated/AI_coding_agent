@@ -771,7 +771,7 @@ def summarize_previous_attempt(
 ```
 
 요약 LLM 호출 시:
-- 모델: `LLM_MODEL_FAST` (오케스트레이터 모델 아님. 비용 절감)
+- 모델: 요약 전용 저비용 role model 또는 별도 저비용 기본 모델 (오케스트레이터 기본 모델 아님. 비용 절감)
 - 입력: call_log에서 도구 이름 시퀀스 + assistant 메시지 텍스트 일부 추출
   (raw JSONL을 그대로 넣지 말고 압축된 형태로 정제)
 - max_tokens: 600
@@ -827,11 +827,11 @@ YAML 저장 시에는 휘발성이므로 제외 (저장하지 않음).
 
 ### 6) 비용 고려
 요약 LLM 호출은 retry마다 1회 추가됨 = 비용 증가.
-예상: 입력 ~2000 토큰, 출력 ~400 토큰, fast 모델이므로 ~$0.005 수준.
+예상: 입력 ~2000 토큰, 출력 ~400 토큰, 저비용 요약 모델 기준 ~$0.005 수준.
 이 비용이 "잘못된 retry 방지"로 상쇄되는지 작성자 판단 근거를 PR 설명에 기록.
 
 ## 하지 말 것
-- 요약 프롬프트를 capable 모델로 돌리지 말 것 (비용 과다)
+- 요약 프롬프트를 오케스트레이터급 고비용 모델로 돌리지 말 것 (비용 과다)
 - call_log 전체를 raw로 넣지 말 것 (토큰 폭발)
 - 요약을 위한 추가 요약 재귀는 금지 (1 레벨만)
 - 첫 시도(retry_count == 0)에서 요약 호출 금지
@@ -870,7 +870,7 @@ YAML 저장 시에는 휘발성이므로 제외 (저장하지 않음).
       (요약 호출 $0.005 × retry_count 평균 0.3회 = 태스크당 $0.0015 추가)
 - [ ] 이 비용이 실패 태스크 비용 절감으로 상쇄되는가?
       작성자는 정량적 근거를 제시했는가?
-- [ ] fast 모델이 아닌 경로로 호출되지 않도록 하드코딩 검증했는가?
+- [ ] 저비용 요약 모델이 아닌 경로로 호출되지 않도록 검증했는가?
 
 ### C. 요약 품질
 - [ ] 작성자가 제공한 샘플 요약이 실제로 다음 시도에 **유용**한가?
@@ -906,7 +906,7 @@ pytest tests/ -x --tb=short
 ## 회신 형식
 상단의 "공통 검토 원칙" 형식을 따른다.
 특히 다음은 반드시 CHANGES_REQUESTED:
-- capable 모델로 요약이 호출되는 경로 존재
+- 오케스트레이터급 고비용 모델로 요약이 호출되는 경로 존재
 - call_log가 압축 없이 raw로 전달 (토큰 폭발)
 - intervention과 중복 힌트 주입 방지 로직 없음
 - 요약 LLM 에러 시 파이프라인 크래시
@@ -959,7 +959,7 @@ class CompactionResult:
 
 def compact_history(
     messages: list[Message],
-    llm_client,              # fast 모델
+    llm_client,              # 저비용 요약 모델
     keep_first_n: int = 2,   # system, 첫 user 메시지는 보존
     keep_last_n: int = 4,    # 최근 N 메시지(2 턴)는 보존
 ) -> CompactionResult:
@@ -1046,7 +1046,7 @@ compaction 발생 시 로그:
 - 첫 user 메시지(태스크 설명) 절대 드롭하지 말 것 — 캐시 prefix가 깨짐
 - system 메시지 드롭 금지
 - compaction 중 tool_use/tool_result 페어 깨지 말 것
-- capable 모델로 요약 호출 금지
+- 오케스트레이터급 고비용 모델로 요약 호출 금지
 
 ## 테스트 요구사항
 1. `tests/test_compactor.py`:
@@ -1433,7 +1433,7 @@ pytest tests/ -x --tb=short
 | #6 | E2E에서 실제 `test_design_notes.md` 1개 생성 확인. Implementer가 해당 파일을 참조하는 로그 1건 이상 확인. |
 | #7 | 실제 context_doc으로 초안 생성 후, 생성된 description 중 75% 이상이 4섹션 중 3개 이상 포함. 변경 전 description 대비 길이 2배 이상 증가. 환각 비고려 항목이 0건. |
 | #2 | `verify_cache_hit.py` 2회차 호출에서 cached_tokens > 0 확인. 동일 태스크 2회 실행 시 2회차의 cache_hit_rate가 첫 회 대비 유의미 상승. |
-| #4 | retry 유발 태스크에서 retry_summary가 Implementer 프롬프트에 포함됨을 로그로 확인. capable 모델이 아닌 fast 모델로 호출됨을 token_usage에서 확인. |
+| #4 | retry 유발 태스크에서 retry_summary가 Implementer 프롬프트에 포함됨을 로그로 확인. 오케스트레이터급 고비용 모델이 아닌 저비용 요약 모델로 호출됨을 token_usage에서 확인. |
 | #5 | A/B 비교에서 default(compaction on)가 baseline(`DISABLE_COMPACTION=1`) 대비 total_tokens 감소, cache_hit_rate 유지, 태스크 성공 동일. 불리하면 기본값 off로 두고 stop. |
 
 ### 검토 결과 템플릿
