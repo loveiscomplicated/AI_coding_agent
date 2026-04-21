@@ -1,6 +1,6 @@
 # Multi-Agent Development System
 
-> 프로젝트 문서 v2.1 | 2026-04-18 — Gemini 프로바이더 추가, 언어별 task draft/language 필드 정착, 클라이언트 측 TPM·RPM rate limiter, prompt cache 관측성, semantic auto-compaction, Reviewer/Implementer 신뢰성 강화
+> 프로젝트 문서 v2.2 | 2026-04-21 — Momus critique 시스템, 태스크 complexity 라벨, Quality Gate, APPROVED_WITH_SUGGESTIONS, collect-only 게이트, intervention 자동 분해, 이상치 탐지, 역할별 압축 프리셋, 의존성 그래프 UI
 
 ---
 
@@ -154,9 +154,10 @@ AI_coding_agent/
 │   ├── ollama_client.py       # Ollama 로컬 서버 클라이언트
 │   └── rate_limiter.py        # 클라이언트 측 TPM/RPM sliding-window limiter + 429 poison
 ├── orchestrator/
-│   ├── task.py                # Task 데이터 모델 + TaskStatus enum + YAML 로드/저장
-│   ├── pipeline.py            # TDDPipeline 상태 머신 (의존성 pre-check, enriched description)
-│   ├── task_redesign.py       # 태스크 재설계 유틸리티 (실험적)
+│   ├── task.py                # Task 데이터 모델 + TaskStatus enum (SUPERSEDED 포함) + YAML 로드/저장
+│   ├── pipeline.py            # TDDPipeline 상태 머신 (의존성 pre-check, enriched description, Quality Gate)
+│   ├── quality_gate.py        # Quality Gate (TestWriter 종료 후 룰 기반 형식 검증, BLOCKING/WARNING severity)
+│   ├── task_redesign.py       # 태스크 재설계 + 자동 분해(split) 유틸리티
 │   ├── workspace.py           # WorkspaceManager (tmp 생성/정리, 의존성 산출물 주입 + fallback)
 │   ├── git_workflow.py        # GitWorkflow (git worktree 기반)
 │   ├── merge_agent.py         # MergeAgent (LLM 기반 머지 충돌 자동 해결)
@@ -186,7 +187,8 @@ AI_coding_agent/
 │   ├── main.py                # FastAPI 앱 진입점
 │   └── routers/
 │       ├── chat.py            # POST /api/chat/stream, POST /api/chat/complete, GET /api/models
-│       ├── tasks.py           # GET/POST /api/tasks, GET/PATCH /api/tasks/{id}, POST/GET /api/tasks/draft[/{job_id}], POST /api/tasks/{id}/redesign, POST /api/tasks/fix-dependencies
+│       ├── health.py          # GET /api/health
+│       ├── tasks.py           # GET/POST /api/tasks, GET/PATCH /api/tasks/{id}, POST/GET /api/tasks/draft[/{job_id}], POST/GET /api/tasks/critique[/{job_id}], POST /api/tasks/critique/apply, POST /api/tasks/{id}/redesign, POST /api/tasks/fix-dependencies
 │       ├── pipeline.py        # POST /api/pipeline/run, GET /api/pipeline/status/{id}, GET /api/pipeline/stream/{id}, GET /api/pipeline/jobs, POST /api/pipeline/control/{id}
 │       ├── reports.py         # POST /api/execution-brief, GET /api/project-structure, POST/GET /api/reports/weekly[/{year}/{week}]
 │       ├── dashboard.py       # GET /api/dashboard/summary, /tasks, /milestones[/{filename}]
@@ -204,7 +206,8 @@ AI_coding_agent/
 │       │   ├── TaskDraftPanel.tsx
 │       │   ├── DashboardPage.tsx
 │       │   ├── ProjectListPage.tsx
-│       │   ├── PipelineModelModal.tsx  # 모델/프로바이더 선택 모달
+│       │   ├── PipelineModelModal.tsx  # 모델/프로바이더 선택 모달 (complexity 자동 선택 토글 포함)
+│       │   ├── DependencyGraphModal.tsx # 의존성 DAG 시각화 + 편집 모달
 │       │   ├── SettingsModal.tsx       # 프로바이더/모델 설정 모달
 │       │   └── ...
 │       └── hooks/
@@ -237,6 +240,12 @@ AI_coding_agent/
 | 긴 세션 컨텍스트 관리 | semantic auto-compaction으로 middle history 요약, prefix와 최근 turns 보존 | 긴 ReAct 세션에서 컨텍스트 폭주 방지 |
 | 신규 target_file 처리 | workspace 생성 시 빈 스켈레톤 선주입 + Implementer 후 엄격 가드 | 탐색 루프 감소, “성공했지만 파일 없음” 차단 |
 | Reviewer 인프라 장애 분리 | 파싱 불가/LLM 실패는 `verdict=ERROR` | 코드 품질 문제와 인프라 실패를 분리 |
+| Reviewer 스타일 지적 분리 | APPROVED_WITH_SUGGESTIONS — 스타일 제안은 PR을 막지 않음 | CHANGES_REQUESTED는 진짜 결함에만 사용 |
+| TestWriter 형식 검증 | Quality Gate (BLOCKING/WARNING 룰) — LLM 호출 없는 결정적 AST 검사 | 형식 오류를 실행 전에 조기 차단 |
+| 테스트 수집 게이트 | collect-only 사전 검사 → COLLECTION_ERROR / NO_TESTS_COLLECTED 분류 | 수집 실패와 실행 실패를 구분 |
+| 태스크 복잡도 라벨 | `complexity`: simple/standard/complex — 3단계 규칙(하드→보조→기본값)으로 결정 | auto_select_by_complexity로 모델 자동 매핑 |
+| 태스크 자동 분해 | intervention_auto_split — 최종 실패 시 LLM이 2~3개 하위 태스크로 분해, SUPERSEDED 상태 | 복잡한 태스크를 사람 개입 없이 재구성 |
+| 초안 Critique | Momus — 5개 카테고리 LLM 검토 + 자동 적용 (POST /api/tasks/critique[/apply]) | 파이프라인 실행 전 구조적 결함 조기 발견 |
 
 ### 2.5.4 E2E 검증 결과 (2026-03-30)
 
@@ -599,6 +608,61 @@ Phase 3 신뢰성 강화 ✅ 완료 (2026-04-18)
         core/compactor.py + ReactLoop._maybe_compact()
         threshold 30k, prefix 보존, 최근 turns 유지, 2-iter cooldown, env 킬스위치 지원
 
+Phase 4: 품질·자동화 강화 ✅ 완료 (2026-04-21)
+  ├── 태스크 complexity 라벨 ✅
+  │     Task.complexity: "simple" | "standard" | "complex" | None
+  │     _DRAFT_SYSTEM_PROMPT에 3단계 판정 절차 내장 (하드 규칙 → 보조 규칙 → 기본값)
+  │     auto_select_by_complexity 플래그 ON 시 complexity → 모델 자동 매핑
+  │     role_models는 complexity 매핑의 상위 override로 유지
+  ├── Momus Critique 시스템 ✅
+  │     POST /api/tasks/critique  — 초안 비판적 검토 시작 (비동기, job_id 반환)
+  │     GET  /api/tasks/critique/{job_id} — 상태/결과 조회
+  │     POST /api/tasks/critique/apply — critique 기반 자동 수정 (동기, 병합 결과 반환)
+  │     5개 카테고리: sizing / testability / dependency / scope / description
+  │     verdict: APPROVED | NEEDS_REVISION. APPROVED도 suggestions 포함 가능
+  │     서버에서 APPROVED + ERROR issue 모순 자동 보정 → NEEDS_REVISION으로 강제
+  │     TaskDraftPanel: "🦉 Momus 검토" 버튼, issue 인라인 표시, "제안 적용" 버튼
+  │     적용 완료 후 critique 버튼 비활성화 (재실행 전까지)
+  │     태스크 수동 변경 시 이전 검토 결과 자동 초기화
+  ├── Quality Gate ✅
+  │     orchestrator/quality_gate.py — TestWriter 종료 직후 1회 실행
+  │     BLOCKING / WARNING severity 룰 기반 형식 검증
+  │     verdict: PASS / WARNING / BLOCKED
+  │     BLOCKED → TestWriter 재시도 트리거 (LLM 호출 없는 결정적 검사)
+  │     Python AST + 파일시스템 순수 함수로 구현
+  ├── APPROVED_WITH_SUGGESTIONS verdict ✅
+  │     스타일 지적이 PR을 막지 않도록 APPROVED와 CHANGES_REQUESTED 사이 단계 추가
+  │     APPROVED + APPROVED_WITH_SUGGESTIONS → PR 생성 가능
+  │     대시보드에서 "승인" 카운트에 포함
+  ├── collect-only 게이트 ✅
+  │     pytest / jest / gradle 테스트 수집 사전 검사 (본 실행 전)
+  │     COLLECTION_ERROR / NO_TESTS_COLLECTED 실패 유형 추가
+  │     수집 실패 시 조기 분기 → Implementer 재시도 없이 즉시 분류
+  ├── intervention 자동 분해(auto-split) ✅
+  │     RunRequest.intervention_auto_split: bool
+  │     최종 실패 직전 LLM이 태스크를 2~3개 하위 태스크로 자동 분해
+  │     원본 태스크 → TaskStatus.SUPERSEDED, 하위 태스크 → tasks.yaml 추가
+  │     다음 파이프라인 실행 시 픽업 (현재 실행 내 즉시 실행 아님)
+  │     orchestrator/task_redesign.py split 기능 + orchestrator/workspace.py 스켈레톤 주입
+  ├── 역할별 압축 프리셋 ✅
+  │     agents/roles.py: ROLE_COMPACTION_PRESET_BALANCED 등 프리셋 정의
+  │     RunRequest: role_compaction_tuning_enabled / preset / overrides
+  │     역할별(implementer, reviewer 등) 압축 임계값 독립 튜닝 가능
+  ├── 이상치 탐지 (대시보드) ✅
+  │     backend/routers/dashboard.py: _detect_outlier_tasks()
+  │     통계 기반 (μ + 2σ) 이상치 탐지 — 실행 시간 / 재시도 횟수 초과 태스크 표시
+  │     대시보드 UI에서 이상치 태스크 하이라이트
+  ├── 의존성 그래프 모달 ✅
+  │     frontend/src/components/DependencyGraphModal.tsx
+  │     의존성 DAG 시각화 + 순환 참조 시각화 + 드래그 편집
+  │     TaskDraftPanel 헤더 "의존성 그래프" 버튼으로 접근
+  │     순환 참조 시 빨간 강조 + "⚠ 의존성 그래프 수정" 버튼
+  ├── 태스크 초안 모델 런타임 설정 ✅
+  │     tools/hotline_tools.py: get_task_draft_model() / get_redesign_model()
+  │     UI에서 초안 생성·재설계에 사용할 모델을 런타임에 선택 가능
+  └── 헬스 체크 엔드포인트 ✅
+        GET /api/health → {"status": "ok"}
+
 8단계 - 음성 인터페이스 (선택, 별도)
   ├── STT 입력 (Web Speech API)
   ├── TTS 출력
@@ -640,3 +704,17 @@ Phase 3 신뢰성 강화 ✅ 완료 (2026-04-18)
 | TestWriter WRITE_LOOP | ✅ write_deadline 초과 감지 + 재시도 로직 추가 | 완료 |
 | Gemini 프로바이더 | ✅ GeminiClient, GEMINI_API_KEY, 모델 목록/선택 UI 반영 | 완료 |
 | Semantic auto-compaction | ✅ ReactLoop가 긴 히스토리를 자동 요약, `DISABLE_COMPACTION=1` 킬스위치 제공 | 완료 |
+| 태스크 complexity 라벨 | ✅ Task.complexity (simple/standard/complex) + _DRAFT_SYSTEM_PROMPT 3단계 판정 절차 | 완료 |
+| auto_select_by_complexity | ✅ RunRequest 파라미터 + PipelineModelModal 토글 — 복잡도별 모델 자동 매핑 | 완료 |
+| Momus Critique 시스템 | ✅ POST /api/tasks/critique (비동기) + GET /api/tasks/critique/{id} + POST /api/tasks/critique/apply | 완료 |
+| Quality Gate | ✅ orchestrator/quality_gate.py — BLOCKING/WARNING 룰 기반, TestWriter 종료 후 1회 실행 | 완료 |
+| APPROVED_WITH_SUGGESTIONS | ✅ 스타일 지적은 PR을 막지 않음. APPROVED와 CHANGES_REQUESTED 사이 verdict 추가 | 완료 |
+| collect-only 게이트 | ✅ 테스트 수집 사전 검사, COLLECTION_ERROR/NO_TESTS_COLLECTED 분류 | 완료 |
+| intervention 자동 분해 | ✅ RunRequest.intervention_auto_split + TaskStatus.SUPERSEDED + 하위 태스크 tasks.yaml 추가 | 완료 |
+| 역할별 압축 프리셋 | ✅ agents/roles.py 프리셋 + role_compaction_tuning_enabled/preset/overrides RunRequest 파라미터 | 완료 |
+| 이상치 탐지 | ✅ dashboard API: _detect_outlier_tasks() μ+2σ 기반, 대시보드 UI 하이라이트 | 완료 |
+| 의존성 그래프 모달 | ✅ DependencyGraphModal.tsx — DAG 시각화 + 순환 참조 감지 + 편집 | 완료 |
+| 태스크 초안 모델 런타임 설정 | ✅ tools/hotline_tools.py get_task_draft_model() / get_redesign_model() | 완료 |
+| 헬스 체크 엔드포인트 | ✅ GET /api/health → {"status": "ok"} | 완료 |
+| 역할별 압축 임계값 A/B 벤치마크 | scripts/benchmark_compaction.py 등 — 프리셋 비교 도구 | 필요 시 |
+| Quality Gate 비-Python 언어 지원 | 현재 Python AST만 지원, JS/TS/Kotlin 등은 파일 존재 여부만 검사 | 필요 시 |

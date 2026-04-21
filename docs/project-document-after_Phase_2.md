@@ -1,6 +1,6 @@
 ---
 completeness: 99
-hint: Phase 3 신뢰성 강화 완료 (2026-04-18). Gemini 프로바이더 추가, language 기반 task draft, client-side TPM/RPM rate limiter, prompt cache 관측성, semantic auto-compaction, Reviewer/Implementer 신뢰성 강화 반영.
+hint: Phase 4 품질·자동화 강화 완료 (2026-04-21). Momus critique 시스템, 태스크 complexity 라벨, Quality Gate, APPROVED_WITH_SUGGESTIONS, collect-only 게이트, intervention 자동 분해, 이상치 탐지, 역할별 압축 프리셋, 의존성 그래프 UI 반영.
 ---
 
 # 프로젝트 컨텍스트 문서: Multi-Agent Development System — 5단계 오케스트레이터 연결
@@ -84,6 +84,9 @@ chat.py:
   POST /api/chat/complete      LLM 단일 응답 (비스트리밍)
   GET  /api/models             사용 가능한 프로바이더별 모델 목록
 
+health.py:
+  GET  /api/health             헬스 체크 → {"status": "ok"}
+
 tasks.py:
   GET  /api/tasks              태스크 목록 조회
   POST /api/tasks              태스크 목록 전체 저장 (덮어쓰기)
@@ -91,6 +94,9 @@ tasks.py:
   PATCH /api/tasks/{id}        태스크 부분 업데이트 (description, acceptance_criteria)
   POST /api/tasks/draft        태스크 초안 생성 시작 (비동기, job_id 반환)
   GET  /api/tasks/draft/{job_id} 초안 생성 상태/결과 조회
+  POST /api/tasks/critique     초안 비판적 검토 시작 (비동기, job_id 반환)
+  GET  /api/tasks/critique/{job_id} 검토 상태/결과 조회
+  POST /api/tasks/critique/apply   critique 결과 기반 자동 수정 (동기, 병합 결과 반환)
   POST /api/tasks/{id}/redesign   실패 태스크 재설계 초안 생성 (비동기, job_id 반환)
   GET  /api/tasks/redesign/{job_id} 재설계 상태/결과 조회
   POST /api/tasks/fix-dependencies  순환 depends_on 자동 수정
@@ -245,6 +251,7 @@ tasks:
     title: "메트릭 수집기"
     task_type: backend          # "backend" 또는 "frontend"
     language: python            # docker runner / 프롬프트 선택 기준
+    complexity: standard        # "simple" | "standard" | "complex" | 생략 가능 (기본 standard)
     description: "..."
     depends_on: []              # 의존하는 태스크 ID 리스트
     acceptance_criteria:
@@ -252,7 +259,7 @@ tasks:
     target_files:               # 생성 또는 수정할 파일 경로 (3개 이하)
       - "metrics/collector.py"
     test_framework: pytest      # 생략 시 language 기본값 사용
-    status: pending             # pending | writing_tests | implementing | running_tests | reviewing | committing | done | failed
+    status: pending             # pending | writing_tests | implementing | running_tests | reviewing | committing | done | failed | superseded
 ```
 
 ---
@@ -280,9 +287,14 @@ base_branch: str              PR 베이스 브랜치 (기본: "main")
 task_id: str | None           단일 태스크 실행 (None이면 전체)
 no_pr: bool                   PR 생성 생략
 no_push: bool                 True 시 로컬 브랜치·커밋만 생성, push/PR 건너뜀
+verbose: bool                 상세 로깅
+reports_dir: str | None       TaskReport 저장 경로 (None → repo_path/agent-data/reports)
+logs_dir: str | None          로그 저장 경로 (None → repo_path/agent-data/logs)
 max_workers: int              병렬 에이전트 수 (기본: 1, 순차)
-max_orchestrator_retries: int 오케스트레이터 자동 재시도 최대 횟수 (기본: 2)
+max_orchestrator_retries: int 오케스트레이터 자동 재시도 최대 횟수 (기본: 3, 총 시도 = 이 값 + 1)
 auto_merge: bool              그룹 완료 후 base_branch에 자동 머지
+intervention_auto_split: bool True 시 최종 실패 직전 LLM이 태스크를 2~3개 하위 태스크로 자동 분해
+auto_select_by_complexity: bool True 시 Task.complexity 라벨로 모델 자동 선택 (role_models는 상위 override 유지)
 provider: str                 공통 기본 프로바이더
 model_fast: str               코딩 에이전트 모델
 model_capable: str            오케스트레이터 모델
@@ -290,6 +302,9 @@ provider_fast: str | None     코딩 에이전트 프로바이더 (None이면 pr
 provider_capable: str | None  오케스트레이터 프로바이더 (None이면 provider 사용)
 discord_channel_id: str|None  Discord 채널 ID
 role_models: dict | None      역할별 모델 오버라이드 (test_writer/implementer/reviewer/orchestrator/merge_agent/intervention)
+role_compaction_tuning_enabled: bool    역할별 압축 임계값 튜닝 활성화
+role_compaction_tuning_preset: str      압축 프리셋 이름 (기본: BALANCED)
+role_compaction_tuning_overrides: dict | None  역할별 프리셋 override (예: {"implementer": "aggressive"})
 ```
 
 ### 4.2 태스크 간 의존성 처리 ✅ 구현 완료
@@ -770,12 +785,24 @@ task-004: execution_brief 생성기 (→ task-001)
 | 테스트 통과 판정 보정 | ✅ OK: 접두어 + pytest "N passed" (failed/error 없음) 패턴 인식 | 완료 |
 | depends_on 필드 정확한 스펙 | ✅ 문자열 리스트 (task ID) 확정, YAML로 저장 | 완료 |
 | 파이프라인 동기/비동기 실행 | ✅ POST /api/pipeline/run → job_id 비동기 실행, SSE 스트리밍 | 완료 |
+| 태스크 complexity 라벨 | ✅ Task.complexity (simple/standard/complex) + 3단계 판정 + auto_select_by_complexity | 완료 |
+| Momus Critique 시스템 | ✅ POST /api/tasks/critique + GET/{id} + POST /critique/apply, TaskDraftPanel UI 통합 | 완료 |
+| Quality Gate | ✅ orchestrator/quality_gate.py — BLOCKING/WARNING 룰, Python AST 검사, TestWriter 재시도 연동 | 완료 |
+| APPROVED_WITH_SUGGESTIONS | ✅ 스타일 지적이 PR을 막지 않음, 대시보드 "승인" 카운트 포함 | 완료 |
+| collect-only 게이트 | ✅ pytest/jest/gradle 사전 검사, COLLECTION_ERROR/NO_TESTS_COLLECTED 분류 | 완료 |
+| intervention 자동 분해 | ✅ RunRequest.intervention_auto_split, TaskStatus.SUPERSEDED, 하위 태스크 tasks.yaml 추가 | 완료 |
+| 역할별 압축 프리셋 | ✅ agents/roles.py 프리셋 + RunRequest role_compaction_tuning_* 파라미터 | 완료 |
+| 이상치 탐지 | ✅ _detect_outlier_tasks() μ+2σ 기반, dashboard API + UI 하이라이트 | 완료 |
+| 의존성 그래프 모달 | ✅ DependencyGraphModal.tsx — DAG 시각화 + 순환 참조 감지 + 편집 | 완료 |
+| 태스크 초안 모델 런타임 설정 | ✅ get_task_draft_model() / get_redesign_model() — UI에서 모델 선택 가능 | 완료 |
+| 헬스 체크 | ✅ GET /api/health → {"status": "ok"} | 완료 |
 | 아이맥 서버 Docker 호환성 | macOS Monterey 경계선, 실측 필요 | 서버 이전 검토 시 |
 | Weekly Report 패턴 감지 임계값 | 합리적 기본값으로 시작, 실데이터 후 조정 | 첫 2~3주 운영 후 |
 | DB 전환 | JSON/YAML → SQLite or PostgreSQL | 데이터 복잡도 증가 시 |
 | CI/CD 통합 | GitHub Actions 유력 | Phase 3 이후 |
 | 핫라인 확장 (버튼, /run 명령) | 미구현 — 기본 텍스트 양방향만 | 필요 시 |
 | Monthly Report | 미구현 — Weekly 축적 후 추가 | 필요 시 |
+| Quality Gate 비-Python 지원 | Python AST만 지원, 비-Python 언어는 파일 존재 여부만 | 필요 시 |
 
 ---
 
@@ -910,6 +937,155 @@ core/loop.py
 - 최근 turns는 keep_last_n으로 유지
 - 2-iteration cooldown으로 연쇄 compaction 방지
 - `DISABLE_COMPACTION=1` 킬스위치 제공
+
+---
+
+## 15. Phase 4 품질·자동화 강화 (2026-04-21) ✅ 완료
+
+### 15.1 태스크 complexity 라벨
+
+각 태스크에 복잡도 라벨을 부여해 모델 자동 선택에 활용한다.
+
+```
+Task.complexity: "simple" | "standard" | "complex" | None
+
+3단계 판정 절차 (_DRAFT_SYSTEM_PROMPT 내):
+  1단계 — 하드 규칙 (target_files 수 / depends_on 수 / criteria 수의 max tier)
+  2단계 — 보조 규칙 (비표준 API, 동시성, 도메인 지식 등 2개+ 해당 시 승격)
+  3단계 — 기본값 standard
+
+RunRequest.auto_select_by_complexity = True
+  → Task.complexity 라벨로 모델 자동 매핑
+  → role_models는 complexity 매핑의 상위 override 유지
+  → PipelineModelModal: "복잡도 자동 선택" 토글로 UI에서 제어
+```
+
+### 15.2 Momus Critique 시스템
+
+파이프라인 실행 전 태스크 초안의 구조적 결함을 사전에 발견하는 LLM 기반 검토 시스템.
+
+```
+POST /api/tasks/critique
+  → 백그라운드에서 LLM이 5개 카테고리 검토
+  → verdict: APPROVED | NEEDS_REVISION
+  → issues: [{task_id, severity(ERROR|WARNING), category, message}]
+
+카테고리:
+  scope       — context_doc 범위 이탈 여부
+  sizing      — target_files 3개 초과 여부
+  testability — acceptance_criteria 검증 가능성
+  dependency  — depends_on 정합성 + 순환 참조
+  description — 4개 섹션 헤더 누락 + 100자 미만
+
+POST /api/tasks/critique/apply
+  → critique.issues + suggestions를 근거로 최소 수정만 적용
+  → 수정된 태스크만 updated_tasks에 포함 (변경 없는 태스크 제외)
+  → dangling depends_on 자동 제거
+
+UI (TaskDraftPanel):
+  "🦉 Momus 검토" 버튼 → critique 실행 → 결과 배너 표시
+  태스크별 인라인 issue 표시 (ERROR: 빨강, WARNING: 노랑)
+  "제안 적용" 버튼 → critique/apply → 태스크 일괄 업데이트
+  적용 완료 후 버튼 비활성화 (태스크 재수정 전까지)
+  태스크 수동 변경 시 이전 검토 결과 자동 초기화 + 리셋 알림
+  파이프라인 실행 버튼: critique 미실행 시 확인 다이얼로그 표시
+```
+
+### 15.3 Quality Gate
+
+TestWriter 종료 직후 1회 실행하여 테스트 파일의 형식적 유효성을 검사한다.
+
+```
+orchestrator/quality_gate.py
+
+특성:
+  - LLM 호출 없음 → 결정적·고속·단위 테스트 용이
+  - Python AST + 파일시스템 기반 순수 함수
+  - BLOCKING 룰 실패 → TestWriter 재시도 트리거
+  - WARNING 룰 실패 → 진행, TaskReport에 기록
+
+Verdict:
+  PASS    — 모든 룰 통과
+  WARNING — BLOCKING 전부 통과 + WARNING 룰 일부 실패
+  BLOCKED — BLOCKING 룰 하나라도 실패
+
+비-Python 언어: 현재 파일 존재 여부만 검사 (AST 지원 예정)
+```
+
+### 15.4 APPROVED_WITH_SUGGESTIONS verdict
+
+```
+Reviewer 판정 종류 확장:
+  APPROVED                — 결함 없음, PR 생성
+  APPROVED_WITH_SUGGESTIONS — 스타일·개선 제안 있음, PR 생성 (CHANGES_REQUESTED 아님)
+  CHANGES_REQUESTED       — 기능적 결함, PR 생성 (사람이 최종 판단)
+  ERROR                   — 인프라 장애, verdict 파싱 실패
+
+대시보드 "승인" 카운트: APPROVED + APPROVED_WITH_SUGGESTIONS 모두 포함
+```
+
+### 15.5 collect-only 게이트
+
+```
+pytest / jest / gradle 테스트 수집 사전 검사 (본 실행 전 별도 단계)
+
+COLLECTION_ERROR       — 수집 자체가 실패 (import 오류, 문법 오류)
+NO_TESTS_COLLECTED     — 수집은 성공했지만 테스트 함수가 0개
+
+수집 실패 시 즉시 분기:
+  → Implementer 재시도 없이 바로 FailureType 분류
+  → 오케스트레이터 개입 여부 결정
+```
+
+### 15.6 intervention 자동 분해 (auto-split)
+
+```
+RunRequest.intervention_auto_split = True
+  → 최종 실패 (max_orchestrator_retries 초과) 직전
+  → LLM이 태스크를 2~3개 하위 태스크로 분해
+  → 원본 태스크: TaskStatus.SUPERSEDED (YAML에 보존)
+  → 하위 태스크: tasks.yaml에 추가 (다음 파이프라인 실행 시 픽업)
+
+관련 파일:
+  orchestrator/task_redesign.py — split 기능
+  orchestrator/workspace.py     — 하위 태스크 스켈레톤 주입
+  orchestrator/intervention.py  — 다언어 스켈레톤 파일 생성
+```
+
+### 15.7 역할별 압축 프리셋
+
+```
+agents/roles.py:
+  ROLE_COMPACTION_PRESET_BALANCED (기본)
+  ROLE_COMPACTION_PRESET_AGGRESSIVE
+  ROLE_COMPACTION_PRESET_DEFAULT
+  역할별 압축 임계값 독립 정의
+
+RunRequest:
+  role_compaction_tuning_enabled: bool
+  role_compaction_tuning_preset: str
+  role_compaction_tuning_overrides: dict (예: {"implementer": "aggressive"})
+```
+
+### 15.8 이상치 탐지 (대시보드)
+
+```
+backend/routers/dashboard.py: _detect_outlier_tasks()
+  → 실행 시간 / 재시도 횟수 기준 μ+2σ 초과 태스크 탐지
+  → GET /api/dashboard/summary 에 outlier_tasks 목록 포함
+  → DashboardPage: 이상치 태스크 UI 하이라이트
+```
+
+### 15.9 의존성 그래프 모달
+
+```
+frontend/src/components/DependencyGraphModal.tsx
+  → 의존성 DAG 시각화 (방향 그래프)
+  → 순환 참조 시 빨간 강조
+  → TaskDraftPanel: "의존성 그래프" 버튼으로 접근
+                    순환 참조 시 "⚠ 의존성 그래프 수정" 버튼
+  → 편집 후 "적용"으로 tasks 업데이트
+```
 
 ---
 
