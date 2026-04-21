@@ -9,10 +9,14 @@ call_tool()    : 이름으로 도구 호출
 from __future__ import annotations
 
 from tools.file_tools import (
+    HashMismatchError,
+    LineNotFoundError,
     append_to_file,
     delete_directory,
     delete_file,
     edit_file,
+    hashline_edit,
+    hashline_read,
     list_directory,
     read_file,
     read_file_lines,
@@ -27,10 +31,11 @@ from tools.hotline_tools import ask_user
 from tools.schemas import ToolResult as SchemaToolResult
 
 # ── 타입 별칭 ─────────────────────────────────────────────────────────────────
-# 각 파라미터 항목: (type, description, required, default)
-#   type     : JSON Schema 타입 문자열  "string" | "integer" | "boolean" | "number"
-#   required : True이면 LLM이 반드시 채워야 함
-#   default  : required=False일 때 함수 기본값을 LLM에게 알려주는 힌트 (description에 삽입됨)
+# 각 파라미터 항목: (type, description, required, default[, items_type])
+#   type       : JSON Schema 타입 문자열  "string" | "integer" | "boolean" | "number" | "array"
+#   required   : True이면 LLM이 반드시 채워야 함
+#   default    : required=False일 때 함수 기본값을 LLM에게 알려주는 힌트 (description에 삽입됨)
+#   items_type : "array" 타입일 때 items의 type (기본 "string", "object" 가능)
 _Param = tuple[str, str, bool, object]  # (type, description, required, default)
 
 
@@ -112,6 +117,47 @@ TOOL_REGISTRY: dict[str, dict] = {
                 None,
             ),
             "new_str": ("string", "새 문자열", True, None),
+        },
+    },
+    "hashline_read": {
+        "fn": hashline_read,
+        "is_write_tool": False,
+        "description": (
+            "파일을 읽되 각 줄 앞에 LLL#HHH| 태그를 붙인다. "
+            "출력 형식 예: 001#VKA| def foo():  (줄번호#3자해시| 내용). "
+            "해시와 줄번호로 구성된 line_ref(예: 001#VKA)를 hashline_edit에 그대로 사용. "
+            "줄번호가 고유성을 보장하므로 동일 내용 반복이 있어도 suffix 없이 구분. "
+            "편집 대상 파일을 읽을 때 read_file 대신 이 도구를 우선 사용하세요."
+        ),
+        "params": {
+            "path": ("string", "읽을 파일 경로", True, None),
+            "start_line": ("integer", "시작 줄 번호 (1-indexed). 생략 시 1", False, 1),
+            "end_line": ("integer", "끝 줄 번호 (1-indexed, 포함). 생략 시 파일 끝까지", False, None),
+        },
+    },
+    "hashline_edit": {
+        "fn": hashline_edit,
+        "is_write_tool": True,
+        "description": (
+            "edits 목록을 원자적으로 파일에 적용한다. "
+            "line_ref는 hashline_read 출력의 LLL#HHH 부분을 그대로 복사. "
+            "action: replace(new_content), delete, insert_after(content), insert_before(content). "
+            "하나라도 실패하면 전체 거부(파일 무변경). "
+            "HashMismatchError: 파일이 변경됨 → hashline_read 재호출 후 재시도. "
+            "단일 줄 수정 시 edit_file 대신 이 도구를 우선 사용하세요."
+        ),
+        "params": {
+            "path": ("string", "수정할 파일 경로", True, None),
+            "edits": (
+                "array",
+                (
+                    "편집 목록. 각 항목: {action, line_ref, new_content/content}. "
+                    "action: replace|delete|insert_after|insert_before"
+                ),
+                True,
+                None,
+                "object",
+            ),
         },
     },
     "append_to_file": {
@@ -287,9 +333,8 @@ def _build_tools_schema(registry: dict, provider: str = "anthropic") -> list[dic
         properties: dict[str, dict] = {}
         required: list[str] = []
 
-        for param_name, (p_type, p_desc, p_required, p_default) in meta[
-            "params"
-        ].items():
+        for param_name, param_tuple in meta["params"].items():
+            p_type, p_desc, p_required, p_default = param_tuple[:4]
             prop: dict = {
                 "type": p_type,
                 "description": (
@@ -297,7 +342,9 @@ def _build_tools_schema(registry: dict, provider: str = "anthropic") -> list[dic
                 ),
             }
             if p_type == "array":
-                prop["items"] = {"type": "string"}
+                # 5번째 요소가 있으면 그것을 items type으로 사용 (기본 "string")
+                items_type = param_tuple[4] if len(param_tuple) > 4 else "string"
+                prop["items"] = {"type": items_type}
             properties[param_name] = prop
 
             if p_required:
