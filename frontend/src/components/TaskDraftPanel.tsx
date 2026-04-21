@@ -839,14 +839,18 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
               <div className="mt-2 space-y-1" data-testid="global-issues">
                 {critiqueResult.issues.filter(i => i.task_id === 'GLOBAL').map((issue, i) => (
                   <div key={i} className={`flex items-start gap-1.5 text-xs ${
-                    issue.severity === 'ERROR' ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'
+                    applyStatus === 'done'
+                      ? 'text-blue-600 dark:text-blue-400'
+                      : issue.severity === 'ERROR' ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'
                   }`}>
                     <span className={`shrink-0 px-1 py-0.5 rounded text-[9px] font-medium border ${
-                      issue.severity === 'ERROR'
-                        ? 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20'
-                        : 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20'
+                      applyStatus === 'done'
+                        ? 'border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-900/20'
+                        : issue.severity === 'ERROR'
+                          ? 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20'
+                          : 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20'
                     }`}>[{issue.category}]</span>
-                    <span>{issue.message}</span>
+                    <span>{applyStatus === 'done' ? `(수정됨) — ${issue.message}` : issue.message}</span>
                   </div>
                 ))}
               </div>
@@ -878,6 +882,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
             critiqueIssues={critiqueResult?.issues.filter(
               issue => issue.task_id !== 'GLOBAL' && issue.task_id === task.id
             )}
+            critiqueApplied={applyStatus === 'done'}
           />
         ))}
 
@@ -903,9 +908,10 @@ interface CardProps {
   onMove: (dir: -1 | 1) => void
   onDismissWarning: (warningIdx: number) => void
   critiqueIssues?: CritiqueIssue[]
+  critiqueApplied?: boolean
 }
 
-function TaskCard({ task, idx, total, onUpdate, onDelete, onMove, onDismissWarning, critiqueIssues }: CardProps) {
+function TaskCard({ task, idx, total, onUpdate, onDelete, onMove, onDismissWarning, critiqueIssues, critiqueApplied }: CardProps) {
   function updateField<K extends keyof DraftTask>(key: K, value: DraftTask[K]) {
     onUpdate({ ...task, [key]: value })
   }
@@ -1065,16 +1071,20 @@ function TaskCard({ task, idx, total, onUpdate, onDelete, onMove, onDismissWarni
         <div className="space-y-1">
           {critiqueIssues!.map((issue, i) => (
             <div key={i} className={`flex items-start gap-1.5 text-xs rounded border px-2 py-1.5 ${
-              issue.severity === 'ERROR'
-                ? 'text-red-600 dark:text-red-400 border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20'
-                : 'text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/10'
+              critiqueApplied
+                ? 'text-blue-600 dark:text-blue-400 border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-900/20'
+                : issue.severity === 'ERROR'
+                  ? 'text-red-600 dark:text-red-400 border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20'
+                  : 'text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/10'
             }`}>
               <span className={`shrink-0 px-1 py-0.5 rounded text-[9px] font-medium border ${
-                issue.severity === 'ERROR'
-                  ? 'border-red-300 dark:border-red-700'
-                  : 'border-amber-300 dark:border-amber-700'
+                critiqueApplied
+                  ? 'border-blue-300 dark:border-blue-700'
+                  : issue.severity === 'ERROR'
+                    ? 'border-red-300 dark:border-red-700'
+                    : 'border-amber-300 dark:border-amber-700'
               }`}>[{issue.category}]</span>
-              <span>{issue.message}</span>
+              <span>{critiqueApplied ? `(수정됨) — ${issue.message}` : issue.message}</span>
             </div>
           ))}
         </div>

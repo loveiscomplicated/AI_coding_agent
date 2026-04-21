@@ -577,16 +577,6 @@ def start_critique(body: CritiqueRequest) -> dict:
     return {"job_id": job_id}
 
 
-@router.get("/tasks/critique/{job_id}")
-def get_critique_status(job_id: str) -> dict:
-    """Critique 잡의 상태와 결과를 반환한다."""
-    with _critique_lock:
-        job = _critique_jobs.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Critique 잡 '{job_id}'를 찾을 수 없습니다.")
-    return {"status": job["status"], "result": job["result"]}
-
-
 _CRITIQUE_APPLY_SYSTEM_PROMPT = """\
 당신은 소프트웨어 태스크 초안을 수정하는 전문가입니다.
 critique 결과(issues + suggestions)를 근거로 태스크 배열을 최소한으로 수정하세요.
@@ -687,6 +677,16 @@ def apply_critique(body: CritiqueApplyRequest) -> dict:
     cleaned = re.sub(r"\s*```$", "", cleaned)
 
     return _parse_and_validate_apply_response(cleaned, body.tasks)
+
+
+@router.get("/tasks/critique/{job_id}")
+def get_critique_status(job_id: str) -> dict:
+    """Critique 잡의 상태와 결과를 반환한다."""
+    with _critique_lock:
+        job = _critique_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Critique 잡 '{job_id}'를 찾을 수 없습니다.")
+    return {"status": job["status"], "result": job["result"]}
 
 
 @router.get("/tasks")
