@@ -37,6 +37,7 @@ _PATH_ARG_WRITE_TOOLS = frozenset(WRITE_TOOLS)
 _PATH_ARG_READ_TOOLS = frozenset([
     "read_file", "read_file_lines", "list_directory",
     "search_in_file", "get_outline", "get_function_src", "get_imports",
+    "hashline_read",
 ])
 
 
@@ -111,8 +112,10 @@ class ScopedReactLoop(ReactLoop):
 
         # 읽기 전용 도구 연속 호출 감지 (탐색 루프 방지)
         self._consecutive_readonly = 0
-        self._readonly_tool_names = frozenset({"read_file", "list_directory", "search_files"})
-        self._write_tool_names = frozenset({"write_file", "edit_file"})
+        self._readonly_tool_names = frozenset({
+            "read_file", "list_directory", "search_files", "hashline_read",
+        })
+        self._write_tool_names = frozenset(WRITE_TOOLS)
         # 쓰기 도구가 없는 역할(Reviewer 등)에는 경고 비활성화.
         # 읽기 전용 역할에 "write_file을 호출하세요" 경고를 주입하면 LLM이 혼란에 빠져
         # "파일이 텍스트로만 출력됨" 등의 오판을 유발한다.
