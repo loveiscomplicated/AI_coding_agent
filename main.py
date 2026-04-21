@@ -19,6 +19,7 @@ import sys
 
 from cli import interface as ui
 from cli.commands import Action, handle
+from cli.interrupt import EscInterruptHandler
 from core.config import load_config
 from core.loop import ReactLoop
 from core.undo import ChangeTracker
@@ -175,8 +176,7 @@ def main() -> None:
 
     # ── ReAct 루프 설정 ───────────────────────────────────────────────────────
     approval_handler = (
-        None if agent_cfg.auto_approve
-        else ui.ApprovalHandler(tracker=tracker)
+        None if agent_cfg.auto_approve else ui.ApprovalHandler(tracker=tracker)
     )
     loop = ReactLoop(
         llm=client,
@@ -210,6 +210,8 @@ def main() -> None:
         f"provider={provider}  model={model}  session=[{session.session_id[:8]}]"
     )
 
+    esc_handler = EscInterruptHandler()
+
     while True:
         try:
             raw = ui.get_input(session.session_id[:8])
@@ -235,11 +237,48 @@ def main() -> None:
         history = mgr.get_history(session.session_id)
         expanded = expand_at_mentions(raw)
 
+        esc_handler.reset()
+        loop.stop_check = esc_handler.is_interrupted
         try:
-            loop_result = loop.run(expanded, history=history)
+            with esc_handler:
+                loop_result = loop.run(expanded, history=history)
         except Exception as e:
             ui.print_error(f"루프 실행 중 오류: {e}")
+            loop.stop_check = None
             continue
+        finally:
+            loop.stop_check = None
+
+        # ── ESC 인터럽트 처리 ────────────────────────────────────────────────
+        if esc_handler.was_interrupted:
+            ui.console.print(
+                "\n[bold yellow]Interrupted[/bold yellow] · "
+                "What should agent do instead? "
+                "[dim](비우고 Enter 시 취소)[/dim]"
+            )
+            try:
+                redirect = ui.get_input(session.session_id[:8])
+            except KeyboardInterrupt:
+                redirect = ""
+
+            if not redirect.strip():
+                ui.print_info("인터럽트 취소됨.")
+                continue
+
+            # redirect를 새 입력으로 루프 재실행 (기존 히스토리 유지)
+            history = mgr.get_history(session.session_id)
+            redirect_expanded = expand_at_mentions(redirect)
+            esc_handler.reset()
+            loop.stop_check = esc_handler.is_interrupted
+            try:
+                with esc_handler:
+                    loop_result = loop.run(redirect_expanded, history=history)
+            except Exception as e:
+                ui.print_error(f"루프 실행 중 오류: {e}")
+                loop.stop_check = None
+                continue
+            finally:
+                loop.stop_check = None
 
         # 이번 턴에 새로 추가된 메시지만 저장
         # result.messages = [system, *history, user_input, *new_turns]
