@@ -1,5 +1,7 @@
 # tools/file_tools.py
 
+import base64
+import hashlib
 import os
 import re
 import shutil
@@ -34,6 +36,50 @@ def _resolve_within_workspace(path: str) -> tuple[Path, Path]:
         raise ValueError(f"보호 경로는 삭제할 수 없습니다: {top}/")
 
     return resolved, workspace
+
+# ── 해시 헬퍼 ────────────────────────────────────
+
+
+def _line_hash(line: str) -> str:
+    """줄 내용의 3자 대문자 콘텐츠 해시 (shake_128 2바이트 → base32 앞 3자)."""
+    digest = hashlib.shake_128(line.encode("utf-8")).digest(2)
+    return base64.b32encode(digest).decode("ascii").rstrip("=")[:3]
+
+
+def _build_hashline_table(lines: list[str]) -> list[tuple[str, str]]:
+    """각 줄에 line_ref (LLL#HHH)를 부여한다. 줄번호가 고유성을 보장하므로 suffix 없음."""
+    pad_width = max(3, len(str(len(lines))))
+    return [
+        (f"{str(i).zfill(pad_width)}#{_line_hash(line)}", line)
+        for i, line in enumerate(lines, 1)
+    ]
+
+
+# ── 예외 타입 ─────────────────────────────────────
+
+
+class HashMismatchError(Exception):
+    """line_ref의 라인 번호는 존재하지만 해시가 현재 내용과 다름 (stale ref)."""
+
+    def __init__(self, ref: str, actual_hash: str, current_line: str, recovery: str):
+        self.ref = ref
+        self.actual_hash = actual_hash
+        self.current_line = current_line
+        self.recovery = recovery
+        super().__init__(
+            f"HashMismatchError: ref='{ref}' actual_hash='{actual_hash}' "
+            f"current_line={current_line!r} recovery='{recovery}'"
+        )
+
+
+class LineNotFoundError(Exception):
+    """line_ref의 라인 번호가 파일 범위를 벗어남."""
+
+    def __init__(self, ref: str, reason: str):
+        self.ref = ref
+        self.reason = reason
+        super().__init__(f"LineNotFoundError: ref='{ref}' reason='{reason}'")
+
 
 # ── 읽기 ──────────────────────────────────────────
 
@@ -206,6 +252,210 @@ def edit_file(path: str, old_str: str, new_str: str) -> ToolResult:
         return ToolResult(success=True, output=f"수정 완료: {path}")
     except Exception as e:
         return ToolResult(success=False, output="", error=str(e))
+
+
+def hashline_read(
+    path: str,
+    start_line: int = 1,
+    end_line: int | None = None,
+) -> ToolResult:
+    """
+    파일을 읽되 각 줄 앞에 `LLL#HH|` 태그를 붙여 반환한다.
+
+    출력 형식: 001#VK| def calculate(a, b):
+    - LLL: 파일 라인 수 기준 zero-padded 번호 (최소 3자리)
+    - HH: 2자 대문자 콘텐츠 해시 (충돌 시 suffix: HH2, HH3, …)
+    - | : 고정 separator (파이프 + 공백)
+
+    파일이 1000라인 초과 또는 100KB 초과 시 첫 줄에 경고 prepend.
+    end_line=None 이면 끝까지 읽는다.
+    """
+    try:
+        p = Path(path)
+        try:
+            raw = p.read_bytes()
+        except FileNotFoundError:
+            return ToolResult(success=False, output="", error=f"파일 없음: {path}")
+
+        try:
+            file_text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"UTF-8 디코딩 실패: {path} — {exc.reason} (position {exc.start})",
+            )
+
+        lines = file_text.splitlines()
+        total = len(lines)
+
+        if total == 0:
+            return ToolResult(success=True, output="")
+
+        # Large file warning
+        warnings: list[str] = []
+        if total > 1000 or len(raw) > 100 * 1024:
+            warnings.append(
+                f"# WARNING: large file ({total} lines). "
+                "Use read_file if you only need to read."
+            )
+
+        # Range validation
+        s = start_line
+        e = end_line if end_line is not None else total
+
+        if s < 1:
+            return ToolResult(success=False, output="", error="start_line must be >= 1")
+        if s > total:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"start_line {s} exceeds file length ({total} lines)",
+            )
+        if s > e:
+            return ToolResult(success=False, output="", error="start_line > end_line")
+        e = min(e, total)
+
+        # Build full table first (collision counters need the full file)
+        table = _build_hashline_table(lines)
+        sliced = table[s - 1 : e]
+        formatted = [f"{ref}| {line}" for ref, line in sliced]
+
+        return ToolResult(success=True, output="\n".join(warnings + formatted))
+    except Exception as exc:
+        return ToolResult(success=False, output="", error=str(exc))
+
+
+def hashline_edit(path: str, edits: list[dict]) -> ToolResult:
+    """
+    edits 목록을 파일에 원자적으로 적용한다.
+
+    edits 형식:
+        {"action": "replace",       "line_ref": "022#XJ", "new_content": "..."}
+        {"action": "delete",        "line_ref": "022#XJ"}
+        {"action": "insert_after",  "line_ref": "022#XJ", "content": "..."}
+        {"action": "insert_before", "line_ref": "022#XJ", "content": "..."}
+
+    반환:
+        성공: "applied N edits. new state:\\n" + 영향 구간 ±2줄의 새 hashline 표현
+        실패: HashMismatchError 또는 LineNotFoundError 메시지 (파일 무변경)
+    """
+    try:
+        p = Path(path)
+        try:
+            raw = p.read_bytes()
+        except FileNotFoundError:
+            return ToolResult(success=False, output="", error=f"파일 없음: {path}")
+
+        try:
+            file_text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"UTF-8 디코딩 실패: {path} — {exc.reason}",
+            )
+
+        lines = file_text.splitlines()
+        total = len(lines)
+        ends_with_newline = file_text.endswith("\n")
+
+        # Build full hashline table
+        table = _build_hashline_table(lines)
+        ref_to_idx: dict[str, int] = {ref: i for i, (ref, _) in enumerate(table)}
+
+        # ── 검증 단계 ──────────────────────────────────────────────────────────
+        # 중복 line_ref 검사
+        seen_refs: set[str] = set()
+        for edit in edits:
+            ref = edit.get("line_ref", "")
+            if ref in seen_refs:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=f"중복 line_ref '{ref}': 동일 ref에 2개 이상의 action 불가",
+                )
+            seen_refs.add(ref)
+
+        # 각 edit의 line_ref 유효성 검사
+        validated: list[tuple[str, int, dict]] = []  # (action, 0-based-idx, edit)
+        for edit in edits:
+            action = edit.get("action", "")
+            ref = edit.get("line_ref", "")
+
+            if ref not in ref_to_idx:
+                # 라인 번호가 존재하는지 판별
+                try:
+                    line_num = int(ref.split("#")[0])
+                except (ValueError, IndexError, AttributeError):
+                    line_num = -1
+
+                if 1 <= line_num <= total:
+                    actual_ref, _ = table[line_num - 1]
+                    actual_hash = actual_ref.split("#")[1]
+                    raise HashMismatchError(
+                        ref=ref,
+                        actual_hash=actual_hash,
+                        current_line=lines[line_num - 1],
+                        recovery="call hashline_read again to refresh",
+                    )
+                else:
+                    raise LineNotFoundError(
+                        ref=ref,
+                        reason=f"line {line_num} does not exist",
+                    )
+
+            validated.append((action, ref_to_idx[ref], edit))
+
+        # ── 적용 단계 (아래부터 위 순서로 — 인덱스 보존) ─────────────────────
+        validated.sort(key=lambda x: x[1], reverse=True)
+        lines_mut = list(lines)
+        affected_original: list[int] = [idx for _, idx, _ in validated]
+
+        for action, idx, edit in validated:
+            if action == "replace":
+                lines_mut[idx] = edit.get("new_content", "")
+            elif action == "delete":
+                del lines_mut[idx]
+            elif action == "insert_after":
+                lines_mut.insert(idx + 1, edit.get("content", ""))
+            elif action == "insert_before":
+                lines_mut.insert(idx, edit.get("content", ""))
+            else:
+                return ToolResult(
+                    success=False, output="", error=f"알 수 없는 action: {action!r}"
+                )
+
+        # 파일 저장
+        if lines_mut:
+            new_text = "\n".join(lines_mut)
+            if ends_with_newline:
+                new_text += "\n"
+        else:
+            new_text = ""
+        p.write_text(new_text, encoding="utf-8")
+
+        # ── next_state: 영향 구간 ±2줄 ────────────────────────────────────────
+        new_lines = new_text.splitlines()
+        new_table = _build_hashline_table(new_lines)
+
+        if affected_original and new_lines:
+            lo = max(0, min(affected_original) - 2)
+            hi = min(len(new_lines) - 1, max(affected_original) + 2)
+            next_state = "\n".join(
+                f"{ref}| {line}" for ref, line in new_table[lo : hi + 1]
+            )
+        else:
+            next_state = ""
+
+        n = len(edits)
+        output = f"applied {n} edit{'s' if n != 1 else ''}. new state:\n{next_state}"
+        return ToolResult(success=True, output=output)
+
+    except (HashMismatchError, LineNotFoundError) as exc:
+        return ToolResult(success=False, output="", error=str(exc))
+    except Exception as exc:
+        return ToolResult(success=False, output="", error=str(exc))
 
 
 def append_to_file(path: str, content: str) -> ToolResult:
