@@ -52,6 +52,7 @@ class LLMResponse:
 
 _DEFAULT_SYSTEM = """\
 당신은 로컬 파일 시스템에서 작동하는 코딩 에이전트입니다.
+당신의 모델 이름은 {model}입니다. 자신이 누구냐는 질문에 이 이름을 답하세요.
 
 ## 행동 원칙
 
@@ -109,6 +110,10 @@ class LLMConfig:
     max_tokens: int = 4096
     system_prompt: str = _DEFAULT_SYSTEM
     extra: dict = field(default_factory=dict)  # provider별 추가 옵션
+
+    def __post_init__(self) -> None:
+        # {model} 플레이스홀더를 실제 모델명으로 교체
+        self.system_prompt = self.system_prompt.replace("{model}", self.model)
 
 
 class BaseLLMClient(ABC):
