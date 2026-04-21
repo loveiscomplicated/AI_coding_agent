@@ -14,8 +14,12 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from tools.file_tools import (
+    _build_hashline_table,
+    _line_hash,
     append_to_file,
     edit_file,
+    hashline_edit,
+    hashline_read,
     list_directory,
     read_file,
     read_file_lines,
@@ -552,3 +556,314 @@ class TestSearchInFileEdgeCases:
 
         assert result.success is True
         assert result.output.count("foo") == 3
+
+
+# ── hashline 테스트 공통 헬퍼 ────────────────────────────────────────────────
+
+
+def _find_collision_pair() -> tuple[str, str]:
+    """같은 _line_hash를 가진 서로 다른 두 문자열을 찾는다.
+    2자 base32 해시(1024 버킷)이므로 ~32회 내에 충돌 발생.
+    """
+    seen: dict[str, str] = {}
+    for i in range(100_000):
+        s = f"synthetic_collision_line_{i}"
+        h = _line_hash(s)
+        if h in seen:
+            return seen[h], s
+        seen[h] = s
+    raise RuntimeError("충돌 쌍을 찾지 못함")
+
+
+# ── hashline_read ─────────────────────────────────────────────────────────────
+
+
+class TestHashlineReadFormat:
+    def test_hashline_read_format(self, tmp_path):
+        """줄번호 zero-padding, 해시 길이, separator 형식 검증."""
+        import re
+        f = tmp_path / "fmt.py"
+        f.write_text("def foo():\n    return 1\n    pass\n", encoding="utf-8")
+
+        result = hashline_read(str(f))
+
+        assert result.success is True
+        lines_out = result.output.splitlines()
+        # 각 줄: 3자리 번호 # 2자리 해시 | 공백 내용
+        pattern = re.compile(r"^\d{3}#[A-Z2-7]{3}\| .*$")
+        for line in lines_out:
+            assert pattern.match(line), f"형식 불일치: {line!r}"
+        # 첫 줄은 001
+        assert lines_out[0].startswith("001#")
+        # 파일이 3줄이면 pad_width=3
+        assert lines_out[2].startswith("003#")
+
+    def test_hashline_read_empty_file(self, tmp_path):
+        """빈 파일은 빈 문자열 반환 (에러 아님)."""
+        f = tmp_path / "empty.py"
+        f.write_text("", encoding="utf-8")
+
+        result = hashline_read(str(f))
+
+        assert result.success is True
+        assert result.output == ""
+
+    def test_hashline_read_range(self, tmp_path):
+        """start_line / end_line 옵션이 올바르게 슬라이싱된다."""
+        f = tmp_path / "range.txt"
+        f.write_text("\n".join(f"line{i}" for i in range(1, 11)) + "\n", encoding="utf-8")
+
+        result = hashline_read(str(f), start_line=3, end_line=6)
+
+        assert result.success is True
+        out = result.output
+        # 줄 3-6만 포함
+        assert "003#" in out
+        assert "006#" in out
+        assert "002#" not in out
+        assert "007#" not in out
+
+    def test_hashline_read_collision_handling(self, tmp_path):
+        """동일 base hash를 가진 줄도 줄번호(LLL)로 고유한 line_ref를 갖는다."""
+        line_a, line_b = _find_collision_pair()
+        # 충돌하는 두 줄이 같은 base hash를 가짐을 전제
+        assert _line_hash(line_a) == _line_hash(line_b)
+
+        f = tmp_path / "collide.txt"
+        f.write_text(f"{line_a}\n{line_b}\nother_line\n", encoding="utf-8")
+
+        result = hashline_read(str(f))
+
+        assert result.success is True
+        lines_out = result.output.splitlines()
+
+        # suffix 없이 줄번호로 구분됨: 001#HHH| 와 002#HHH| (동일 해시지만 LLL이 다름)
+        base_h = _line_hash(line_a)
+        assert f"001#{base_h}|" in lines_out[0]
+        assert f"002#{base_h}|" in lines_out[1]  # suffix 없음
+
+        # 모든 line_ref가 고유한지 확인 (줄번호 덕분에 suffix 없이도 고유)
+        refs = [l.split("|")[0].strip() for l in lines_out]
+        assert len(refs) == len(set(refs)), "line_ref 중복 발생"
+
+    def test_hashline_read_large_file_warning(self, tmp_path):
+        """1000라인 초과 시 첫 줄에 WARNING이 prepend된다."""
+        f = tmp_path / "large.txt"
+        content = "\n".join(f"line_{i}" for i in range(1001)) + "\n"
+        f.write_text(content, encoding="utf-8")
+
+        result = hashline_read(str(f))
+
+        assert result.success is True
+        first_line = result.output.splitlines()[0]
+        assert first_line.startswith("# WARNING")
+        assert "1001" in first_line
+
+    def test_hashline_read_missing_file(self, tmp_path):
+        result = hashline_read(str(tmp_path / "ghost.py"))
+
+        assert result.success is False
+        assert result.error is not None
+
+    def test_hashline_read_hash_deterministic(self):
+        assert _line_hash("same") == _line_hash("same")
+        assert _line_hash("") == _line_hash("")
+
+    def test_hashline_read_hash_length(self):
+        for line in ["", "x", "    indented", "\ttab", "한글"]:
+            h = _line_hash(line)
+            assert len(h) == 3, f"해시 길이 != 3: {h!r} for {line!r}"
+
+    def test_hashline_read_separator_is_pipe_space(self, tmp_path):
+        """separator는 항상 파이프+공백('| ')이어야 한다."""
+        f = tmp_path / "sep.txt"
+        f.write_text("hello\n", encoding="utf-8")
+
+        result = hashline_read(str(f))
+
+        line = result.output.splitlines()[0]
+        # 형식: 001#HH| hello
+        tag, content = line.split("| ", 1)
+        assert tag.startswith("001#")
+        assert content == "hello"
+
+
+# ── hashline_edit ─────────────────────────────────────────────────────────────
+
+
+class TestHashlineEditBasic:
+    def test_hashline_edit_replace_success(self, tmp_path):
+        """정상 replace 편집."""
+        f = tmp_path / "code.py"
+        f.write_text("x = 1\ny = 2\nz = 3\n", encoding="utf-8")
+        table = _build_hashline_table(["x = 1", "y = 2", "z = 3"])
+        ref_y = table[1][0]  # "002#HH"
+
+        result = hashline_edit(str(f), [{"action": "replace", "line_ref": ref_y, "new_content": "y = 99"}])
+
+        assert result.success is True
+        assert f.read_text(encoding="utf-8").splitlines()[1] == "y = 99"
+
+    def test_hashline_edit_atomic_rejection(self, tmp_path):
+        """5개 edit 중 3번째가 mismatch면 1, 2번도 적용되지 않는다."""
+        lines = ["alpha", "beta", "gamma", "delta", "epsilon"]
+        f = tmp_path / "atomic.txt"
+        f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        original_content = f.read_text(encoding="utf-8")
+
+        table = _build_hashline_table(lines)
+        # 3번째 ref를 의도적으로 잘못된 해시로 변조
+        bad_ref = table[2][0].split("#")[0] + "#ZZ"
+
+        edits = [
+            {"action": "replace", "line_ref": table[0][0], "new_content": "EDIT1"},
+            {"action": "replace", "line_ref": table[1][0], "new_content": "EDIT2"},
+            {"action": "replace", "line_ref": bad_ref,     "new_content": "EDIT3"},
+            {"action": "replace", "line_ref": table[3][0], "new_content": "EDIT4"},
+            {"action": "replace", "line_ref": table[4][0], "new_content": "EDIT5"},
+        ]
+
+        result = hashline_edit(str(f), edits)
+
+        assert result.success is False
+        # 파일은 변경 전 상태 그대로
+        assert f.read_text(encoding="utf-8") == original_content
+
+    def test_hashline_edit_hash_mismatch_returns_actual_hash(self, tmp_path):
+        """HashMismatchError 메시지에 actual_hash와 recovery 지침이 포함된다."""
+        f = tmp_path / "mm.txt"
+        f.write_text("foo\nbar\n", encoding="utf-8")
+
+        # 줄 1은 존재하지만 해시가 틀린 ref
+        bad_ref = "001#ZZ"
+        result = hashline_edit(str(f), [{"action": "replace", "line_ref": bad_ref, "new_content": "x"}])
+
+        assert result.success is False
+        assert "actual_hash" in result.error
+        assert "hashline_read" in result.error
+
+    def test_hashline_edit_line_not_found(self, tmp_path):
+        """존재하지 않는 줄 번호의 line_ref."""
+        f = tmp_path / "short.txt"
+        f.write_text("only_one_line\n", encoding="utf-8")
+
+        result = hashline_edit(str(f), [{"action": "replace", "line_ref": "099#AB", "new_content": "x"}])
+
+        assert result.success is False
+        assert "LineNotFoundError" in result.error
+
+    def test_hashline_edit_insert_actions(self, tmp_path):
+        """insert_before / insert_after 동작 검증."""
+        f = tmp_path / "insert.txt"
+        f.write_text("line1\nline2\nline3\n", encoding="utf-8")
+        table = _build_hashline_table(["line1", "line2", "line3"])
+        ref2 = table[1][0]  # line2
+
+        # insert_after line2
+        result = hashline_edit(str(f), [{"action": "insert_after", "line_ref": ref2, "content": "inserted_after"}])
+
+        assert result.success is True
+        content_lines = f.read_text(encoding="utf-8").splitlines()
+        assert content_lines == ["line1", "line2", "inserted_after", "line3"]
+
+        # insert_before (재구성)
+        f.write_text("A\nB\nC\n", encoding="utf-8")
+        table2 = _build_hashline_table(["A", "B", "C"])
+        ref_b = table2[1][0]
+        result2 = hashline_edit(str(f), [{"action": "insert_before", "line_ref": ref_b, "content": "BEFORE_B"}])
+
+        assert result2.success is True
+        assert f.read_text(encoding="utf-8").splitlines() == ["A", "BEFORE_B", "B", "C"]
+
+    def test_hashline_edit_returns_next_state(self, tmp_path):
+        """적용 후 영향 구간 ±2줄의 새 hashline 표현이 반환된다."""
+        f = tmp_path / "ns.txt"
+        lines = [f"line{i}" for i in range(1, 8)]
+        f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        table = _build_hashline_table(lines)
+        ref4 = table[3][0]  # line4 (index 3)
+
+        result = hashline_edit(str(f), [{"action": "replace", "line_ref": ref4, "new_content": "REPLACED"}])
+
+        assert result.success is True
+        assert result.output.startswith("applied 1 edit. new state:")
+        # next_state 부분
+        next_state = result.output.split("new state:\n", 1)[1]
+        # REPLACED 가 새 해시와 함께 등장해야 함
+        assert "REPLACED" in next_state
+        # 해시 형식 포함
+        assert "#" in next_state and "| " in next_state
+
+    def test_hashline_edit_concurrent_modification_detected(self, tmp_path):
+        """hashline_read 후 파일이 변경되면 이전 ref로 edit 시 거부된다."""
+        f = tmp_path / "concurrent.txt"
+        f.write_text("original_line1\noriginal_line2\n", encoding="utf-8")
+
+        # 1) read
+        read_result = hashline_read(str(f))
+        assert read_result.success is True
+        first_line = read_result.output.splitlines()[0]
+        stale_ref = first_line.split("| ")[0]  # "001#HH"
+
+        # 2) 파일을 직접 수정 (concurrent write)
+        f.write_text("CHANGED_line1\noriginal_line2\n", encoding="utf-8")
+
+        # 3) 이전 ref로 edit 시도 → HashMismatchError
+        result = hashline_edit(str(f), [{"action": "replace", "line_ref": stale_ref, "new_content": "oops"}])
+
+        assert result.success is False
+        assert "HashMismatchError" in result.error
+
+    def test_hashline_edit_duplicate_line_ref_rejected(self, tmp_path):
+        """같은 line_ref에 2개 이상의 action이 있으면 거부된다."""
+        f = tmp_path / "dup.txt"
+        f.write_text("only\n", encoding="utf-8")
+        table = _build_hashline_table(["only"])
+        ref = table[0][0]
+
+        result = hashline_edit(str(f), [
+            {"action": "replace", "line_ref": ref, "new_content": "first"},
+            {"action": "replace", "line_ref": ref, "new_content": "second"},
+        ])
+
+        assert result.success is False
+        assert "중복" in result.error
+
+    def test_hashline_edit_missing_file(self, tmp_path):
+        result = hashline_edit(str(tmp_path / "no.txt"), [{"action": "replace", "line_ref": "001#AB", "new_content": "x"}])
+
+        assert result.success is False
+        assert result.error is not None
+
+    def test_hashline_edit_delete_action(self, tmp_path):
+        """delete action으로 줄을 삭제한다."""
+        f = tmp_path / "del.txt"
+        f.write_text("keep\ndelete_me\nkeep_too\n", encoding="utf-8")
+        table = _build_hashline_table(["keep", "delete_me", "keep_too"])
+        ref = table[1][0]
+
+        result = hashline_edit(str(f), [{"action": "delete", "line_ref": ref}])
+
+        assert result.success is True
+        assert f.read_text(encoding="utf-8").splitlines() == ["keep", "keep_too"]
+
+
+# ── 역할 할당 통합 테스트 ─────────────────────────────────────────────────────
+
+
+class TestHashlineRoleAssignment:
+    def test_implementer_role_has_hashline_tools(self):
+        from agents.roles import IMPLEMENTER
+        assert "hashline_read" in IMPLEMENTER.allowed_tools
+        assert "hashline_edit" in IMPLEMENTER.allowed_tools
+
+    def test_test_writer_role_has_hashline_tools(self):
+        from agents.roles import TEST_WRITER
+        assert "hashline_read" in TEST_WRITER.allowed_tools
+        assert "hashline_edit" in TEST_WRITER.allowed_tools
+
+    def test_reviewer_role_does_not_have_hashline_edit(self):
+        from agents.roles import REVIEWER
+        assert "hashline_edit" not in REVIEWER.allowed_tools
+        # hashline_read는 읽기 전용이므로 REVIEWER에게 허용됨
+        assert "hashline_read" in REVIEWER.allowed_tools
