@@ -207,11 +207,14 @@ class TDDPipeline:
         self.role_compaction_tuning_overrides = role_compaction_tuning_overrides or {}
         self.auto_select_by_complexity = auto_select_by_complexity
         self.complexity_map = complexity_map or {}
+        # escalation tier override: _run_pipeline이 run() 호출 시 설정, 종료 시 리셋.
+        # _resolve_provider_model이 per-call tier보다 이 값을 우선하도록 설계됨.
+        self._current_tier: str | None = None
 
     # ── 역할별 모델 해석 ─────────────────────────────────────────────────────
 
     def _resolve_provider_model(
-        self, role: str, task: "Task | None"
+        self, role: str, task: "Task | None", tier: str | None = None
     ) -> tuple[str, str] | None:
         """역할에 최종 적용될 (provider, model)을 반환한다.
 
@@ -220,15 +223,27 @@ class TDDPipeline:
 
         우선순위:
           1) role_models[role] 부분 override — compose_role_override로 base에 덮어씀
-          2) auto_select_by_complexity=True & task 있음 → complexity 기반 매핑
+          2) tier 명시 (escalation 시 강제 tier) → 해당 tier 직접 사용
+             또는 auto_select_by_complexity=True & task 있음 → task.complexity 기반 매핑
           3) default_role_models 기반 기본 해석
           4) model config 미주입 + 완전 override만 있음 → override 그대로 반환
           5) 그 외 → None (호출자가 fallback 처리)
         """
         from agents.roles import compose_role_override, resolve_complexity_model
+        from agents.roles import _require_resolved_role_model
 
-        if self.auto_select_by_complexity and task is not None and self.complexity_map:
-            base_p, base_m = resolve_complexity_model(role, task.complexity, self.complexity_map)
+        # tier 파라미터가 없으면 현재 실행 중인 tier(_current_tier)를 사용
+        effective_tier = tier if tier is not None else self._current_tier
+
+        if self.auto_select_by_complexity and self.complexity_map:
+            if effective_tier is not None and effective_tier in self.complexity_map:
+                # escalation으로 tier가 명시된 경우 — task.complexity를 우회해 직접 사용
+                base_p, base_m = _require_resolved_role_model(role, self.complexity_map[effective_tier])
+            elif task is not None:
+                # tier 미지정 — task.complexity 기반 (non-simple/simple → standard/simple tier로 fallback)
+                base_p, base_m = resolve_complexity_model(role, task.complexity, self.complexity_map)
+            else:
+                base_p, base_m = resolve_complexity_model(role, None, self.complexity_map)
         elif self.default_role_models:
             base_p, base_m = resolve_model_for_role(
                 role=role,
@@ -246,9 +261,9 @@ class TDDPipeline:
 
     # ── 역할별 LLM 생성 ──────────────────────────────────────────────────────
 
-    def _llm_for_role(self, role: str, fallback, task: "Task | None" = None):
+    def _llm_for_role(self, role: str, fallback, task: "Task | None" = None, tier: str | None = None):
         """역할별 LLM 클라이언트를 생성한다. 해석은 `_resolve_provider_model`에 위임."""
-        resolved = self._resolve_provider_model(role, task)
+        resolved = self._resolve_provider_model(role, task, tier=tier)
         if resolved is None:
             return fallback
         p, m = resolved
@@ -264,6 +279,7 @@ class TDDPipeline:
         pause_ctrl=None,
         all_tasks: list[Task] | None = None,
         repo_path: str | None = None,
+        tier: str | None = None,
     ) -> PipelineResult:
         """
         태스크 전체 파이프라인을 실행한다.
@@ -312,7 +328,7 @@ class TDDPipeline:
         register_workspace_context_dir(task.id, workspace.tests_dir.parent / "context")
         try:
             return self._run_pipeline(task, workspace, _p, _agent_p, pause_ctrl=pause_ctrl,
-                                      enriched_desc=enriched_desc)
+                                      enriched_desc=enriched_desc, tier=tier)
         finally:
             unregister_workspace_context_dir(task.id)
 
@@ -358,39 +374,45 @@ class TDDPipeline:
                     missing.append(f"{dep_id}:{filepath}")
         return missing
 
-    def _run_pipeline(self, task, workspace, _p, _agent_p, pause_ctrl=None, enriched_desc=None) -> "PipelineResult":
+    def _run_pipeline(self, task, workspace, _p, _agent_p, pause_ctrl=None, enriched_desc=None, tier=None) -> "PipelineResult":
         """run()의 실제 파이프라인 로직. workspace 등록/해제는 run()이 담당한다."""
-        # 역할별 실제 사용 모델을 미리 계산 — 성공/실패 양쪽 모두 TaskReport에 기록.
-        # _llm_for_role과 동일한 _resolve_provider_model 경로를 사용하여
-        # 실제 호출 모델과 기록 모델이 어긋나지 않음을 보장한다.
-        models_used: dict[str, str] = {}
-        for _role_key in [ROLE_TEST_WRITER, ROLE_IMPLEMENTER, ROLE_REVIEWER]:
-            _resolved = self._resolve_provider_model(_role_key, task)
-            if _resolved is not None:
-                _rp, _rm = _resolved
-                models_used[_role_key] = f"{_rp}/{_rm}"
-
+        # escalation tier를 인스턴스 변수로 저장 — _run_test_writer 등 내부 메서드가
+        # _llm_for_role 호출 시 self._current_tier를 통해 참조한다.
+        self._current_tier = tier
         try:
-            result = self.__run_pipeline_inner(task, workspace, _p, _agent_p, pause_ctrl=pause_ctrl,
-                                               enriched_desc=enriched_desc)
-        except _StopRequested:
-            logger.info("[%s] 즉시 중단 요청 — 파이프라인 종료", task.id)
-            result = PipelineResult.failed(task, "[ABORTED] 사용자 즉시 중단 요청")
+            # 역할별 실제 사용 모델을 미리 계산 — 성공/실패 양쪽 모두 TaskReport에 기록.
+            # _llm_for_role과 동일한 _resolve_provider_model 경로를 사용하여
+            # 실제 호출 모델과 기록 모델이 어긋나지 않음을 보장한다.
+            models_used: dict[str, str] = {}
+            for _role_key in [ROLE_TEST_WRITER, ROLE_IMPLEMENTER, ROLE_REVIEWER]:
+                _resolved = self._resolve_provider_model(_role_key, task, tier=tier)
+                if _resolved is not None:
+                    _rp, _rm = _resolved
+                    models_used[_role_key] = f"{_rp}/{_rm}"
 
-        # 실제 API 응답 모델명(버전 suffix 포함)으로 덮어쓴다.
-        # call_log가 없는 역할(파이프라인이 해당 역할 전 실패)은 사전 계산값 유지.
-        for _role_key in [ROLE_TEST_WRITER, ROLE_IMPLEMENTER, ROLE_REVIEWER]:
-            _logs = result.metrics.call_logs.get(_role_key, [])
-            if _logs:
-                _actual_model = _logs[-1].get("model", "")
-                if _actual_model and _role_key in models_used:
-                    _provider = models_used[_role_key].split("/")[0]
-                    models_used[_role_key] = f"{_provider}/{_actual_model}"
+            try:
+                result = self.__run_pipeline_inner(task, workspace, _p, _agent_p, pause_ctrl=pause_ctrl,
+                                                   enriched_desc=enriched_desc, tier=tier)
+            except _StopRequested:
+                logger.info("[%s] 즉시 중단 요청 — 파이프라인 종료", task.id)
+                result = PipelineResult.failed(task, "[ABORTED] 사용자 즉시 중단 요청")
 
-        result.models_used = models_used
-        return result
+            # 실제 API 응답 모델명(버전 suffix 포함)으로 덮어쓴다.
+            # call_log가 없는 역할(파이프라인이 해당 역할 전 실패)은 사전 계산값 유지.
+            for _role_key in [ROLE_TEST_WRITER, ROLE_IMPLEMENTER, ROLE_REVIEWER]:
+                _logs = result.metrics.call_logs.get(_role_key, [])
+                if _logs:
+                    _actual_model = _logs[-1].get("model", "")
+                    if _actual_model and _role_key in models_used:
+                        _provider = models_used[_role_key].split("/")[0]
+                        models_used[_role_key] = f"{_provider}/{_actual_model}"
 
-    def __run_pipeline_inner(self, task, workspace, _p, _agent_p, pause_ctrl=None, enriched_desc=None) -> "PipelineResult":
+            result.models_used = models_used
+            return result
+        finally:
+            self._current_tier = None
+
+    def __run_pipeline_inner(self, task, workspace, _p, _agent_p, pause_ctrl=None, enriched_desc=None, tier=None) -> "PipelineResult":
         """_run_pipeline() 의 실제 구현. _StopRequested 는 _run_pipeline() 이 잡는다."""
         metrics = PipelineMetrics()
 

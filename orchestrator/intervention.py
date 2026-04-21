@@ -101,6 +101,7 @@ def classify_and_analyze(
     test_stdout: str = "",
     previous_hints: list[str] | None = None,
     role_models: dict[str, RoleModelConfig] | None = None,
+    tier: str | None = None,
 ) -> AnalysisResult:
     """
     실패 유형을 먼저 분류하고, LOGIC_ERROR만 LLM analyze()로 넘긴다.
@@ -163,10 +164,10 @@ def classify_and_analyze(
         # import/syntax 오류 — ENV_ERROR 로 이미 걸러지지 않은 경우는 문법 오류 가능성.
         # LLM analyze() 에 파일별 수정 힌트 생성을 맡긴다 (LOGIC_ERROR 와 동일 흐름).
         logger.info("[%s] COLLECTION_ERROR → LLM analyze (시도 %d)", task.id, attempt)
-        result = analyze(task, failure_reason, attempt, previous_hints=previous_hints, role_models=role_models)
+        result = analyze(task, failure_reason, attempt, previous_hints=previous_hints, role_models=role_models, tier=tier)
     else:
         # LOGIC_ERROR → 기존 LLM 분석
-        result = analyze(task, failure_reason, attempt, previous_hints=previous_hints, role_models=role_models)
+        result = analyze(task, failure_reason, attempt, previous_hints=previous_hints, role_models=role_models, tier=tier)
 
     # 3회차 재시도에서는 텍스트 힌트에 더해 스켈레톤 파일을 생성한다.
     # run.py 가 AnalysisResult.skeleton_files 를 다음 WorkspaceManager 에 주입.
@@ -246,16 +247,29 @@ def create_intervention_llms(provider: str, model: str) -> tuple[BaseLLMClient, 
 def _resolve_intervention_provider_model(
     task: Task,
     role_models: dict[str, RoleModelConfig] | None,
+    tier: str | None = None,
 ) -> tuple[str, str] | None:
-    """intervention 역할의 최종 provider/model을 해석한다."""
-    from agents.roles import compose_role_override, resolve_complexity_model, resolve_model_for_role
+    """intervention 역할의 최종 provider/model을 해석한다.
+
+    tier가 명시되면(escalation 중) 해당 tier를 직접 사용한다.
+    """
+    from agents.roles import (
+        _require_resolved_role_model, compose_role_override,
+        resolve_complexity_model, resolve_model_for_role,
+    )
 
     intervention_override = (role_models or {}).get(ROLE_INTERVENTION)
 
     if _auto_select_by_complexity and _complexity_map:
-        base_provider, base_model = resolve_complexity_model(
-            ROLE_INTERVENTION, task.complexity, _complexity_map
-        )
+        if tier is not None and tier in _complexity_map:
+            # escalation tier 명시 — task.complexity를 우회
+            base_provider, base_model = _require_resolved_role_model(
+                ROLE_INTERVENTION, _complexity_map[tier]
+            )
+        else:
+            base_provider, base_model = resolve_complexity_model(
+                ROLE_INTERVENTION, task.complexity, _complexity_map
+            )
     elif _default_role_models:
         base_provider, base_model = resolve_model_for_role(
             role=ROLE_INTERVENTION,
@@ -455,6 +469,7 @@ def analyze(
     attempt: int,
     previous_hints: list[str] | None = None,
     role_models: dict[str, RoleModelConfig] | None = None,
+    tier: str | None = None,
 ) -> AnalysisResult:
     """
     LLM에게 실패 원인을 분석시키고 RETRY/GIVE_UP 결정을 받는다.
@@ -468,9 +483,9 @@ def analyze(
     """
     # 우선순위 (TDDPipeline._llm_for_role와 동일 계약):
     #  1) role_models['intervention'] override — 부분 지정 시 base와 합성
-    #  2) auto_select_by_complexity=True → task.complexity 기반 per-task intervention 모델
+    #  2) auto_select_by_complexity=True → tier(escalation 시) 또는 task.complexity 기반 모델
     #  3) 전역 _analyze_llm (파이프라인 시작 시 주입된 기본 LLM)
-    resolved = _resolve_intervention_provider_model(task, role_models)
+    resolved = _resolve_intervention_provider_model(task, role_models, tier=tier)
     use_resolved_model = bool((role_models or {}).get(ROLE_INTERVENTION)) or _auto_select_by_complexity
 
     if use_resolved_model:
