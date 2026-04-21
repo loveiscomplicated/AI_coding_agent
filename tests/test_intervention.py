@@ -320,7 +320,7 @@ def _fake_analyze_factory(should_retry: bool = True):
     """analyze() 대체용 — AnalysisResult 고정 반환."""
     calls = {"count": 0}
 
-    def fake_analyze(task, reason, attempt, previous_hints=None, role_models=None):
+    def fake_analyze(task, reason, attempt, previous_hints=None, role_models=None, tier=None):
         calls["count"] += 1
         return AnalysisResult(
             should_retry=should_retry,

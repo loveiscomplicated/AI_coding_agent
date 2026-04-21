@@ -152,7 +152,7 @@ def test_collection_error_tag_routes_to_analyze_llm(monkeypatch):
 
     called = {"count": 0}
 
-    def fake_analyze(task, reason, attempt, previous_hints=None, role_models=None):
+    def fake_analyze(task, reason, attempt, previous_hints=None, role_models=None, tier=None):
         called["count"] += 1
         return iv.AnalysisResult(
             should_retry=True, hint="fake", raw="fake",

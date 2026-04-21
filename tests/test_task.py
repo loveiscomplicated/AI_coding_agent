@@ -338,29 +338,50 @@ class TestComplexityField:
         task = Task.from_dict(minimal_task_dict)
         assert task.complexity is None
 
-    def test_loads_all_valid_complexity_values(self, minimal_task_dict):
-        for value in ("simple", "standard", "complex"):
+    def test_loads_valid_binary_complexity_values(self, minimal_task_dict):
+        for value in ("simple", "non-simple"):
             data = dict(minimal_task_dict, complexity=value)
             task = Task.from_dict(data)
             assert task.complexity == value, f"complexity='{value}' 보존 실패"
 
     def test_invalid_complexity_coerces_to_none(self, minimal_task_dict):
-        """비정상 값은 None으로 정규화된다 (Literal 보호)."""
+        """비정상 값은 None으로 정규화된다."""
         data = dict(minimal_task_dict, complexity="trivial")
         task = Task.from_dict(data)
         assert task.complexity is None
 
-    def test_task_saves_complexity_to_yaml(self, tmp_path, minimal_task_dict):
+    def test_legacy_standard_normalized_to_non_simple(self, minimal_task_dict):
+        """legacy 'standard' 값은 'non-simple'로 정규화된다."""
+        data = dict(minimal_task_dict, complexity="standard")
+        task = Task.from_dict(data)
+        assert task.complexity == "non-simple"
+
+    def test_legacy_complex_normalized_to_non_simple(self, minimal_task_dict):
+        """legacy 'complex' 값은 'non-simple'로 정규화된다."""
         data = dict(minimal_task_dict, complexity="complex")
+        task = Task.from_dict(data)
+        assert task.complexity == "non-simple"
+
+    def test_complexity_normalization_in_post_init(self):
+        """Task 직접 생성 시에도 __post_init__이 legacy 값을 정규화한다."""
+        task = Task(
+            id="x", title="t", description="d",
+            acceptance_criteria=["c"], target_files=["f.py"],
+            complexity="standard",
+        )
+        assert task.complexity == "non-simple"
+
+    def test_task_saves_non_simple_complexity_to_yaml(self, tmp_path, minimal_task_dict):
+        data = dict(minimal_task_dict, complexity="non-simple")
         task = Task.from_dict(data)
         path = tmp_path / "tasks.yaml"
         save_tasks([task], path)
 
         raw = path.read_text(encoding="utf-8")
-        assert "complexity: complex" in raw
+        assert "non-simple" in raw
 
         loaded = load_tasks(path)
-        assert loaded[0].complexity == "complex"
+        assert loaded[0].complexity == "non-simple"
 
     def test_omits_complexity_key_when_none(self, tmp_path, minimal_task_dict):
         """complexity=None 태스크는 YAML에 complexity 키를 기록하지 않는다 (하위 호환)."""
@@ -372,7 +393,6 @@ class TestComplexityField:
         raw = path.read_text(encoding="utf-8")
         assert "complexity" not in raw
 
-        # 재로드해도 None 유지
         reloaded = load_tasks(path)
         assert reloaded[0].complexity is None
 
@@ -381,3 +401,27 @@ class TestComplexityField:
         task = Task.from_dict(data)
         restored = Task.from_dict(task.to_dict())
         assert restored.complexity == "simple"
+
+    def test_non_simple_round_trips_through_to_dict(self, minimal_task_dict):
+        data = dict(minimal_task_dict, complexity="non-simple")
+        task = Task.from_dict(data)
+        restored = Task.from_dict(task.to_dict())
+        assert restored.complexity == "non-simple"
+
+    def test_legacy_complexity_from_yaml_normalizes(self, tmp_path, minimal_task_dict):
+        """legacy YAML에 'standard'/'complex'가 있으면 로드 시 non-simple로 정규화."""
+        path = tmp_path / "tasks.yaml"
+        path.write_text(
+            "tasks:\n"
+            "  - id: task-001\n"
+            "    title: 사용자 인증 구현\n"
+            "    description: JWT 기반 로그인 API를 구현한다.\n"
+            "    acceptance_criteria:\n"
+            "      - 올바른 자격증명으로 로그인 시 JWT 반환\n"
+            "    target_files:\n"
+            "      - src/auth.py\n"
+            "    complexity: standard\n",
+            encoding="utf-8",
+        )
+        tasks = load_tasks(path)
+        assert tasks[0].complexity == "non-simple"

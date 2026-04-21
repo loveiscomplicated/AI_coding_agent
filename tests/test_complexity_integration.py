@@ -131,6 +131,7 @@ class TestTDDPipelineRouting:
         assert captured == [("claude", "haiku")]
 
     def test_partial_override_preserves_base_model(self):
+        # non-simple complexity → standard tier (base tier for non-simple chain)
         captured: list[tuple[str, str]] = []
         with patch.object(
             pipeline_mod,
@@ -146,7 +147,27 @@ class TestTDDPipelineRouting:
                     ROLE_IMPLEMENTER: RoleModelConfig(provider="anthropic", model=None),
                 },
             )
-            pipeline._llm_for_role(ROLE_IMPLEMENTER, "FB", task=_make_task("t-complex", "complex"))
+            pipeline._llm_for_role(ROLE_IMPLEMENTER, "FB", task=_make_task("t-complex", "non-simple"))
+        assert captured == [("anthropic", "gpt-5-mini")]
+
+    def test_explicit_tier_overrides_complexity(self):
+        # explicit tier="complex" → uses complex tier model regardless of complexity field
+        captured: list[tuple[str, str]] = []
+        with patch.object(
+            pipeline_mod,
+            "create_client",
+            side_effect=lambda provider, cfg: captured.append((provider, cfg.model)) or "client",
+        ):
+            pipeline = pipeline_mod.TDDPipeline(
+                agent_llm="FB",
+                default_role_models=DEFAULT_ROLE_MODELS,
+                auto_select_by_complexity=True,
+                complexity_map=SAMPLE_MAP,
+                role_models={
+                    ROLE_IMPLEMENTER: RoleModelConfig(provider="anthropic", model=None),
+                },
+            )
+            pipeline._llm_for_role(ROLE_IMPLEMENTER, "FB", task=_make_task("t-complex", "non-simple"), tier="complex")
         assert captured == [("anthropic", "gpt-5")]
 
     def test_resolver_matches_actual_client(self):
@@ -191,6 +212,7 @@ class TestInterventionRouting:
         return _FakeLLM()
 
     def test_auto_select_on_uses_task_complexity(self, monkeypatch):
+        # non-simple complexity → standard tier (not complex)
         captured: list[tuple[str, str]] = []
 
         def fake_create_client(provider, cfg):
@@ -200,10 +222,25 @@ class TestInterventionRouting:
         monkeypatch.setattr(intervention, "create_client", fake_create_client)
         intervention.set_complexity_routing(True, SAMPLE_MAP)
 
-        intervention.analyze(_make_task("t-complex", "complex"), failure_reason="fail", attempt=1)
+        intervention.analyze(_make_task("t-complex", "non-simple"), failure_reason="fail", attempt=1)
+        assert captured == [("gemini", "gemini-2.5-flash")]
+
+    def test_auto_select_on_explicit_tier_uses_complex(self, monkeypatch):
+        # explicit tier="complex" → complex tier model
+        captured: list[tuple[str, str]] = []
+
+        def fake_create_client(provider, cfg):
+            captured.append((provider, cfg.model))
+            return self._fake_chat_llm("RETRY: hint")
+
+        monkeypatch.setattr(intervention, "create_client", fake_create_client)
+        intervention.set_complexity_routing(True, SAMPLE_MAP)
+
+        intervention.analyze(_make_task("t-complex", "non-simple"), failure_reason="fail", attempt=1, tier="complex")
         assert captured == [("gemini", "gemini-3-pro-preview")]
 
     def test_partial_override_composes_with_complexity(self, monkeypatch):
+        # non-simple complexity → standard tier; provider override from role_models
         captured: list[tuple[str, str]] = []
 
         def fake_create_client(provider, cfg):
@@ -214,12 +251,12 @@ class TestInterventionRouting:
         intervention.set_complexity_routing(True, SAMPLE_MAP)
 
         intervention.analyze(
-            _make_task("t-complex", "complex"),
+            _make_task("t-complex", "non-simple"),
             failure_reason="fail",
             attempt=1,
             role_models={ROLE_INTERVENTION: RoleModelConfig(provider="anthropic", model=None)},
         )
-        assert captured == [("anthropic", "gemini-3-pro-preview")]
+        assert captured == [("anthropic", "gemini-2.5-flash")]
 
     def test_auto_select_off_uses_global_analyze_llm(self, monkeypatch):
         intervention._analyze_llm = self._fake_chat_llm("RETRY: hint")

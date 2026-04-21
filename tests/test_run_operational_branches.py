@@ -307,7 +307,7 @@ def test_run_pipeline_task023_style_loop_injects_skeleton_then_auto_splits(tmp_p
         def __init__(self):
             self.calls = 0
 
-        def run(self, task, ws, on_progress=None, pause_ctrl=None, all_tasks=None, repo_path=None):
+        def run(self, task, ws, on_progress=None, pause_ctrl=None, all_tasks=None, repo_path=None, tier=None):
             self.calls += 1
             target = ws.src_dir / "task023.py"
             seen_file_contents.append(target.read_text(encoding="utf-8"))
@@ -315,7 +315,7 @@ def test_run_pipeline_task023_style_loop_injects_skeleton_then_auto_splits(tmp_p
 
     fake_pipeline = _FakePipeline()
 
-    def fake_analyze(task, failure_reason, attempt, test_stdout="", previous_hints=None, role_models=None):
+    def fake_analyze(task, failure_reason, attempt, test_stdout="", previous_hints=None, role_models=None, tier=None):
         skeletons = {}
         if attempt == 3:
             skeletons = {

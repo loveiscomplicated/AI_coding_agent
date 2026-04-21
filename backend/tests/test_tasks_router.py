@@ -30,32 +30,20 @@ def test_draft_includes_complexity_field() -> None:
     assert "[복잡도 평가 (complexity)]" in _DRAFT_SYSTEM_PROMPT
 
 
-def test_draft_complexity_valid_values() -> None:
-    """simple / standard / complex 세 값이 프롬프트 가이드라인 표에 모두 명시되어 있다."""
-    for value in ("simple", "standard", "complex"):
-        assert value in _DRAFT_SYSTEM_PROMPT, (
-            f"complexity tier '{value}'가 프롬프트에 언급되지 않음"
-        )
-    # 수치 기준 표의 열 헤더로 세 tier가 등장해야 한다.
-    assert "| simple" in _DRAFT_SYSTEM_PROMPT
-    assert "| standard" in _DRAFT_SYSTEM_PROMPT
-    assert "| complex" in _DRAFT_SYSTEM_PROMPT
+def test_draft_complexity_binary_values() -> None:
+    """simple / non-simple 두 값이 프롬프트에 명시되어 있다."""
+    assert "simple" in _DRAFT_SYSTEM_PROMPT
+    assert "non-simple" in _DRAFT_SYSTEM_PROMPT
 
 
 def test_draft_json_example_contains_complexity() -> None:
     """JSON 예시가 complexity 필드를 포함하여 LLM이 스키마를 학습하도록 한다."""
-    assert '"complexity": "standard"' in _DRAFT_SYSTEM_PROMPT
+    assert '"complexity": "non-simple"' in _DRAFT_SYSTEM_PROMPT
 
 
-def test_draft_mentions_standard_as_default() -> None:
-    """평가 불가 시 기본값이 standard임이 명시되어 있다."""
-    # "애매하면 standard" 또는 "기본값 standard" 문구 중 하나라도 존재해야 함
-    assert "standard" in _DRAFT_SYSTEM_PROMPT
-    assert ("애매하면 `standard`" in _DRAFT_SYSTEM_PROMPT
-            or "기본값은 `standard`" in _DRAFT_SYSTEM_PROMPT
-            or "3단계" in _DRAFT_SYSTEM_PROMPT), (
-        "standard를 기본값(fallback)으로 정하는 문구를 찾지 못함"
-    )
+def test_draft_mentions_auto_compute_fallback() -> None:
+    """평가 누락 시 자동 계산된다는 내용이 프롬프트에 있다."""
+    assert "자동 계산" in _DRAFT_SYSTEM_PROMPT
 
 
 # ── draft 실행 경로의 complexity 처리 ────────────────────────────────────────
@@ -93,9 +81,8 @@ def _run_draft_and_wait(monkeypatch, response_text: str, timeout: float = 2.0) -
         return tasks_router._draft_jobs[job_id]
 
 
-def test_sanitizer_warns_on_missing_complexity(monkeypatch) -> None:
-    """LLM 응답에 complexity 필드가 없으면 warnings에 경고가 추가된다."""
-    response = (
+def _make_task_response(extra_fields: str = "") -> str:
+    return (
         '{"tasks": [{'
         '"id": "task-001", "title": "t",'
         '"description": "### 목적과 배경\\n목적. ' + ("본문. " * 20) + '\\n'
@@ -105,60 +92,67 @@ def test_sanitizer_warns_on_missing_complexity(monkeypatch) -> None:
         '"acceptance_criteria": ["c1"],'
         '"target_files": ["a.py"],'
         '"depends_on": [], "task_type": "backend", "language": "python"'
-        '}]}'
+        + (f', {extra_fields}' if extra_fields else "")
+        + '}]}'
     )
-    job = _run_draft_and_wait(monkeypatch, response)
+
+
+def test_sanitizer_auto_computes_complexity_when_llm_omits(monkeypatch) -> None:
+    """LLM 응답에 complexity 필드가 없으면 자동 계산하여 채우고 경고를 추가한다."""
+    job = _run_draft_and_wait(monkeypatch, _make_task_response())
 
     assert job["status"] == "done", job.get("error")
     task = job["tasks"][0]
-    # complexity 키는 추가되지 않는다 (경고만)
-    assert "complexity" not in task
-    assert any("complexity 누락" in w for w in task.get("warnings", []))
+    # complexity가 자동 계산되어 채워진다 (simple or non-simple)
+    assert task.get("complexity") in ("simple", "non-simple")
+    assert any("자동 계산" in w for w in task.get("warnings", []))
 
 
 def test_sanitizer_accepts_valid_complexity(monkeypatch) -> None:
-    response = (
-        '{"tasks": [{'
-        '"id": "task-001", "title": "t",'
-        '"description": "### 목적과 배경\\n목적. ' + ("본문. " * 20) + '\\n'
-        '\\n### 기술 요구사항\\n요구. ' + ("본문. " * 20) + '\\n'
-        '\\n### 인접 컨텍스트\\n후속 태스크 없음. ' + ("본문. " * 20) + '\\n'
-        '\\n### 비고려 항목\\n명시적 비범위 없음. ' + ("본문. " * 20) + '",'
-        '"acceptance_criteria": ["c1"],'
-        '"target_files": ["a.py"],'
-        '"depends_on": [], "task_type": "backend", "language": "python",'
-        '"complexity": "simple"'
-        '}]}'
-    )
-    job = _run_draft_and_wait(monkeypatch, response)
+    """'simple' 값은 그대로 보존되고 경고가 없다."""
+    job = _run_draft_and_wait(monkeypatch, _make_task_response('"complexity": "simple"'))
 
     assert job["status"] == "done", job.get("error")
     task = job["tasks"][0]
     assert task["complexity"] == "simple"
-    # 올바른 값이면 complexity 누락 경고는 없다
-    assert not any("complexity 누락" in w for w in task.get("warnings", []))
+    assert not any("자동 계산" in w for w in task.get("warnings", []))
 
 
-def test_sanitizer_rejects_invalid_complexity(monkeypatch) -> None:
-    response = (
-        '{"tasks": [{'
-        '"id": "task-001", "title": "t",'
-        '"description": "### 목적과 배경\\n목적. ' + ("본문. " * 20) + '\\n'
-        '\\n### 기술 요구사항\\n요구. ' + ("본문. " * 20) + '\\n'
-        '\\n### 인접 컨텍스트\\n후속 태스크 없음. ' + ("본문. " * 20) + '\\n'
-        '\\n### 비고려 항목\\n명시적 비범위 없음. ' + ("본문. " * 20) + '",'
-        '"acceptance_criteria": ["c1"],'
-        '"target_files": ["a.py"],'
-        '"depends_on": [], "task_type": "backend", "language": "python",'
-        '"complexity": "trivial"'
-        '}]}'
-    )
-    job = _run_draft_and_wait(monkeypatch, response)
+def test_sanitizer_accepts_non_simple_complexity(monkeypatch) -> None:
+    """'non-simple' 값은 그대로 보존되고 경고가 없다."""
+    job = _run_draft_and_wait(monkeypatch, _make_task_response('"complexity": "non-simple"'))
 
     assert job["status"] == "done", job.get("error")
     task = job["tasks"][0]
-    # 비정상 값은 제거된다
-    assert "complexity" not in task
-    assert any("complexity 값 비정상" in w for w in task.get("warnings", []))
-    # 제거 후 누락 경고도 추가된다
-    assert any("complexity 누락" in w for w in task.get("warnings", []))
+    assert task["complexity"] == "non-simple"
+    assert not any("자동 계산" in w for w in task.get("warnings", []))
+
+
+def test_sanitizer_normalizes_legacy_standard_value(monkeypatch) -> None:
+    """legacy 'standard' 값은 'non-simple'로 정규화되고 경고가 추가된다."""
+    job = _run_draft_and_wait(monkeypatch, _make_task_response('"complexity": "standard"'))
+
+    assert job["status"] == "done", job.get("error")
+    task = job["tasks"][0]
+    assert task["complexity"] == "non-simple"
+    assert any("정규화" in w for w in task.get("warnings", []))
+
+
+def test_sanitizer_normalizes_legacy_complex_value(monkeypatch) -> None:
+    """legacy 'complex' 값은 'non-simple'로 정규화되고 경고가 추가된다."""
+    job = _run_draft_and_wait(monkeypatch, _make_task_response('"complexity": "complex"'))
+
+    assert job["status"] == "done", job.get("error")
+    task = job["tasks"][0]
+    assert task["complexity"] == "non-simple"
+    assert any("정규화" in w for w in task.get("warnings", []))
+
+
+def test_sanitizer_auto_computes_for_invalid_complexity(monkeypatch) -> None:
+    """비정상 complexity 값은 자동 계산으로 교체되고 경고가 추가된다."""
+    job = _run_draft_and_wait(monkeypatch, _make_task_response('"complexity": "trivial"'))
+
+    assert job["status"] == "done", job.get("error")
+    task = job["tasks"][0]
+    assert task.get("complexity") in ("simple", "non-simple")
+    assert any("자동 계산" in w for w in task.get("warnings", []))
