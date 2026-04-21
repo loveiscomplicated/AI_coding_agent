@@ -18,7 +18,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_VALID_PROVIDERS = {"claude", "openai", "ollama"}
+_VALID_PROVIDERS = {"claude", "openai", "ollama", "glm", "gemini"}
 _DEFAULT_PROVIDER = "claude"
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 _DEFAULT_MAX_ITERATIONS = 20
