@@ -187,6 +187,11 @@ def build_report(
     orchestrator_summary: str = "",
     models_used: dict[str, str] | None = None,
     call_logs_dir: Path | None = None,
+    # T11: escalation 메트릭
+    models_escalated: bool = False,
+    escalation_trigger: str | None = None,
+    successful_tier: str | None = None,
+    tier_attempts: list[dict] | None = None,
 ) -> TaskReport:
     """PipelineResult → TaskReport 변환."""
     test_count = 0
@@ -316,6 +321,11 @@ def build_report(
         cost_estimation_quality=_cost_quality,
         max_single_iteration_tokens=_max_single_iter_tokens,
         iteration_count_by_role=_iter_count_by_role,
+        complexity_classified=task.complexity,
+        models_escalated=models_escalated,
+        escalation_trigger=escalation_trigger,
+        successful_tier=successful_tier,
+        tier_attempts=list(tier_attempts) if tier_attempts else [],
     )
 
     # 불가능한 상태 조합 감지 — explicit raise (Python -O 에서도 활성화)

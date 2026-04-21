@@ -75,6 +75,14 @@ class TaskReport:
     # 여기에는 outlier 탐지에 필요한 파생 지표만 기록한다 (파일 폭증 방지).
     max_single_iteration_tokens: int = 0
     iteration_count_by_role: dict[str, int] = field(default_factory=dict)
+    # T11: escalation 메트릭
+    complexity_classified: str | None = None      # "simple" | "non-simple"
+    models_escalated: bool = False                # 더 높은 tier로 escalation 발생 여부
+    escalation_trigger: str | None = None         # escalation을 유발한 failure_reason 요약
+    successful_tier: str | None = None            # 성공한 tier ("simple"/"standard"/"complex")
+    tier_attempts: list[dict] = field(default_factory=list)
+    # tier_attempts 예시: [{"tier": "standard", "success": False, "failure_type": "LOGIC_ERROR"},
+    #                      {"tier": "complex",  "success": True,  "failure_type": None}]
 
     def __post_init__(self) -> None:
         if self.token_usage is None and self.token_usage_detail is not None:
@@ -112,6 +120,11 @@ class TaskReport:
                 "cache_hit_rate": self.cache_hit_rate,
                 "max_single_iteration_tokens": self.max_single_iteration_tokens,
                 "iteration_count_by_role": dict(self.iteration_count_by_role),
+                "complexity_classified": self.complexity_classified,
+                "models_escalated": self.models_escalated,
+                "escalation_trigger": self.escalation_trigger,
+                "successful_tier": self.successful_tier,
+                "tier_attempts": list(self.tier_attempts),
             },
             "pipeline_result": {
                 "test_output_summary": self.test_output_summary,
@@ -166,6 +179,11 @@ class TaskReport:
             cache_hit_rate=m.get("cache_hit_rate", 0.0),
             max_single_iteration_tokens=m.get("max_single_iteration_tokens", 0),
             iteration_count_by_role=dict(m.get("iteration_count_by_role", {})),
+            complexity_classified=m.get("complexity_classified"),
+            models_escalated=m.get("models_escalated", False),
+            escalation_trigger=m.get("escalation_trigger"),
+            successful_tier=m.get("successful_tier"),
+            tier_attempts=list(m.get("tier_attempts", [])),
             token_usage=data.get("token_usage", data.get("token_usage_detail")),
             test_output_summary=p.get("test_output_summary", ""),
             reviewer_feedback=p.get("reviewer_feedback", ""),
