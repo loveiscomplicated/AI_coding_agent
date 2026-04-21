@@ -217,6 +217,45 @@ class TestLoopWithCompaction:
         assert result.messages[1].role == "user"
         assert result.messages[1].content == initial_task
 
+    def test_multiturn_run_preserves_full_run_prefix_across_compaction(self, tmp_path):
+        """
+        멀티턴 CLI 처럼 이전 history 가 있는 run 에서는 [system, *history, current_user]
+        전체가 현재 run 의 고정 prefix 다. compaction 이후에도 이 구간이 보존되어야
+        현재 작업 프롬프트가 캐시 보호 대상에서 밀려나지 않는다.
+        """
+        f = tmp_path / "big.txt"
+        f.write_text("M" * 40_000, encoding="utf-8")
+
+        reads = [
+            _tool_use_response(f"c{i}", "read_file", {"path": str(f)})
+            for i in range(5)
+        ]
+        responses = reads + [_text_response("완료")]
+
+        history = [
+            Message(role="user", content="이전 세션 질문"),
+            Message(role="assistant", content="이전 세션 답변"),
+        ]
+        current_task = "이번 턴에서 big.txt를 다시 확인해줘"
+        llm = _ScriptedLLM(responses, system_prompt="멀티턴 시스템 프롬프트 " * 300)
+        fast = _FakeFastClient()
+        loop = ReactLoop(
+            llm=llm,
+            fast_client_for_compaction=fast,
+            compaction_threshold_tokens=4_000,
+            max_tool_result_chars=20_000,
+        )
+
+        result = loop.run(current_task, history=history)
+
+        assert result.stop_reason == StopReason.END_TURN
+        assert fast.call_count >= 1
+        assert result.messages[:4] == [
+            Message(role="system", content=llm.config.system_prompt),
+            *history,
+            Message(role="user", content=current_task),
+        ]
+
     def test_disable_compaction_env_var(self, tmp_path, monkeypatch):
         """DISABLE_COMPACTION=1 일 때는 compaction 이 절대 발동하지 않는다."""
         monkeypatch.setenv("DISABLE_COMPACTION", "1")
@@ -428,6 +467,23 @@ class TestKillSwitchFallback:
         ]
         trimmed = _trim_history(msgs, window=1)
         assert trimmed[0].role == "user" and trimmed[0].content == "TASK-ONLY"
+
+    def test_trim_history_preserves_explicit_multiturn_prefix(self):
+        """protected_prefix_len 이 주어지면 멀티턴 run 의 prefix 전체를 유지한다."""
+        from core.loop import _trim_history
+
+        msgs = [
+            Message(role="system", content="SYS"),
+            Message(role="user", content="PREV-USER"),
+            Message(role="assistant", content="PREV-ASSISTANT"),
+            Message(role="user", content="CURRENT-TASK"),
+            Message(role="assistant", content=[{"type": "tool_use", "id": "1", "name": "r", "input": {}}]),
+            Message(role="user", content=[{"type": "tool_result", "tool_use_id": "1", "content": "a"}]),
+            Message(role="assistant", content=[{"type": "tool_use", "id": "2", "name": "r", "input": {}}]),
+            Message(role="user", content=[{"type": "tool_result", "tool_use_id": "2", "content": "b"}]),
+        ]
+        trimmed = _trim_history(msgs, window=1, protected_prefix_len=4)
+        assert trimmed[:4] == msgs[:4]
 
 
 @pytest.mark.usefixtures("compaction_on_env")
