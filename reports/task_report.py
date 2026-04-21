@@ -120,11 +120,15 @@ class TaskReport:
                 "cache_hit_rate": self.cache_hit_rate,
                 "max_single_iteration_tokens": self.max_single_iteration_tokens,
                 "iteration_count_by_role": dict(self.iteration_count_by_role),
-                "complexity_classified": self.complexity_classified,
-                "models_escalated": self.models_escalated,
-                "escalation_trigger": self.escalation_trigger,
-                "successful_tier": self.successful_tier,
-                "tier_attempts": list(self.tier_attempts),
+                # escalation fields are omitted when at defaults to preserve legacy YAML shape
+                **({
+                    "complexity_classified": self.complexity_classified,
+                    "models_escalated": self.models_escalated,
+                    "escalation_trigger": self.escalation_trigger,
+                    "successful_tier": self.successful_tier,
+                    "tier_attempts": list(self.tier_attempts),
+                } if (self.complexity_classified is not None or self.models_escalated
+                     or self.tier_attempts) else {}),
             },
             "pipeline_result": {
                 "test_output_summary": self.test_output_summary,
