@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import yaml
 
@@ -72,8 +72,11 @@ class Task:
     depends_on: list[str] = field(default_factory=list)  # 선행 태스크 ID 목록
     task_type: str = "backend"  # "backend" | "frontend" — frontend는 멀티 에이전트 파이프라인 제외
     language: str = "python"    # 태스크 구현 언어 (DockerTestRunner 실행 환경 결정)
-    complexity: Literal["simple", "standard", "complex"] | None = None
-    # draft 단계에서 LLM이 평가한 난이도. 파이프라인 모델 자동 선택 토글과 연동된다.
+    complexity: str | None = None
+    # "simple" | "non-simple" — binary 분류.
+    # legacy 값("standard"/"complex")은 __post_init__에서 "non-simple"로 정규화된다.
+    # None이면 파이프라인이 compute_complexity()로 자동 계산한다.
+    # 파이프라인 모델 자동 선택 토글(auto_select_by_complexity)과 연동된다.
 
     # ── 런타임 상태 (YAML 저장/복원 가능) ────────────────────────────────────
     status: TaskStatus = TaskStatus.PENDING
@@ -81,6 +84,14 @@ class Task:
     last_error: str = ""         # 직전 테스트 실패 stdout → Implementer 재시도 컨텍스트
     pr_url: str = ""             # 생성된 PR URL
     failure_reason: str = ""     # FAILED 상태일 때 원인
+
+    def __post_init__(self) -> None:
+        from orchestrator.complexity import normalize_complexity
+        normalized = normalize_complexity(self.complexity)
+        # normalize_complexity는 unknown 값을 None으로 반환한다.
+        # "simple"/"non-simple"은 그대로, "standard"/"complex"는 "non-simple"로 변환.
+        if self.complexity is not None:
+            self.complexity = normalized
 
     # ── 편의 프로퍼티 ─────────────────────────────────────────────────────────
 
@@ -124,12 +135,10 @@ class Task:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Task":
-        complexity_raw = data.get("complexity")
-        complexity: Literal["simple", "standard", "complex"] | None
-        if complexity_raw in ("simple", "standard", "complex"):
-            complexity = complexity_raw
-        else:
-            complexity = None
+        from orchestrator.complexity import normalize_complexity
+        # normalize_complexity는 legacy "standard"/"complex"를 "non-simple"로 변환한다.
+        # 알 수 없는 값은 None으로 반환 — __post_init__이 추가 처리를 담당.
+        complexity = normalize_complexity(data.get("complexity"))
         return cls(
             id=data["id"],
             title=data["title"],
