@@ -296,3 +296,70 @@ class TestWriteIntentCounter:
         _ = loop._execute_tool(tc)
         # 경로는 절대 경로로 정규화된 후 explored_paths 에 들어간다
         assert any("src/foo.py" in p for p in loop.explored_paths)
+
+
+# ── Hashline 통합 테스트 ─────────────────────────────────────────────────────
+
+
+class TestHashlineIntegration:
+    def test_hashline_edit_resets_consecutive_readonly(self, workspace):
+        """hashline_edit 호출은 _consecutive_readonly 카운터를 리셋한다."""
+        from tools.file_tools import _build_hashline_table
+
+        # workspace 안에 실제 파일 생성
+        target = workspace / "src" / "target.py"
+        target.write_text("x = 1\ny = 2\n", encoding="utf-8")
+
+        llm = _make_mock_llm()
+        loop = ScopedReactLoop(llm=llm, role=IMPLEMENTER, workspace_dir=workspace)
+
+        # 읽기 전용 도구 연속 호출 시뮬레이션
+        loop._consecutive_readonly = 4
+
+        # 유효한 hashline_edit ToolCall 구성
+        lines = target.read_text(encoding="utf-8").splitlines()
+        table = _build_hashline_table(lines)
+        ref = table[0][0]  # 첫 번째 줄의 line_ref
+
+        tc = ToolCall(
+            id="hle1",
+            name="hashline_edit",
+            input={
+                "path": str(target),
+                "edits": [{"action": "replace", "line_ref": ref, "new_content": "x = 99"}],
+            },
+        )
+        result = loop._execute_tool(tc)
+
+        assert not result.is_error
+        assert loop._consecutive_readonly == 0
+
+    def test_hashline_read_increments_consecutive_readonly(self, workspace):
+        """hashline_read 호출은 _consecutive_readonly 카운터를 올린다."""
+        target = workspace / "src" / "read_me.py"
+        target.write_text("a = 1\n", encoding="utf-8")
+
+        llm = _make_mock_llm()
+        loop = ScopedReactLoop(llm=llm, role=IMPLEMENTER, workspace_dir=workspace)
+        assert loop._consecutive_readonly == 0
+
+        tc = ToolCall(
+            id="hlr1",
+            name="hashline_read",
+            input={"path": str(target)},
+        )
+        loop._execute_tool(tc)
+
+        assert loop._consecutive_readonly == 1
+
+    def test_reviewer_role_blocks_hashline_edit(self, reviewer_loop, workspace):
+        """REVIEWER 역할에서 hashline_edit 호출은 역할 제약으로 거부된다."""
+        tc = ToolCall(
+            id="rev1",
+            name="hashline_edit",
+            input={"path": "src/foo.py", "edits": []},
+        )
+        result = reviewer_loop._execute_tool(tc)
+
+        assert result.is_error is True
+        assert "역할 제약" in result.content
