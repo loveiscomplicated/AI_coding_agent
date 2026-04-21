@@ -45,6 +45,7 @@ READ_TOOLS: list[str] = [
     "get_outline",
     "get_function_src",
     "get_imports",
+    "hashline_read",
 ]
 
 # 파일 쓰기 도구 (쓰기 권한이 있는 역할만)
@@ -54,6 +55,7 @@ WRITE_TOOLS: list[str] = [
     "append_to_file",
     "delete_file",
     "delete_directory",
+    "hashline_edit",
 ]
 
 
@@ -334,7 +336,7 @@ TEST_WRITER = RoleConfig(
     # 테스트 파일 생성만 허용 (edit_file/append 불필요)
     # ask_user: 금지 패턴(동적 import/try-except 추측 등) 대신 구조적 불확실성을
     # 명시적으로 질의할 통로. 프롬프트의 "ask_user 사용 조건" 에서 남용 방지.
-    allowed_tools=tuple(READ_TOOLS + ["write_file", "ask_user"]),
+    allowed_tools=tuple(READ_TOOLS + ["write_file", "hashline_edit", "ask_user"]),
     # 중간 임계치 — 테스트 작성은 탐색과 쓰기가 섞이므로 implementer 와 reviewer 사이.
     compaction_threshold=20000,
 )
