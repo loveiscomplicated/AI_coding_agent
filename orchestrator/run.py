@@ -73,6 +73,11 @@ from agents.roles import (
 from orchestrator.pipeline import TDDPipeline
 from orchestrator.report import build_report, load_reports, save_report
 from orchestrator.task import Task, TaskStatus, load_tasks, save_tasks
+from orchestrator.escalation import (
+    TIER_INTERNAL_MAX_RETRIES,
+    resolve_tier_chain,
+    should_escalate_tier,
+)
 from orchestrator.workspace import WorkspaceManager
 from project_paths import resolve_reports_dir
 
@@ -811,331 +816,410 @@ def run_pipeline(
         emit({"type": "task_start", "task_id": task.id, "title": task.title})
         _notify(notifier, f"🚀 [{task.id}] \"{task.title}\" 시작")
 
-        hints_tried: list[str] = []
-        # intervention.generate_skeleton_files() 가 생성한 스텁. 다음 재시도 워크스페이스
-        # 생성자에 주입되고, 주입 후 즉시 비워진다 (한 번만 사용).
-        pending_skeletons: dict[str, str] = {}
-        auto_split_triggered = False
+        # ── T11: Tier escalation 설정 ────────────────────────────────────────
+        # auto_select_by_complexity=True 일 때만 tier chain 활성화.
+        # complexity 가 None 이면 escalation.resolve_tier_chain 이 non-simple 로 보수적 처리.
+        _use_escalation = auto_select_by_complexity and _complexity_map is not None
+        _tier_chain: list[str | None]
+        _per_tier_retries: int
+        if _use_escalation:
+            _tier_chain = resolve_tier_chain(task.complexity)
+            _per_tier_retries = TIER_INTERNAL_MAX_RETRIES
+        else:
+            _tier_chain = [None]          # None = 기존 동작(task.complexity 기반 fallback)
+            _per_tier_retries = max_orchestrator_retries
 
-        for orch_attempt in range(max_orchestrator_retries + 1):
-            # 리스너 스레드 생존 확인 + 중단 여부 확인
-            _check_listener_alive()
-            if pause_ctrl.is_stopped:
-                logger.info("[%s] 중단 요청 — 오케스트레이터 루프 종료", task.id)
-                return
-            with WorkspaceManager(
-                task, repo_path, keep_on_failure=True,
-                skeleton_files=pending_skeletons or None,
-            ) as ws:
-                # 다음 반복에서 재주입되지 않도록 즉시 초기화.
-                pending_skeletons = {}
-                # 선행 태스크 산출물 주입 (depends_on 연결된 완료 태스크)
-                if task.depends_on:
-                    dep_tasks = [t for t in all_tasks if t.id in task.depends_on]
-                    ws.inject_dependency_context(dep_tasks)
+        # escalation 결과 추적 (최종 build_report 에 전달)
+        _tier_attempts_log: list[dict] = []
+        _escalated = False
+        _escalation_trigger: str | None = None
+        _successful_tier: str | None = None
+        _last_tier_failure_reason: str | None = None
 
-                if orch_attempt > 0:
-                    emit({"type": "step", "task_id": task.id, "step": "orch_retry",
-                          "message": f"오케스트레이터 재시도 {orch_attempt}/{max_orchestrator_retries}…"})
+        for _tier_idx, current_tier in enumerate(_tier_chain):
+            # ── tier 진입 — escalation 변수 초기화 ──────────────────────────
+            hints_tried: list[str] = []
+            # intervention.generate_skeleton_files() 가 생성한 스텁. 다음 재시도 워크스페이스
+            # 생성자에 주입되고, 주입 후 즉시 비워진다 (한 번만 사용).
+            pending_skeletons: dict[str, str] = {}
+            auto_split_triggered = False
+            _tier_succeeded = False
 
-                def _progress(event: dict, _tid=task.id) -> None:
-                    emit({**event, "task_id": _tid})
-
-                result = pipeline.run(task, ws, on_progress=_progress, pause_ctrl=pause_ctrl,
-                                     all_tasks=all_tasks, repo_path=repo_path)
-                elapsed = time.monotonic() - start_time
-
-                # ── 성공 ────────────────────────────────────────────────────────
-                if result.succeeded:
-                    pr_url = ""
-                    if not no_pr:
-                        # test_pass / review 결과는 pipeline on_progress 콜백이 이미 emit했음
-                        git_msg = ("브랜치 → 커밋 중… (push/PR 건너뜀)"
-                                   if no_push else "브랜치 → 커밋 → 푸시 → PR 생성 중…")
-                        emit({"type": "step", "task_id": task.id, "step": "git",
-                              "message": git_msg})
-                        try:
-                            pr_url = git.run(task, ws, result, no_push=no_push)
-                            task.pr_url = pr_url
-                        except GitWorkflowError as e:
-                            task.status = TaskStatus.FAILED
-                            task.failure_reason = str(e)
-                            with _save_lock:
-                                fail_count += 1
-                            emit({"type": "task_fail", "task_id": task.id, "title": task.title,
-                                  "reason": str(e), "elapsed": round(elapsed, 1)})
-                            _notify_failure(notifier, task, str(e), elapsed)
-                            report = build_report(task, result, elapsed_seconds=elapsed, pr_url="",
-                                                  models_used=result.models_used or None,
-                                                  call_logs_dir=logs_dir)
-                            save_report(report, reports_dir=reports_dir)
-                            with _save_lock:
-                                save_tasks(all_tasks, tasks_path)
-                            return
-
-                    task.status = TaskStatus.DONE
-                    with _save_lock:
-                        success_count += 1
-                    if pr_url:
-                        emit({"type": "task_done", "task_id": task.id, "title": task.title,
-                              "pr_url": pr_url, "elapsed": round(elapsed, 1)})
-                        _notify(notifier,
-                                f"✅ [{task.id}] \"{task.title}\" 완료! PR: {pr_url}  (⏱ {elapsed:.0f}s)")
-                    else:
-                        emit({"type": "task_done", "task_id": task.id, "title": task.title,
+            for orch_attempt in range(_per_tier_retries + 1):
+                # 리스너 스레드 생존 확인 + 중단 여부 확인
+                _check_listener_alive()
+                if pause_ctrl.is_stopped:
+                    logger.info("[%s] 중단 요청 — 오케스트레이터 루프 종료", task.id)
+                    return
+                with WorkspaceManager(
+                    task, repo_path, keep_on_failure=True,
+                    skeleton_files=pending_skeletons or None,
+                ) as ws:
+                    # 다음 반복에서 재주입되지 않도록 즉시 초기화.
+                    pending_skeletons = {}
+                    # 선행 태스크 산출물 주입 (depends_on 연결된 완료 태스크)
+                    if task.depends_on:
+                        dep_tasks = [t for t in all_tasks if t.id in task.depends_on]
+                        ws.inject_dependency_context(dep_tasks)
+    
+                    if orch_attempt > 0:
+                        emit({"type": "step", "task_id": task.id, "step": "orch_retry",
+                              "message": f"오케스트레이터 재시도 {orch_attempt}/{max_orchestrator_retries}…"})
+    
+                    def _progress(event: dict, _tid=task.id) -> None:
+                        emit({**event, "task_id": _tid})
+    
+                    result = pipeline.run(task, ws, on_progress=_progress, pause_ctrl=pause_ctrl,
+                                         all_tasks=all_tasks, repo_path=repo_path,
+                                         tier=current_tier)
+                    elapsed = time.monotonic() - start_time
+    
+                    # ── 성공 ────────────────────────────────────────────────────────
+                    if result.succeeded:
+                        pr_url = ""
+                        if not no_pr:
+                            # test_pass / review 결과는 pipeline on_progress 콜백이 이미 emit했음
+                            git_msg = ("브랜치 → 커밋 중… (push/PR 건너뜀)"
+                                       if no_push else "브랜치 → 커밋 → 푸시 → PR 생성 중…")
+                            emit({"type": "step", "task_id": task.id, "step": "git",
+                                  "message": git_msg})
+                            try:
+                                pr_url = git.run(task, ws, result, no_push=no_push)
+                                task.pr_url = pr_url
+                            except GitWorkflowError as e:
+                                task.status = TaskStatus.FAILED
+                                task.failure_reason = str(e)
+                                with _save_lock:
+                                    fail_count += 1
+                                emit({"type": "task_fail", "task_id": task.id, "title": task.title,
+                                      "reason": str(e), "elapsed": round(elapsed, 1)})
+                                _notify_failure(notifier, task, str(e), elapsed)
+                                _tier_attempts_log.append({"tier": current_tier, "success": False,
+                                                           "failure_type": "GIT_ERROR"})
+                                report = build_report(task, result, elapsed_seconds=elapsed, pr_url="",
+                                                      models_used=result.models_used or None,
+                                                      call_logs_dir=logs_dir,
+                                                      models_escalated=_escalated,
+                                                      escalation_trigger=_escalation_trigger,
+                                                      successful_tier=None,
+                                                      tier_attempts=_tier_attempts_log)
+                                save_report(report, reports_dir=reports_dir)
+                                with _save_lock:
+                                    save_tasks(all_tasks, tasks_path)
+                                return
+    
+                        _tier_succeeded = True
+                        _successful_tier = str(current_tier) if current_tier is not None else None
+                        _tier_attempts_log.append({"tier": current_tier, "success": True,
+                                                   "failure_type": None})
+                        task.status = TaskStatus.DONE
+                        with _save_lock:
+                            success_count += 1
+                        if pr_url:
+                            emit({"type": "task_done", "task_id": task.id, "title": task.title,
+                                  "pr_url": pr_url, "elapsed": round(elapsed, 1)})
+                            _notify(notifier,
+                                    f"✅ [{task.id}] \"{task.title}\" 완료! PR: {pr_url}  (⏱ {elapsed:.0f}s)")
+                        else:
+                            emit({"type": "task_done", "task_id": task.id, "title": task.title,
+                                  "elapsed": round(elapsed, 1)})
+                            _notify(notifier, f"✅ [{task.id}] \"{task.title}\" 완료! (⏱ {elapsed:.0f}s)")
+    
+                        report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url,
+                                              models_used=result.models_used or None,
+                                              call_logs_dir=logs_dir,
+                                              models_escalated=_escalated,
+                                              escalation_trigger=_escalation_trigger,
+                                              successful_tier=_successful_tier,
+                                              tier_attempts=_tier_attempts_log)
+                        save_report(report, reports_dir=reports_dir)
+                        with _save_lock:
+                            save_tasks(all_tasks, tasks_path)
+                        return
+    
+                    # ── 실패 ────────────────────────────────────────────────────────
+                    failure_reason = result.failure_reason or "알 수 없음"
+                    is_aborted = failure_reason.startswith("[ABORTED]")
+                    is_max_iter = failure_reason.startswith("[MAX_ITER]")
+    
+                    # 즉시 중단 요청 — 오케스트레이터 재시도 없이 바로 태스크 실패 처리
+                    if is_aborted:
+                        logger.info("[%s] 즉시 중단으로 태스크 종료", task.id)
+                        with _save_lock:
+                            fail_count += 1
+                        failed_ids.add(task.id)
+                        emit({"type": "task_aborted", "task_id": task.id, "title": task.title,
                               "elapsed": round(elapsed, 1)})
-                        _notify(notifier, f"✅ [{task.id}] \"{task.title}\" 완료! (⏱ {elapsed:.0f}s)")
-
-                    report = build_report(task, result, elapsed_seconds=elapsed, pr_url=pr_url,
-                                          models_used=result.models_used or None,
-                                          call_logs_dir=logs_dir)
+                        with _save_lock:
+                            save_tasks(all_tasks, tasks_path)
+                        return
+    
+                    if is_max_iter:
+                        logger.warning(
+                            "[%s] ⚠️ 최대 반복 횟수 초과 (오케스트레이터 시도 %d/%d): %s",
+                            task.id, orch_attempt + 1, max_orchestrator_retries + 1, task.title,
+                        )
+    
+                    is_last_attempt = (orch_attempt >= max_orchestrator_retries)
+    
+                    if not is_last_attempt:
+                        # ── 오케스트레이터 개입 전 중단 체크 ─────────────────────
+                        if pause_ctrl.is_stopped:
+                            logger.info("[%s] 중단 요청 — 오케스트레이터 분석 생략", task.id)
+                            return
+                        # ── 오케스트레이터 개입: 분석 후 재시도 결정 ─────────────
+                        reason_snippet = failure_reason.replace("[MAX_ITER] ", "")[:200]
+                        logger.warning(
+                            "[%s] 실패 (시도 %d/%d) — 오케스트레이터 분석 시작\n  원인: %s",
+                            task.id, orch_attempt + 1, max_orchestrator_retries + 1, reason_snippet,
+                        )
+                        _notify(notifier,
+                                f"🔍 [{task.id}] 실패 (시도 {orch_attempt + 1}/{max_orchestrator_retries + 1})"
+                                f" — 오케스트레이터 분석 중…\n"
+                                f"원인: {reason_snippet}")
+                        emit({"type": "orchestrator_analyzing", "task_id": task.id,
+                              "title": task.title, "attempt": orch_attempt + 1,
+                              "max_attempts": max_orchestrator_retries + 1,
+                              "failure_reason": failure_reason, "is_max_iter": is_max_iter})
+    
+                        test_stdout = result.test_result.stdout if result.test_result else ""
+                        analysis = orch_classify_and_analyze(
+                            task, failure_reason, orch_attempt + 1,
+                            test_stdout=test_stdout,
+                            previous_hints=hints_tried,
+                            role_models=_effective_role_models,
+                            tier=current_tier,
+                        )
+                        _accumulate_external_tokens(
+                            result.metrics,
+                            "intervention",
+                            analysis.token_usage,
+                            analysis.call_log,
+                        )
+                        if analysis.call_log:
+                            result.models_used["intervention"] = analysis.call_log[-1].get("model", "")
+    
+                        # orch_analyze 완료 후 중단 체크 (분석 중 중단 명령 수신 가능)
+                        if pause_ctrl.is_stopped:
+                            logger.info("[%s] 중단 요청 — 오케스트레이터 재시도 취소", task.id)
+                            return
+    
+                        if analysis.should_retry:
+                            hints_tried.append(analysis.hint)
+                            task.last_error = (
+                                f"[오케스트레이터 힌트 #{orch_attempt + 1}]\n{analysis.hint}\n\n"
+                                f"이전 오류:\n{task.last_error or ''}"
+                            )
+                            task.failure_reason = ""  # 초기화 (다음 시도 전)
+                            # 스켈레톤이 생성됐다면 다음 반복의 WorkspaceManager 에 주입된다.
+                            if analysis.skeleton_files:
+                                pending_skeletons = dict(analysis.skeleton_files)
+                                logger.info(
+                                    "[%s] 다음 재시도에 스켈레톤 주입 예약: %s",
+                                    task.id, list(pending_skeletons.keys()),
+                                )
+                                emit({"type": "orchestrator_skeleton_generated",
+                                      "task_id": task.id, "title": task.title,
+                                      "attempt": orch_attempt + 1,
+                                      "next_attempt": orch_attempt + 2,
+                                      "files": list(pending_skeletons.keys())})
+                            logger.warning(
+                                "[%s] 오케스트레이터 → RETRY (시도 %d → %d)\n  힌트: %s",
+                                task.id, orch_attempt + 1, orch_attempt + 2, analysis.hint[:150],
+                            )
+                            _notify(notifier,
+                                    f"🔄 [{task.id}] 오케스트레이터 재시도 결정 "
+                                    f"({orch_attempt + 1} → {orch_attempt + 2}회차)\n"
+                                    f"💡 힌트: {analysis.hint[:400]}")
+                            emit({"type": "orchestrator_retry", "task_id": task.id,
+                                  "title": task.title, "attempt": orch_attempt + 1,
+                                  "next_attempt": orch_attempt + 2,
+                                  "max_attempts": max_orchestrator_retries + 1,
+                                  "hint": analysis.hint, "failure_reason": failure_reason})
+                            continue  # 다음 orch_attempt — 새 WorkspaceManager로 재실행
+    
+                        else:
+                            # GIVE_UP — 더 이상 시도하지 않음
+                            logger.warning(
+                                "[%s] 오케스트레이터 → GIVE_UP (시도 %d/%d)\n  이유: %s",
+                                task.id, orch_attempt + 1, max_orchestrator_retries + 1, analysis.hint[:150],
+                            )
+                            _notify(notifier,
+                                    f"🛑 [{task.id}] 오케스트레이터 포기 결정 "
+                                    f"(시도 {orch_attempt + 1}/{max_orchestrator_retries + 1})\n"
+                                    f"이유: {analysis.hint[:300]}")
+                            emit({"type": "orchestrator_giveup", "task_id": task.id,
+                                  "title": task.title, "attempt": orch_attempt + 1,
+                                  "reason": analysis.hint, "failure_reason": failure_reason})
+                            is_last_attempt = True  # 아래 최종 실패 처리로 넘어감
+    
+                    # ── 자동 분해 (intervention_auto_split 플래그 ON 시) ─────────
+                    # 조건: 모든 재시도 소진 + 최소 1회 intervention 수행 + 중복 트리거 방지.
+                    # 성공 시 원 태스크는 SUPERSEDED 로 보존되고 다음 실행 사이클에서
+                    # 하위 태스크가 픽업된다 — 현재 사이클은 종료.
+                    if (
+                        is_last_attempt
+                        and intervention_auto_split
+                        and hints_tried
+                        and not auto_split_triggered
+                    ):
+                        auto_split_triggered = True
+                        spec_content = _load_spec_content(repo_path)
+                        try:
+                            split_llm = create_redesign_llm(_cross_provider, _cross_capable_model)
+                        except Exception as exc:
+                            logger.error("[%s] 자동 분해 LLM 생성 실패: %s", task.id, exc)
+                            split_llm = None
+    
+                        if split_llm is not None:
+                            try:
+                                with _save_lock:
+                                    subtasks = _split_task(
+                                        task, all_tasks, spec_content, split_llm,
+                                        tasks_yaml_path=tasks_path,
+                                    )
+                            except SplitTaskError as exc:
+                                logger.warning("[%s] 자동 분해 거부/실패: %s", task.id, exc)
+                                emit({"type": "task_split_failed", "task_id": task.id,
+                                      "title": task.title, "reason": str(exc)})
+                            except Exception as exc:
+                                logger.error("[%s] 자동 분해 예외: %s", task.id, exc, exc_info=True)
+                                emit({"type": "task_split_failed", "task_id": task.id,
+                                      "title": task.title, "reason": str(exc)})
+                            else:
+                                sub_ids = [s.id for s in subtasks]
+                                logger.warning(
+                                    "[%s] 자동 분해 성공 → %s (SUPERSEDED 보존). "
+                                    "다음 파이프라인 실행 시 하위 태스크가 실행됩니다.",
+                                    task.id, sub_ids,
+                                )
+                                _notify(notifier,
+                                        f"🧩 [{task.id}] 자동 분해 — 하위 {len(sub_ids)}개 태스크 생성\n"
+                                        f"{', '.join(sub_ids)}\n"
+                                        f"(원 태스크는 SUPERSEDED, 재실행 시 이어집니다)")
+                                emit({"type": "task_split", "task_id": task.id,
+                                      "title": task.title,
+                                      "subtask_ids": sub_ids,
+                                      "subtasks": [s.to_dict() for s in subtasks]})
+                                # 현재 사이클 종료 — 최종 실패 처리 건너뜀 (SUPERSEDED 로 이미 기록됨)
+                                return
+    
+                    # ── tier 내 최종 실패: escalation 가능 여부 판정 ─────────────
+                    # 현재 tier에서 모든 시도를 소진했거나 GIVE_UP했을 때만 도달.
+                    # escalation이 활성화된 경우 → 다음 tier가 있으면 그쪽으로 넘어감.
+                    _last_tier_failure_reason = failure_reason
+                    _tier_attempts_log.append({
+                        "tier": current_tier,
+                        "success": False,
+                        "failure_type": failure_reason[:80] if failure_reason else None,
+                    })
+    
+                    # 다음 tier가 있고, escalation 가능한 실패 유형이면 → 다음 tier로 넘어감
+                    if (
+                        _use_escalation
+                        and _tier_idx < len(_tier_chain) - 1
+                        and should_escalate_tier(failure_reason)
+                    ):
+                        _next_tier = _tier_chain[_tier_idx + 1]
+                        _escalated = True
+                        _escalation_trigger = failure_reason[:200]
+                        logger.warning(
+                            "[%s] ⬆️ Tier escalation: %s → %s (trigger=%s)",
+                            task.id, current_tier, _next_tier,
+                            (failure_reason or "")[:80],
+                        )
+                        _notify(notifier,
+                                f"⬆️ [{task.id}] tier escalation: "
+                                f"{current_tier} → {_next_tier}\n"
+                                f"trigger: {(failure_reason or '')[:120]}")
+                        emit({"type": "tier_escalation", "task_id": task.id,
+                              "from_tier": current_tier, "to_tier": _next_tier,
+                              "trigger": failure_reason})
+                        # task 상태 초기화 — 다음 tier에서 새로 시작
+                        task.failure_reason = ""
+                        task.last_error = ""
+                        break  # 내부 orch_attempt 루프 종료 → 다음 tier로
+    
+                    # ── 최종 실패 처리 ───────────────────────────────────────────
+                    task.status = TaskStatus.FAILED
+                    task.failure_reason = failure_reason
+                    with _save_lock:
+                        fail_count += 1
+    
+                    # 오케스트레이터가 1회 이상 개입한 경우 → 상세 보고서 생성
+                    if hints_tried:
+                        logger.warning(
+                            "[%s] 오케스트레이터 최종 실패 (%d회 시도) — 보고서 생성 중…",
+                            task.id, orch_attempt + 1,
+                        )
+                        emit({"type": "orchestrator_report_generating", "task_id": task.id,
+                              "title": task.title, "total_attempts": orch_attempt + 1})
+                        _notify(notifier,
+                                f"📊 [{task.id}] \"{task.title}\" "
+                                f"오케스트레이터 {orch_attempt + 1}회 시도 후 최종 실패\n"
+                                f"보고서 생성 중…")
+    
+                        report_result = orch_report_with_metrics(
+                            task, failure_reason, orch_attempt + 1, hints_tried,
+                            orchestrator_model=_cross_capable_model,
+                            coding_agent_model=_impl_model,
+                            models_used=result.models_used or None,
+                            role_models=_effective_role_models,
+                        )
+                        _accumulate_external_tokens(
+                            result.metrics,
+                            "intervention",
+                            report_result.token_usage,
+                            report_result.call_log,
+                        )
+                        # 보고서 생성 모델은 analyze 모델과 별도 키로 기록한다.
+                        # 기존처럼 'intervention' 키를 덮어쓰면 분석 단계 모델 추적을 잃는다.
+                        if report_result.call_log:
+                            result.models_used["intervention_report"] = report_result.call_log[-1].get("model", "")
+                        orch_report_text = report_result.text
+                        report_path = orch_save_report(orch_report_text, task.id, reports_dir)
+                        logger.warning(
+                            "[%s] 오케스트레이터 보고서 저장 완료: %s", task.id, report_path,
+                        )
+                        _notify(notifier,
+                                f"📋 [{task.id}] **오케스트레이터 실패 보고서**\n"
+                                f"파일: {report_path.name}\n\n"
+                                f"{orch_report_text[:800]}"
+                                f"{'…(이하 생략)' if len(orch_report_text) > 800 else ''}")
+                        emit({"type": "orchestrator_report", "task_id": task.id,
+                              "title": task.title, "total_attempts": orch_attempt + 1,
+                              "report": orch_report_text, "report_path": str(report_path)})
+                    else:
+                        orch_report_text = ""
+                        # 오케스트레이터 개입 없이 첫 시도에서 실패 (max_orchestrator_retries=0 등)
+                        if is_max_iter:
+                            _notify(notifier,
+                                    f"⚠️ [{task.id}] \"{task.title}\" **최대 반복 횟수 초과**\n"
+                                    f"에이전트가 루프를 탈출하지 못했습니다.\n"
+                                    f"태스크를 더 작게 분할하거나 아래에 힌트를 입력하세요.")
+    
+                    emit({"type": "task_fail", "task_id": task.id, "title": task.title,
+                          "reason": task.failure_reason, "is_max_iter": is_max_iter,
+                          "elapsed": round(elapsed, 1)})
+                    _notify_failure(notifier, task, task.failure_reason, elapsed)
+    
+                    report = build_report(
+                        task, result, elapsed_seconds=elapsed, pr_url="",
+                        orchestrator_attempts=orch_attempt + 1 if hints_tried else 0,
+                        orchestrator_model=_cross_capable_model if hints_tried else "",
+                        coding_agent_model=_impl_model if hints_tried else "",
+                        orchestrator_summary=_extract_orch_summary(orch_report_text),
+                        models_used=result.models_used or None,
+                        call_logs_dir=logs_dir,
+                        models_escalated=_escalated,
+                        escalation_trigger=_escalation_trigger,
+                        successful_tier=None,
+                        tier_attempts=_tier_attempts_log,
+                    )
                     save_report(report, reports_dir=reports_dir)
                     with _save_lock:
                         save_tasks(all_tasks, tasks_path)
-                    return
-
-                # ── 실패 ────────────────────────────────────────────────────────
-                failure_reason = result.failure_reason or "알 수 없음"
-                is_aborted = failure_reason.startswith("[ABORTED]")
-                is_max_iter = failure_reason.startswith("[MAX_ITER]")
-
-                # 즉시 중단 요청 — 오케스트레이터 재시도 없이 바로 태스크 실패 처리
-                if is_aborted:
-                    logger.info("[%s] 즉시 중단으로 태스크 종료", task.id)
-                    with _save_lock:
-                        fail_count += 1
-                    failed_ids.add(task.id)
-                    emit({"type": "task_aborted", "task_id": task.id, "title": task.title,
-                          "elapsed": round(elapsed, 1)})
-                    with _save_lock:
-                        save_tasks(all_tasks, tasks_path)
-                    return
-
-                if is_max_iter:
-                    logger.warning(
-                        "[%s] ⚠️ 최대 반복 횟수 초과 (오케스트레이터 시도 %d/%d): %s",
-                        task.id, orch_attempt + 1, max_orchestrator_retries + 1, task.title,
-                    )
-
-                is_last_attempt = (orch_attempt >= max_orchestrator_retries)
-
-                if not is_last_attempt:
-                    # ── 오케스트레이터 개입 전 중단 체크 ─────────────────────
-                    if pause_ctrl.is_stopped:
-                        logger.info("[%s] 중단 요청 — 오케스트레이터 분석 생략", task.id)
-                        return
-                    # ── 오케스트레이터 개입: 분석 후 재시도 결정 ─────────────
-                    reason_snippet = failure_reason.replace("[MAX_ITER] ", "")[:200]
-                    logger.warning(
-                        "[%s] 실패 (시도 %d/%d) — 오케스트레이터 분석 시작\n  원인: %s",
-                        task.id, orch_attempt + 1, max_orchestrator_retries + 1, reason_snippet,
-                    )
-                    _notify(notifier,
-                            f"🔍 [{task.id}] 실패 (시도 {orch_attempt + 1}/{max_orchestrator_retries + 1})"
-                            f" — 오케스트레이터 분석 중…\n"
-                            f"원인: {reason_snippet}")
-                    emit({"type": "orchestrator_analyzing", "task_id": task.id,
-                          "title": task.title, "attempt": orch_attempt + 1,
-                          "max_attempts": max_orchestrator_retries + 1,
-                          "failure_reason": failure_reason, "is_max_iter": is_max_iter})
-
-                    test_stdout = result.test_result.stdout if result.test_result else ""
-                    analysis = orch_classify_and_analyze(
-                        task, failure_reason, orch_attempt + 1,
-                        test_stdout=test_stdout,
-                        previous_hints=hints_tried,
-                        role_models=_effective_role_models,
-                    )
-                    _accumulate_external_tokens(
-                        result.metrics,
-                        "intervention",
-                        analysis.token_usage,
-                        analysis.call_log,
-                    )
-                    if analysis.call_log:
-                        result.models_used["intervention"] = analysis.call_log[-1].get("model", "")
-
-                    # orch_analyze 완료 후 중단 체크 (분석 중 중단 명령 수신 가능)
-                    if pause_ctrl.is_stopped:
-                        logger.info("[%s] 중단 요청 — 오케스트레이터 재시도 취소", task.id)
-                        return
-
-                    if analysis.should_retry:
-                        hints_tried.append(analysis.hint)
-                        task.last_error = (
-                            f"[오케스트레이터 힌트 #{orch_attempt + 1}]\n{analysis.hint}\n\n"
-                            f"이전 오류:\n{task.last_error or ''}"
-                        )
-                        task.failure_reason = ""  # 초기화 (다음 시도 전)
-                        # 스켈레톤이 생성됐다면 다음 반복의 WorkspaceManager 에 주입된다.
-                        if analysis.skeleton_files:
-                            pending_skeletons = dict(analysis.skeleton_files)
-                            logger.info(
-                                "[%s] 다음 재시도에 스켈레톤 주입 예약: %s",
-                                task.id, list(pending_skeletons.keys()),
-                            )
-                            emit({"type": "orchestrator_skeleton_generated",
-                                  "task_id": task.id, "title": task.title,
-                                  "attempt": orch_attempt + 1,
-                                  "next_attempt": orch_attempt + 2,
-                                  "files": list(pending_skeletons.keys())})
-                        logger.warning(
-                            "[%s] 오케스트레이터 → RETRY (시도 %d → %d)\n  힌트: %s",
-                            task.id, orch_attempt + 1, orch_attempt + 2, analysis.hint[:150],
-                        )
-                        _notify(notifier,
-                                f"🔄 [{task.id}] 오케스트레이터 재시도 결정 "
-                                f"({orch_attempt + 1} → {orch_attempt + 2}회차)\n"
-                                f"💡 힌트: {analysis.hint[:400]}")
-                        emit({"type": "orchestrator_retry", "task_id": task.id,
-                              "title": task.title, "attempt": orch_attempt + 1,
-                              "next_attempt": orch_attempt + 2,
-                              "max_attempts": max_orchestrator_retries + 1,
-                              "hint": analysis.hint, "failure_reason": failure_reason})
-                        continue  # 다음 orch_attempt — 새 WorkspaceManager로 재실행
-
-                    else:
-                        # GIVE_UP — 더 이상 시도하지 않음
-                        logger.warning(
-                            "[%s] 오케스트레이터 → GIVE_UP (시도 %d/%d)\n  이유: %s",
-                            task.id, orch_attempt + 1, max_orchestrator_retries + 1, analysis.hint[:150],
-                        )
-                        _notify(notifier,
-                                f"🛑 [{task.id}] 오케스트레이터 포기 결정 "
-                                f"(시도 {orch_attempt + 1}/{max_orchestrator_retries + 1})\n"
-                                f"이유: {analysis.hint[:300]}")
-                        emit({"type": "orchestrator_giveup", "task_id": task.id,
-                              "title": task.title, "attempt": orch_attempt + 1,
-                              "reason": analysis.hint, "failure_reason": failure_reason})
-                        is_last_attempt = True  # 아래 최종 실패 처리로 넘어감
-
-                # ── 자동 분해 (intervention_auto_split 플래그 ON 시) ─────────
-                # 조건: 모든 재시도 소진 + 최소 1회 intervention 수행 + 중복 트리거 방지.
-                # 성공 시 원 태스크는 SUPERSEDED 로 보존되고 다음 실행 사이클에서
-                # 하위 태스크가 픽업된다 — 현재 사이클은 종료.
-                if (
-                    is_last_attempt
-                    and intervention_auto_split
-                    and hints_tried
-                    and not auto_split_triggered
-                ):
-                    auto_split_triggered = True
-                    spec_content = _load_spec_content(repo_path)
-                    try:
-                        split_llm = create_redesign_llm(_cross_provider, _cross_capable_model)
-                    except Exception as exc:
-                        logger.error("[%s] 자동 분해 LLM 생성 실패: %s", task.id, exc)
-                        split_llm = None
-
-                    if split_llm is not None:
-                        try:
-                            with _save_lock:
-                                subtasks = _split_task(
-                                    task, all_tasks, spec_content, split_llm,
-                                    tasks_yaml_path=tasks_path,
-                                )
-                        except SplitTaskError as exc:
-                            logger.warning("[%s] 자동 분해 거부/실패: %s", task.id, exc)
-                            emit({"type": "task_split_failed", "task_id": task.id,
-                                  "title": task.title, "reason": str(exc)})
-                        except Exception as exc:
-                            logger.error("[%s] 자동 분해 예외: %s", task.id, exc, exc_info=True)
-                            emit({"type": "task_split_failed", "task_id": task.id,
-                                  "title": task.title, "reason": str(exc)})
-                        else:
-                            sub_ids = [s.id for s in subtasks]
-                            logger.warning(
-                                "[%s] 자동 분해 성공 → %s (SUPERSEDED 보존). "
-                                "다음 파이프라인 실행 시 하위 태스크가 실행됩니다.",
-                                task.id, sub_ids,
-                            )
-                            _notify(notifier,
-                                    f"🧩 [{task.id}] 자동 분해 — 하위 {len(sub_ids)}개 태스크 생성\n"
-                                    f"{', '.join(sub_ids)}\n"
-                                    f"(원 태스크는 SUPERSEDED, 재실행 시 이어집니다)")
-                            emit({"type": "task_split", "task_id": task.id,
-                                  "title": task.title,
-                                  "subtask_ids": sub_ids,
-                                  "subtasks": [s.to_dict() for s in subtasks]})
-                            # 현재 사이클 종료 — 최종 실패 처리 건너뜀 (SUPERSEDED 로 이미 기록됨)
-                            return
-
-                # ── 최종 실패 처리 ───────────────────────────────────────────
-                task.status = TaskStatus.FAILED
-                task.failure_reason = failure_reason
-                with _save_lock:
-                    fail_count += 1
-
-                # 오케스트레이터가 1회 이상 개입한 경우 → 상세 보고서 생성
-                if hints_tried:
-                    logger.warning(
-                        "[%s] 오케스트레이터 최종 실패 (%d회 시도) — 보고서 생성 중…",
-                        task.id, orch_attempt + 1,
-                    )
-                    emit({"type": "orchestrator_report_generating", "task_id": task.id,
-                          "title": task.title, "total_attempts": orch_attempt + 1})
-                    _notify(notifier,
-                            f"📊 [{task.id}] \"{task.title}\" "
-                            f"오케스트레이터 {orch_attempt + 1}회 시도 후 최종 실패\n"
-                            f"보고서 생성 중…")
-
-                    report_result = orch_report_with_metrics(
-                        task, failure_reason, orch_attempt + 1, hints_tried,
-                        orchestrator_model=_cross_capable_model,
-                        coding_agent_model=_impl_model,
-                        models_used=result.models_used or None,
-                        role_models=_effective_role_models,
-                    )
-                    _accumulate_external_tokens(
-                        result.metrics,
-                        "intervention",
-                        report_result.token_usage,
-                        report_result.call_log,
-                    )
-                    # 보고서 생성 모델은 analyze 모델과 별도 키로 기록한다.
-                    # 기존처럼 'intervention' 키를 덮어쓰면 분석 단계 모델 추적을 잃는다.
-                    if report_result.call_log:
-                        result.models_used["intervention_report"] = report_result.call_log[-1].get("model", "")
-                    orch_report_text = report_result.text
-                    report_path = orch_save_report(orch_report_text, task.id, reports_dir)
-                    logger.warning(
-                        "[%s] 오케스트레이터 보고서 저장 완료: %s", task.id, report_path,
-                    )
-                    _notify(notifier,
-                            f"📋 [{task.id}] **오케스트레이터 실패 보고서**\n"
-                            f"파일: {report_path.name}\n\n"
-                            f"{orch_report_text[:800]}"
-                            f"{'…(이하 생략)' if len(orch_report_text) > 800 else ''}")
-                    emit({"type": "orchestrator_report", "task_id": task.id,
-                          "title": task.title, "total_attempts": orch_attempt + 1,
-                          "report": orch_report_text, "report_path": str(report_path)})
-                else:
-                    orch_report_text = ""
-                    # 오케스트레이터 개입 없이 첫 시도에서 실패 (max_orchestrator_retries=0 등)
-                    if is_max_iter:
-                        _notify(notifier,
-                                f"⚠️ [{task.id}] \"{task.title}\" **최대 반복 횟수 초과**\n"
-                                f"에이전트가 루프를 탈출하지 못했습니다.\n"
-                                f"태스크를 더 작게 분할하거나 아래에 힌트를 입력하세요.")
-
-                emit({"type": "task_fail", "task_id": task.id, "title": task.title,
-                      "reason": task.failure_reason, "is_max_iter": is_max_iter,
-                      "elapsed": round(elapsed, 1)})
-                _notify_failure(notifier, task, task.failure_reason, elapsed)
-
-                report = build_report(
-                    task, result, elapsed_seconds=elapsed, pr_url="",
-                    orchestrator_attempts=orch_attempt + 1 if hints_tried else 0,
-                    orchestrator_model=_cross_capable_model if hints_tried else "",
-                    coding_agent_model=_impl_model if hints_tried else "",
-                    orchestrator_summary=_extract_orch_summary(orch_report_text),
-                    models_used=result.models_used or None,
-                    call_logs_dir=logs_dir,
-                )
-                save_report(report, reports_dir=reports_dir)
-                with _save_lock:
-                    save_tasks(all_tasks, tasks_path)
-                return
+                    return  # tier 루프 전체 종료 (최종 실패)
 
     def skip_one(task: Task, blocked_by: list[str]) -> None:
         """의존 태스크 실패로 건너뛸 태스크를 처리한다."""
