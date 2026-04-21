@@ -235,6 +235,10 @@ class ReactLoop:
         messages: list[Message] = self.llm.build_messages(
             user_input=user_message, history=history
         )
+        # 한 번의 run 동안 반복 호출 간에 byte-identical 로 유지되어야 하는 prefix.
+        # 멀티턴 CLI에서는 [system, *history, current_user] 전체가 고정 구간이므로
+        # trim/compaction 시 이 길이까지는 절대 드롭하지 않는다.
+        protected_prefix_len = len(messages)
         iterations: list[LoopIteration] = []
         heal_events: list[HealEvent] = []
         total_input_tokens: int = 0
@@ -567,12 +571,19 @@ class ReactLoop:
                 messages = self.context_pruner.fit(messages)
             elif self.compaction_enabled:
                 messages = self._maybe_compact(
-                    messages, iteration=i + 1, call_log=call_log
+                    messages,
+                    iteration=i + 1,
+                    call_log=call_log,
+                    protected_prefix_len=protected_prefix_len,
                 )
             else:
                 # DISABLE_COMPACTION=1 또는 compaction_enabled=False 인 경우:
                 # 히스토리가 무제한 증가하지 않도록 기존 슬라이딩 윈도우 fallback.
-                messages = _trim_history(messages, self.history_window)
+                messages = _trim_history(
+                    messages,
+                    self.history_window,
+                    protected_prefix_len=protected_prefix_len,
+                )
 
             elapsed = (time.perf_counter() - t0) * 1000
             iterations.append(
@@ -659,6 +670,7 @@ class ReactLoop:
         messages: list[Message],
         iteration: int,
         call_log: list[dict],
+        protected_prefix_len: int,
     ) -> list[Message]:
         """
         메시지 총 추정 토큰이 임계치를 초과하면 compact_history()를 호출해
@@ -689,7 +701,7 @@ class ReactLoop:
         result = compact_history(
             messages,
             llm_client=client,
-            keep_first_n=self.compaction_keep_first_n,
+            keep_first_n=max(self.compaction_keep_first_n, protected_prefix_len),
             keep_last_n=self.compaction_keep_last_n,
         )
         if result is None:
@@ -889,13 +901,21 @@ def _truncate_tool_result(content: str, max_chars: int) -> str:
     return content[:max_chars] + f"\n... [{dropped}자 생략 — 컨텍스트 한도 초과]"
 
 
-def _trim_history(messages: list[Message], window: int) -> list[Message]:
+def _trim_history(
+    messages: list[Message],
+    window: int,
+    protected_prefix_len: int | None = None,
+) -> list[Message]:
     """
-    보호 prefix(system + 첫 user 태스크)를 유지하고, 최근 window 턴만 남긴다.
+    보호 prefix를 유지하고, 최근 window 턴만 남긴다.
 
-    현재 build_messages 레이아웃은 [system, user(task), assistant, user, ...] 이므로
+    기본(auto-detect) 레이아웃은 [system, user(task), assistant, user, ...] 이므로
     messages[0] 와 messages[1] 을 모두 보존해야 캐시 prefix 와 태스크 컨텍스트가
     살아남는다. system 이 없으면 첫 user 만 보존.
+
+    멀티턴 CLI run 처럼 현재 호출의 고정 prefix 가 더 길면 caller 가
+    `protected_prefix_len` 을 넘겨 [system, *history, current_user] 전체를
+    보호할 수 있다.
 
     한 턴 = (assistant 메시지, user 메시지) 쌍. 쌍을 원자 단위로 취급하므로
     assistant(tool_calls)와 그에 대응하는 user(tool_results)가 분리되지 않는다.
@@ -906,12 +926,15 @@ def _trim_history(messages: list[Message], window: int) -> list[Message]:
     if window <= 0 or not messages:
         return messages
 
-    # ── 보호 prefix 산출: [system?, first_user?] ─────────────────────────────
-    head_end = 0
-    if messages[0].role == "system":
-        head_end = 1
-    if head_end < len(messages) and messages[head_end].role == "user":
-        head_end += 1
+    # ── 보호 prefix 산출 ──────────────────────────────────────────────────────
+    if protected_prefix_len is not None:
+        head_end = max(0, min(protected_prefix_len, len(messages)))
+    else:
+        head_end = 0
+        if messages[0].role == "system":
+            head_end = 1
+        if head_end < len(messages) and messages[head_end].role == "user":
+            head_end += 1
     # 이 시점에 messages[:head_end] 는 반드시 보존한다.
 
     head = messages[:head_end]
