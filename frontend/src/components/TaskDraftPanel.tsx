@@ -9,7 +9,7 @@
 
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { PipelineLogView, ACTIVE_JOB_KEY } from './PipelineLogView'
-import { AvailableModel, PipelineModelModal } from './PipelineModelModal'
+import { AvailableModel, DefaultRoleModels, PipelineModelModal } from './PipelineModelModal'
 import { DependencyGraphModal } from './DependencyGraphModal'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000') as string
@@ -215,7 +215,10 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
   useEffect(() => {
     fetch(`${API_BASE}/api/config`)
       .then(r => r.ok ? r.json() : null)
-      .then(data => { if (data?.model_capable) setModelName(data.model_capable) })
+      .then(data => {
+        const name = data?.default_role_models?.orchestrator?.model || data?.default_model
+        if (name) setModelName(name)
+      })
       .catch(() => {})
   }, [])
 
@@ -475,8 +478,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
   }
 
   async function handleSaveAndRun(
-    providerFast: string, modelFast: string,
-    providerCapable: string, modelCapable: string,
+    defaultRoleModels: DefaultRoleModels,
     agentCount: number,
     roleModels?: Record<string, {provider?: string; model?: string}>,
     noPush?: boolean,
@@ -519,10 +521,7 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
           no_pr: false,
           no_push: noPush ?? state.noPush,
           max_workers: agentCount,
-          provider_fast: providerFast,
-          model_fast: modelFast,
-          provider_capable: providerCapable,
-          model_capable: modelCapable,
+          default_role_models: defaultRoleModels,
           auto_select_by_complexity: autoSelectByComplexity ?? false,
           intervention_auto_split: interventionAutoSplit ?? false,
           ...(roleModels && Object.keys(roleModels).length > 0 ? { role_models: roleModels } : {}),
@@ -596,7 +595,16 @@ export function TaskDraftPanel({ contextDoc, draftKey = 'default', onBack, onPip
       <PipelineModelModal
         models={availableModels}
         tasks={state.tasks}
-        onConfirm={(pf, mf, pc, mc, ac, rm, np, abc) => handleSaveAndRun(pf, mf, pc, mc, ac, rm, np, abc)}
+        onConfirm={(defaultRoleModels, agentCount, roleModels, noPush, autoSelectByComplexity, interventionAutoSplit) => {
+          void handleSaveAndRun(
+            defaultRoleModels,
+            agentCount,
+            roleModels,
+            noPush,
+            autoSelectByComplexity,
+            interventionAutoSplit,
+          )
+        }}
         onCancel={() => setShowModelModal(false)}
       />
     )}

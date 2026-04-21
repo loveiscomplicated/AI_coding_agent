@@ -156,7 +156,7 @@ export async function generateChatTitle(message: string): Promise<string> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        use_fast_model: true,
+        purpose: 'title',
         max_tokens: 20,
         messages: [{
           role: 'user',

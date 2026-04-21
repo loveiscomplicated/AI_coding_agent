@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { projectTasksPath, projectReportsDir } from '../storage/projectStorage'
 import { ACTIVE_JOB_KEY } from './PipelineLogView'
-import { AvailableModel, PipelineModelModal } from './PipelineModelModal'
+import { AvailableModel, DefaultRoleModels, PipelineModelModal } from './PipelineModelModal'
 import { DependencyGraphModal } from './DependencyGraphModal'
 import type { DraftTask } from './TaskDraftPanel'
 
@@ -134,16 +134,11 @@ function ModelInfoRow({
   serverConfig,
 }: {
   lastJob: any
-  serverConfig: { llm_provider: string; model_fast: string; model_capable: string } | null
+  serverConfig: { llm_provider: string; default_role_models?: Record<string, { provider: string; model: string }> } | null
 }) {
   const req = lastJob?.request
-
-  const agentProvider = req?.provider_fast || req?.provider || serverConfig?.llm_provider || ''
-  const agentModel    = req?.model_fast    || serverConfig?.model_fast    || ''
-  const orchProvider  = req?.provider_capable || req?.provider || serverConfig?.llm_provider || ''
-  const orchModel     = req?.model_capable || serverConfig?.model_capable || ''
-
-  if (!agentModel && !orchModel) return null
+  const baseRoleModels: DefaultRoleModels = req?.default_role_models ?? serverConfig?.default_role_models ?? {}
+  if (Object.keys(baseRoleModels).length === 0) return null
 
   const isRunning = lastJob?.status === 'running'
   const isFromJob = !!req
@@ -166,15 +161,26 @@ function ModelInfoRow({
     test_writer: '테스트 작성',
     implementer: '구현',
     reviewer: '리뷰',
+    merge_agent: '머지',
+    orchestrator: '오케스트레이터',
+    intervention: '개입',
   }
 
-  // role_models에서 기본값(agentModel)과 다른 항목만 추출
+  const baseRoles = Object.entries(baseRoleModels)
+    .filter(([, cfg]) => cfg?.provider && cfg?.model)
+    .map(([key, cfg]) => ({
+      label: roleLabels[key] ?? key,
+      provider: cfg.provider,
+      model: cfg.model,
+    }))
+
   const roleOverrides: { label: string; provider: string; model: string }[] = []
   const roleModels: Record<string, { provider?: string; model?: string }> = req?.role_models ?? {}
   for (const [key, val] of Object.entries(roleModels)) {
-    const rModel = val?.model || ''
-    const rProvider = val?.provider || agentProvider
-    if (rModel && (rModel !== agentModel || rProvider !== agentProvider)) {
+    const base = baseRoleModels[key]
+    const rModel = val?.model || base?.model || ''
+    const rProvider = val?.provider || base?.provider || serverConfig?.llm_provider || ''
+    if (rModel && rProvider && (!base || rModel !== base.model || rProvider !== base.provider)) {
       roleOverrides.push({ label: roleLabels[key] ?? key, provider: rProvider, model: rModel })
     }
   }
@@ -193,17 +199,12 @@ function ModelInfoRow({
         <span className="text-[10px] text-gray-400 dark:text-zinc-500">서버 기본값</span>
       )}
 
-      {/* 코딩 에이전트 */}
-      <span className="flex items-center gap-1 text-[10px] bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 px-2 py-0.5 rounded-full">
-        <span className="text-gray-400 dark:text-zinc-500">에이전트</span>
-        <span className="font-medium">{agentProvider} / {modelName(agentModel)}</span>
-      </span>
-
-      {/* 오케스트레이터 */}
-      <span className="flex items-center gap-1 text-[10px] bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 px-2 py-0.5 rounded-full">
-        <span className="text-gray-400 dark:text-zinc-500">오케스트레이터</span>
-        <span className="font-medium">{orchProvider} / {modelName(orchModel)}</span>
-      </span>
+      {baseRoles.map(({ label, provider, model }) => (
+        <span key={label} className="flex items-center gap-1 text-[10px] bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 px-2 py-0.5 rounded-full">
+          <span className="text-gray-400 dark:text-zinc-500">{label}</span>
+          <span className="font-medium">{provider} / {modelName(model)}</span>
+        </span>
+      ))}
 
       {/* 역할별 오버라이드 모델 (기본값과 다를 때만 표시) */}
       {roleOverrides.map(({ label, provider, model }) => (
@@ -459,7 +460,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
   const [error, setError] = useState('')
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null)
   const [lastMatchedJob, setLastMatchedJob] = useState<any>(null)
-  const [serverConfig, setServerConfig] = useState<{ llm_provider: string; model_fast: string; model_capable: string } | null>(null)
+  const [serverConfig, setServerConfig] = useState<{ llm_provider: string; default_role_models?: Record<string, { provider: string; model: string }> } | null>(null)
   const [showResumeModal, setShowResumeModal] = useState(false)
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([])
   const [controlling, setControlling] = useState(false)
@@ -608,7 +609,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
     }
   }
 
-  async function resumePipeline(providerFast: string, modelFast: string, providerCapable: string, modelCapable: string, agentCount: number, roleModels?: Record<string, {provider?: string; model?: string}>, noPush?: boolean, autoSelectByComplexity?: boolean, interventionAutoSplit?: boolean) {
+  async function resumePipeline(defaultRoleModels: DefaultRoleModels, agentCount: number, roleModels?: Record<string, {provider?: string; model?: string}>, noPush?: boolean, autoSelectByComplexity?: boolean, interventionAutoSplit?: boolean) {
     if (!project) return
     setShowResumeModal(false)
     setResuming(true)
@@ -625,10 +626,7 @@ export function DashboardPage({ project, onBack, onPipelineStarted, onDiscordCha
           max_workers: agentCount,
           discord_channel_id: project.discordChannelId ?? null,
           auto_merge: autoMerge,
-          provider_fast: providerFast,
-          model_fast: modelFast,
-          provider_capable: providerCapable,
-          model_capable: modelCapable,
+          default_role_models: defaultRoleModels,
           auto_select_by_complexity: autoSelectByComplexity ?? false,
           intervention_auto_split: interventionAutoSplit ?? false,
           ...(roleModels && Object.keys(roleModels).length > 0 ? { role_models: roleModels } : {}),

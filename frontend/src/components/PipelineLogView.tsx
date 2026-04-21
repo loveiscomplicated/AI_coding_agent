@@ -46,6 +46,8 @@ export interface LogEntry {
   total_attempts?: number
   report?: string
   report_path?: string
+  files?: string[]
+  subtask_ids?: string[]
 }
 
 // ── 로그 텍스트 포맷 ──────────────────────────────────────────────────────────
