@@ -309,44 +309,46 @@ class TestBackendConfig:
 
     def test_reads_model_names_from_env(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        monkeypatch.setenv("LLM_MODEL_FAST", "gpt-4o-mini")
-        monkeypatch.setenv("LLM_MODEL_CAPABLE", "gpt-4o")
+        monkeypatch.setenv("LLM_DEFAULT_MODEL", "gpt-4o")
+        monkeypatch.setenv("LLM_TITLE_MODEL", "gpt-4o-mini")
+        monkeypatch.setenv("LLM_ROLE_IMPLEMENTER", "openai:gpt-5")
 
         import importlib
         import backend.config as cfg
         importlib.reload(cfg)
 
-        assert cfg.LLM_MODEL_FAST == "gpt-4o-mini"
-        assert cfg.LLM_MODEL_CAPABLE == "gpt-4o"
+        assert cfg.LLM_DEFAULT_MODEL == "gpt-4o"
+        assert cfg.LLM_TITLE_MODEL == "gpt-4o-mini"
+        assert cfg.DEFAULT_ROLE_MODEL_MAP["implementer"] == {"provider": "openai", "model": "gpt-5"}
 
 
 # ── backend/routers/chat.py 테스트 ────────────────────────────────────────────
 
 class TestChatRouter:
-    def test_resolve_model_uses_fast_model_when_flagged(self, monkeypatch):
+    def test_resolve_model_uses_title_model_for_title_purpose(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
         import importlib
         import backend.config as cfg
         importlib.reload(cfg)
 
         from backend.routers.chat import ChatRequest, _resolve_model
-        req = ChatRequest(max_tokens=100, messages=[], use_fast_model=True)
+        req = ChatRequest(max_tokens=100, messages=[], purpose="title")
 
         import backend.routers.chat as chat_mod
-        chat_mod.LLM_MODEL_FAST = "fast-model"
-        chat_mod.LLM_MODEL_CAPABLE = "capable-model"
+        chat_mod.LLM_TITLE_MODEL = "title-model"
+        chat_mod.LLM_DEFAULT_MODEL = "default-model"
 
-        assert _resolve_model(req) == "fast-model"
+        assert _resolve_model(req) == "title-model"
 
-    def test_resolve_model_uses_capable_model_by_default(self, monkeypatch):
+    def test_resolve_model_uses_default_model_by_default(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
         from backend.routers.chat import ChatRequest, _resolve_model
         import backend.routers.chat as chat_mod
-        chat_mod.LLM_MODEL_FAST = "fast-model"
-        chat_mod.LLM_MODEL_CAPABLE = "capable-model"
+        chat_mod.LLM_TITLE_MODEL = "title-model"
+        chat_mod.LLM_DEFAULT_MODEL = "default-model"
 
         req = ChatRequest(max_tokens=100, messages=[])
-        assert _resolve_model(req) == "capable-model"
+        assert _resolve_model(req) == "default-model"
 
     def test_resolve_model_uses_explicit_model_when_provided(self):
         from backend.routers.chat import ChatRequest, _resolve_model
@@ -407,45 +409,39 @@ class TestChatRouter:
 # ── run.py CLI args 테스트 ────────────────────────────────────────────────────
 
 class TestRunPipelineArgs:
-    def test_run_pipeline_has_provider_param(self):
+    def test_run_pipeline_has_role_model_map_params(self):
         import inspect
         from orchestrator.run import run_pipeline
         sig = inspect.signature(run_pipeline)
-        assert "provider" in sig.parameters
-        assert "model_fast" in sig.parameters
-        assert "model_capable" in sig.parameters
+        assert "default_role_models" in sig.parameters
+        assert "role_models" in sig.parameters
 
-    def test_default_provider_is_claude(self):
+    def test_default_role_models_param_defaults_to_none(self):
         import inspect
         from orchestrator.run import run_pipeline
         sig = inspect.signature(run_pipeline)
-        assert sig.parameters["provider"].default == "claude"
+        assert sig.parameters["default_role_models"].default is None
         # 3회차 재시도에서 intervention 스켈레톤 주입 → 4회차 실행을 허용하도록 기본값 3
         assert sig.parameters["max_orchestrator_retries"].default == 3
         assert sig.parameters["intervention_auto_split"].default is False
 
-    def test_parse_args_accepts_provider_flag(self):
+    def test_parse_args_accepts_role_model_flag(self):
         from orchestrator.run import _parse_args
-        with patch("sys.argv", ["run.py", "--tasks", "t.yaml", "--provider", "openai",
-                                "--model-fast", "gpt-4o-mini", "--model-capable", "gpt-4o"]):
+        with patch("sys.argv", ["run.py", "--tasks", "t.yaml", "--role-model", "implementer=openai:gpt-5"]):
             args = _parse_args()
-        assert args.provider == "openai"
-        assert args.model_fast == "gpt-4o-mini"
-        assert args.model_capable == "gpt-4o"
+        assert args.role_model == ["implementer=openai:gpt-5"]
 
-    def test_parse_args_default_provider_is_claude(self):
+    def test_parse_args_default_role_model_list_is_empty(self):
         from orchestrator.run import _parse_args
         with patch("sys.argv", ["run.py", "--tasks", "t.yaml"]):
             args = _parse_args()
-        assert args.provider == "claude"
-        assert args.model_fast == "claude-haiku-4-5"
-        assert args.model_capable == "claude-sonnet-4-6"
+        assert args.role_model == []
 
-    def test_parse_args_accepts_glm_provider(self):
-        from orchestrator.run import _parse_args
-        with patch("sys.argv", ["run.py", "--tasks", "t.yaml", "--provider", "glm"]):
-            args = _parse_args()
-        assert args.provider == "glm"
+    def test_parse_role_model_specs(self):
+        from orchestrator.run import _parse_role_model_specs
+        parsed = _parse_role_model_specs(["reviewer=claude:claude-sonnet-4-6"])
+        assert parsed["reviewer"].provider == "claude"
+        assert parsed["reviewer"].model == "claude-sonnet-4-6"
 
 
 class TestLLMFactoryLazyImport:

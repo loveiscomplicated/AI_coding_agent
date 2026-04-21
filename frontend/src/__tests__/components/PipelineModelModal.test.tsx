@@ -79,13 +79,13 @@ describe('PipelineModelModal — 복잡도 기반 자동 선택 토글', () => {
     expect(within(table).getByText(/simple/)).toBeInTheDocument()
     expect(within(table).getByText(/standard/)).toBeInTheDocument()
     expect(within(table).getByText(/complex/)).toBeInTheDocument()
-    expect(within(table).getByText(/gpt-4.1-mini/)).toBeInTheDocument()
-    expect(within(table).getByText(/gemini-2.5-flash-lite/)).toBeInTheDocument()
-    expect(within(table).getByText(/gpt-5-mini/)).toBeInTheDocument()
-    expect(within(table).getByText(/gemini-3-pro-preview/)).toBeInTheDocument()
+    expect(within(table).getAllByText(/gpt-4.1-mini/).length).toBeGreaterThan(0)
+    expect(within(table).getAllByText(/gemini-2.5-flash-lite/).length).toBeGreaterThan(0)
+    expect(within(table).getAllByText(/gpt-5-mini/).length).toBeGreaterThan(0)
+    expect(within(table).getAllByText(/gemini-3-pro-preview/).length).toBeGreaterThan(0)
   })
 
-  it('토글 ON 시 기존 모델 선택기가 disabled 된다', async () => {
+  it('토글 ON 시 기본 역할 모델 선택기들이 disabled 된다', async () => {
     const user = userEvent.setup()
     renderModal()
 
@@ -94,10 +94,9 @@ describe('PipelineModelModal — 복잡도 기반 자동 선택 토글', () => {
 
     await user.click(screen.getByRole('switch', { name: /복잡도 기반 자동 선택/i }))
 
-    // 코딩 에이전트/오케스트레이터 각각 provider+model 2개씩 → 총 4개 select
     const selectsAfter = screen.getAllByRole('combobox')
     const disabledCount = selectsAfter.filter((s) => (s as HTMLSelectElement).disabled).length
-    expect(disabledCount).toBeGreaterThanOrEqual(4)
+    expect(disabledCount).toBeGreaterThanOrEqual(12)
   })
 
   it('complexity 라벨 없는 태스크가 있으면 경고가 표시된다', async () => {
@@ -132,7 +131,7 @@ describe('PipelineModelModal — 복잡도 기반 자동 선택 토글', () => {
     expect(screen.queryByTestId('complexity-missing-warning')).toBeNull()
   })
 
-  it('onConfirm 호출 시 8번째 인자로 autoSelectByComplexity가 전달된다', async () => {
+  it('onConfirm 호출 시 5번째 인자로 autoSelectByComplexity가 전달된다', async () => {
     const user = userEvent.setup()
     const { onConfirm } = renderModal()
 
@@ -143,9 +142,10 @@ describe('PipelineModelModal — 복잡도 기반 자동 선택 토글', () => {
 
     expect(onConfirm).toHaveBeenCalledTimes(1)
     const args = onConfirm.mock.calls[0]
-    expect(args[7]).toBe(true) // autoSelectByComplexity
+    expect(args[4]).toBe(true) // autoSelectByComplexity
     // role_models override가 없으므로 undefined
-    expect(args[5]).toBeUndefined()
+    expect(args[2]).toBeUndefined()
+    expect(args[0].implementer?.provider).toBeTruthy()
   })
 
   it('토글 ON이어도 역할별 오버라이드는 유지되어 onConfirm에 전달된다', async () => {
@@ -156,25 +156,22 @@ describe('PipelineModelModal — 복잡도 기반 자동 선택 토글', () => {
     await user.click(screen.getByRole('switch', { name: /복잡도 기반 자동 선택/i }))
 
     // 역할별 설정 아코디언 펼치기 (disabled가 아니어야 함)
-    const advancedBtn = screen.getByRole('button', { name: /역할별 모델 설정/ })
+    const advancedBtn = screen.getByRole('button', { name: /역할별 override 설정/ })
     expect(advancedBtn).not.toBeDisabled()
     await user.click(advancedBtn)
 
-    // 첫 번째 역할의 provider select 찾기 — "기본값" / provider 옵션이 있는 select
-    // 역할별 설정 영역의 select들은 ModelSelect의 select 4개 뒤에 위치
     const allSelects = screen.getAllByRole('combobox')
-    // 마지막 6개 중 첫 번째 pair(test_writer) — provider, model
-    const testWriterProvider = allSelects[allSelects.length - 6] as HTMLSelectElement
+    const testWriterProvider = allSelects[allSelects.length - 12] as HTMLSelectElement
     await user.selectOptions(testWriterProvider, 'claude')
 
     await user.click(screen.getByRole('button', { name: /파이프라인 시작/i }))
 
     expect(onConfirm).toHaveBeenCalledTimes(1)
     const args = onConfirm.mock.calls[0]
-    expect(args[7]).toBe(true) // autoSelectByComplexity
+    expect(args[4]).toBe(true) // autoSelectByComplexity
     // role_models override가 유지됨
-    expect(args[5]).toBeDefined()
-    expect(args[5]!.test_writer?.provider).toBe('claude')
+    expect(args[2]).toBeDefined()
+    expect(args[2]!.test_writer?.provider).toBe('claude')
   })
 
   it('토글 OFF 상태로 confirm 시 autoSelectByComplexity=false가 전달된다', async () => {
@@ -184,7 +181,7 @@ describe('PipelineModelModal — 복잡도 기반 자동 선택 토글', () => {
     await user.click(screen.getByRole('button', { name: /파이프라인 시작/i }))
 
     expect(onConfirm).toHaveBeenCalledTimes(1)
-    expect(onConfirm.mock.calls[0][7]).toBe(false)
+    expect(onConfirm.mock.calls[0][4]).toBe(false)
   })
 })
 
