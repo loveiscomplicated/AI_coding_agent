@@ -7,6 +7,10 @@ main.py — AI Coding Agent 진입점
     python main.py -p openai  -m gpt-4o
     python main.py -p openai  -m gpt-4.1-mini
     python main.py -p claude  -s <세션-ID-앞자리>  # 세션 이어하기
+    python main.py -p glm     -m glm-4.5-air
+    python main.py -m glm-4.5-air                  # provider 자동 추론
+    python main.py --list                           # 전체 provider 모델 목록
+    python main.py -p glm --list                    # glm 모델 목록
 """
 
 from __future__ import annotations
@@ -39,7 +43,7 @@ def _parse_args() -> argparse.Namespace:
         "-p",
         "--provider",
         default=None,
-        choices=["ollama", "openai", "claude"],
+        choices=["ollama", "openai", "claude", "gemini", "glm"],
         help="LLM provider (기본값: config 파일 또는 claude)",
     )
     parser.add_argument(
@@ -61,6 +65,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="DEBUG 로그 출력",
     )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="사용 가능한 모델 목록 출력 후 종료 (-p 로 provider 지정 가능)",
+    )
     return parser.parse_args()
 
 
@@ -71,7 +80,28 @@ _DEFAULT_MODELS: dict[str, str] = {
     "ollama": "devstral:24b",
     "openai": "gpt-4o",
     "claude": "claude-sonnet-4-6",
+    "gemini": "gemini-2.5-pro-preview-06-05",
+    "glm": "glm-5.1",
 }
+
+# 모델 이름 prefix → provider 자동 추론
+_MODEL_PREFIX_MAP: list[tuple[str, str]] = [
+    ("glm-", "glm"),
+    ("claude-", "claude"),
+    ("gpt-", "openai"),
+    ("o1", "openai"),
+    ("o3", "openai"),
+    ("o4", "openai"),
+    ("gemini-", "gemini"),
+]
+
+
+def _infer_provider(model: str) -> str | None:
+    for prefix, provider in _MODEL_PREFIX_MAP:
+        if model.startswith(prefix):
+            return provider
+    return None
+
 
 _CONFIG_PATH = pathlib.Path.home() / ".config" / "ai_coding_agent" / "config.toml"
 
@@ -134,6 +164,34 @@ def expand_at_mentions(text: str) -> str:
     return re.sub(r"@(\S+)", replace, text)
 
 
+# ── 모델 목록 출력 ───────────────────────────────────────────────────────────
+
+
+def _print_model_list(provider: str, client) -> None:
+    from rich.table import Table
+    from rich import box
+
+    ui.console.print(f"\n[bold cyan]{provider}[/bold cyan] 사용 가능한 모델\n")
+
+    try:
+        models = client.list_models()
+    except Exception as e:
+        ui.print_error(f"모델 목록 조회 실패: {e}")
+        return
+
+    default = _DEFAULT_MODELS.get(provider, "")
+    table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
+    table.add_column("model", style="white")
+    table.add_column("tag", style="dim")
+
+    for m in sorted(models):
+        tag = "[bold green]default[/bold green]" if m == default else ""
+        table.add_row(m, tag)
+
+    ui.console.print(table)
+    ui.console.print(f"[dim]총 {len(models)}개  ·  기본값: {default or '(없음)'}[/dim]\n")
+
+
 # ── 메인 REPL ────────────────────────────────────────────────────────────────
 
 
@@ -147,7 +205,6 @@ def main() -> None:
 
     # ── 설정 파일 로드 (CLI 인자가 우선) ────────────────────────────────────
     agent_cfg = load_config(str(_CONFIG_PATH))
-    provider = args.provider or agent_cfg.provider
 
     # 모델 결정: CLI -m > (provider 변경 없으면) config > provider 기본값
     if args.model:
@@ -155,7 +212,31 @@ def main() -> None:
     elif args.provider is None or args.provider == agent_cfg.provider:
         model = agent_cfg.model
     else:
-        model = _DEFAULT_MODELS.get(provider, _DEFAULT_MODELS["claude"])
+        model = _DEFAULT_MODELS.get(args.provider or agent_cfg.provider, _DEFAULT_MODELS["claude"])
+
+    # provider 결정: CLI -p > 모델명 prefix 자동 추론 > config > 기본값
+    provider = args.provider or _infer_provider(model) or agent_cfg.provider
+
+    # ── --list: 모델 목록 출력 후 종료 ──────────────────────────────────────
+    if args.list:
+        if args.provider is None:
+            for p, m in _DEFAULT_MODELS.items():
+                try:
+                    extra = _OLLAMA_KWARGS if p == "ollama" else {}
+                    c = create_client(provider=p, config=LLMConfig(model=m), **extra)
+                    _print_model_list(p, c)
+                except Exception as e:
+                    ui.console.print(f"[dim]{p}: 목록 조회 실패 — {e}[/dim]\n")
+        else:
+            config = LLMConfig(model=model)
+            extra = _OLLAMA_KWARGS if provider == "ollama" else {}
+            try:
+                client = create_client(provider=provider, config=config, **extra)
+            except Exception as e:
+                ui.print_error(f"LLM 클라이언트 초기화 실패: {e}")
+                sys.exit(1)
+            _print_model_list(provider, client)
+        sys.exit(0)
 
     # ── LLM 클라이언트 초기화 ────────────────────────────────────────────────
     config = LLMConfig(model=model)
