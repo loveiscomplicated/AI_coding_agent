@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from backend.config import LLM_PROVIDER, LLM_MODEL_FAST, LLM_MODEL_CAPABLE
+from backend.config import DEFAULT_ROLE_MODEL_MAP, LLM_DEFAULT_MODEL, LLM_PROVIDER, LLM_TITLE_MODEL
 from tools.hotline_tools import (
     get_conv_model, set_conv_model,
     get_redesign_model, set_redesign_model,
@@ -27,8 +27,9 @@ def get_config() -> dict:
     """현재 백엔드 LLM 설정을 반환한다."""
     return {
         "llm_provider": LLM_PROVIDER,
-        "model_fast": LLM_MODEL_FAST,
-        "model_capable": LLM_MODEL_CAPABLE,
+        "default_model": LLM_DEFAULT_MODEL,
+        "title_model": LLM_TITLE_MODEL,
+        "default_role_models": DEFAULT_ROLE_MODEL_MAP,
     }
 
 

@@ -24,8 +24,9 @@ from pydantic import BaseModel
 
 from backend.config import (
     LLM_PROVIDER,
-    LLM_MODEL_CAPABLE,
-    LLM_MODEL_FAST,
+    LLM_DEFAULT_MODEL,
+    LLM_TITLE_MODEL,
+    COMPLEXITY_ROLE_MODEL_MAP,
     ANTHROPIC_API_KEY,
     OPENAI_API_KEY,
     ZAI_API_KEY,
@@ -130,20 +131,19 @@ async def list_models() -> dict[str, Any]:
 
     return {
         "models": result,
-        "default": LLM_MODEL_CAPABLE,
+        "default": LLM_DEFAULT_MODEL,
         "default_provider": LLM_PROVIDER,
     }
 
 
 @router.get("/complexity-map")
 async def get_complexity_map() -> dict[str, dict[str, dict[str, str]]]:
-    """복잡도 기반 자동 선택에 사용되는 tier → (fast/capable provider·model) 매핑을 반환한다.
+    """복잡도 기반 자동 선택에 사용되는 tier → role → provider/model 매핑을 반환한다.
 
-    백엔드의 COMPLEXITY_MODEL_MAP(환경 변수 override 반영 결과)을 그대로 노출하여
+    백엔드의 COMPLEXITY_ROLE_MODEL_MAP(환경 변수 override 반영 결과)을 그대로 노출하여
     프론트엔드가 런타임 실제 매핑을 표시할 수 있게 한다.
     """
-    from backend.config import COMPLEXITY_MODEL_MAP
-    return {"map": COMPLEXITY_MODEL_MAP}
+    return {"map": COMPLEXITY_ROLE_MODEL_MAP}
 
 
 # ── 요청 모델 ─────────────────────────────────────────────────────────────────
@@ -155,14 +155,16 @@ class ChatRequest(BaseModel):
     system: str | None = None
     model: str | None = None  # None이면 백엔드 기본 모델 사용
     provider: str | None = None  # None이면 LLM_PROVIDER 환경변수 사용
-    use_fast_model: bool = False  # True면 LLM_MODEL_FAST 사용
+    purpose: str | None = None  # "title"면 제목 생성용 기본 모델 사용
 
 
 def _resolve_model(req: ChatRequest) -> str:
     """요청에서 사용할 모델명을 결정한다."""
     if req.model:
         return req.model
-    return LLM_MODEL_FAST if req.use_fast_model else LLM_MODEL_CAPABLE
+    if req.purpose == "title":
+        return LLM_TITLE_MODEL
+    return LLM_DEFAULT_MODEL
 
 
 def _resolve_provider(req: ChatRequest) -> str:

@@ -20,7 +20,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from backend.config import LLM_PROVIDER, LLM_MODEL_CAPABLE
+from backend.config import LLM_DEFAULT_MODEL, LLM_PROVIDER
 from llm import LLMConfig, Message, create_client
 from orchestrator.task import Task, load_tasks, save_tasks
 from orchestrator.task_redesign import create_redesign_llm, redesign_task
@@ -421,7 +421,7 @@ def _run_draft(job_id: str, context_doc: str) -> None:
     try:
         draft_info = get_task_draft_model()
         draft_provider = draft_info["provider"] or LLM_PROVIDER
-        draft_model = draft_info["model"] or LLM_MODEL_CAPABLE
+        draft_model = draft_info["model"] or LLM_DEFAULT_MODEL
         client = create_client(
             draft_provider,
             LLMConfig(model=draft_model, max_tokens=16000, system_prompt=_DRAFT_SYSTEM_PROMPT),
@@ -525,7 +525,7 @@ def _run_critique(job_id: str, tasks: list[dict], context_doc: str) -> None:
         critique_info = get_critique_model()
         client = create_client(
             critique_info["provider"] or LLM_PROVIDER,
-            LLMConfig(model=critique_info["model"] or LLM_MODEL_CAPABLE, max_tokens=4096, system_prompt=_CRITIQUE_SYSTEM_PROMPT),
+            LLMConfig(model=critique_info["model"] or LLM_DEFAULT_MODEL, max_tokens=4096, system_prompt=_CRITIQUE_SYSTEM_PROMPT),
         )
         llm_response = client.chat([Message(role="user", content=user_content)])
 
@@ -648,7 +648,7 @@ def apply_critique(body: CritiqueApplyRequest) -> dict:
     critique_info = get_critique_model()
     client = create_client(
         critique_info["provider"] or LLM_PROVIDER,
-        LLMConfig(model=critique_info["model"] or LLM_MODEL_CAPABLE, max_tokens=8192, system_prompt=_CRITIQUE_APPLY_SYSTEM_PROMPT),
+        LLMConfig(model=critique_info["model"] or LLM_DEFAULT_MODEL, max_tokens=8192, system_prompt=_CRITIQUE_APPLY_SYSTEM_PROMPT),
     )
     llm_response = client.chat([Message(role="user", content=user_content)])
 
@@ -796,7 +796,7 @@ def _run_redesign(job_id: str, task_id: str, tasks_path: str, repo_path: str) ->
 
             redesign_info = get_redesign_model()
             redesign_provider = redesign_info["provider"] or LLM_PROVIDER
-            redesign_model_id = redesign_info["model"] or LLM_MODEL_CAPABLE
+            redesign_model_id = redesign_info["model"] or LLM_DEFAULT_MODEL
             llm = create_redesign_llm(redesign_provider, redesign_model_id)
             result = redesign_task(task, tasks, spec_content, llm, orch_report=orch_report)
 
@@ -880,7 +880,7 @@ def fix_dependencies(body: FixDepsRequest) -> dict:
     ]
     client = create_client(
         LLM_PROVIDER,
-        LLMConfig(model=LLM_MODEL_CAPABLE, max_tokens=4096, system_prompt=_FIX_DEPS_SYSTEM),
+        LLMConfig(model=LLM_DEFAULT_MODEL, max_tokens=4096, system_prompt=_FIX_DEPS_SYSTEM),
     )
     prompt = f"다음 태스크 목록의 순환 참조를 수정하세요:\n{json.dumps(summary, ensure_ascii=False, indent=2)}"
     llm_response = client.chat([Message(role="user", content=prompt)])

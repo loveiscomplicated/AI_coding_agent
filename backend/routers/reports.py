@@ -29,7 +29,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from backend.config import LLM_PROVIDER, LLM_MODEL_CAPABLE
+from backend.config import LLM_DEFAULT_MODEL, LLM_PROVIDER
 from llm import LLMConfig, Message, create_client
 from orchestrator.report import load_reports
 from orchestrator.weekly import (
@@ -118,7 +118,7 @@ async def generate_execution_brief(body: ExecutionBriefRequest) -> dict[str, Any
     report_text = "\n---\n".join(lines)
 
     client = create_client(
-        LLM_PROVIDER, LLMConfig(model=LLM_MODEL_CAPABLE, system_prompt=_BRIEF_SYSTEM, max_tokens=2048)
+        LLM_PROVIDER, LLMConfig(model=LLM_DEFAULT_MODEL, system_prompt=_BRIEF_SYSTEM, max_tokens=2048)
     )
     response = await asyncio.to_thread(client.chat, [Message(role="user", content=report_text)])
     brief = ""
@@ -153,7 +153,7 @@ def _make_llm_fn():
     """동기 LLM 호출 래퍼 (generate_weekly_report가 동기 llm_fn을 기대함)."""
     def llm_fn(system: str, user: str) -> str:
         client = create_client(
-            LLM_PROVIDER, LLMConfig(model=LLM_MODEL_CAPABLE, system_prompt=system, max_tokens=4096)
+            LLM_PROVIDER, LLMConfig(model=LLM_DEFAULT_MODEL, system_prompt=system, max_tokens=4096)
         )
         resp = client.chat([Message(role="user", content=user)])
         for block in resp.content:

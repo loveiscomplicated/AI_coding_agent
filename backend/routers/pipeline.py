@@ -25,7 +25,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from agents.roles import ROLE_COMPACTION_PRESET_BALANCED, RoleModelConfig
-from backend.config import DISCORD_BOT_TOKEN, DISCORD_GUILD_ID, LLM_PROVIDER, LLM_MODEL_FAST, LLM_MODEL_CAPABLE
+from backend.config import DISCORD_BOT_TOKEN, DISCORD_GUILD_ID, DEFAULT_ROLE_MODEL_MAP
 from hotline.notifier import DiscordNotifier
 from orchestrator.run import PauseController, run_pipeline
 from project_paths import resolve_tasks_path
@@ -70,11 +70,8 @@ class RunRequest(BaseModel):
     # True이면 최종 실패 직전에 LLM 을 호출해 태스크를 2~3개 하위 태스크로 자동 분해한다.
     # 분해된 하위 태스크는 tasks.yaml 에 기록만 되며, 다음 파이프라인 실행 시 픽업된다.
     auto_merge: bool = False            # 그룹 완료 후 base_branch 에 자동 머지
-    provider: str | None = None          # 공통 기본 프로바이더 (None → 서버 환경변수)
-    model_fast: str | None = None        # 코딩 에이전트 모델
-    model_capable: str | None = None     # 오케스트레이터 모델
-    provider_fast: str | None = None     # 코딩 에이전트 프로바이더 (None → provider)
-    provider_capable: str | None = None  # 오케스트레이터 프로바이더 (None → provider)
+    default_role_models: dict[str, dict[str, str | None]] | None = None
+    # 역할별 기본 모델 설정. 지정하지 않으면 서버 DEFAULT_ROLE_MODEL_MAP 사용.
     role_models: dict[str, dict[str, str | None]] | None = None
     # 역할별 모델 오버라이드. 예: {"reviewer": {"provider": "claude", "model": "claude-sonnet-4-20250514"}}
     # 지원 키: "test_writer", "implementer", "reviewer", "orchestrator", "merge_agent", "intervention"
@@ -166,11 +163,7 @@ def run_pipeline_endpoint(body: RunRequest) -> dict:
                 max_orchestrator_retries=body.max_orchestrator_retries,
                 intervention_auto_split=body.intervention_auto_split,
                 auto_merge=body.auto_merge,
-                provider=body.provider or LLM_PROVIDER,
-                model_fast=body.model_fast or LLM_MODEL_FAST,
-                model_capable=body.model_capable or LLM_MODEL_CAPABLE,
-                provider_fast=body.provider_fast,
-                provider_capable=body.provider_capable,
+                default_role_models=_parse_role_models(body.default_role_models) or _parse_role_models(DEFAULT_ROLE_MODEL_MAP),
                 role_models=_parse_role_models(body.role_models),
                 role_compaction_tuning_enabled=body.role_compaction_tuning_enabled,
                 role_compaction_tuning_preset=body.role_compaction_tuning_preset,
