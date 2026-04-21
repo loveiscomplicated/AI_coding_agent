@@ -224,6 +224,7 @@ def get_dashboard_tasks(
             "status": task.status.value,
             "depends_on": task.depends_on,
             "pr_url": task.pr_url or "",
+            "complexity": task.complexity,
             "report": {
                 "test_count": report.test_count if report else 0,
                 "retry_count": report.retry_count if report else 0,
@@ -232,6 +233,10 @@ def get_dashboard_tasks(
                 "completed_at": report.completed_at if report else "",
                 "total_tokens": report.total_tokens if report else 0,
                 "cost_usd": report.cost_usd if report else 0.0,
+                "models_escalated": report.models_escalated if report else False,
+                "successful_tier": report.successful_tier if report else None,
+                "escalation_trigger": report.escalation_trigger if report else None,
+                "tier_attempts": report.tier_attempts if report else [],
             } if report else None,
         })
 
