@@ -103,6 +103,8 @@ export function SettingsModal({ onClose }: Props) {
   const [redesignProvider, setRedesignProvider] = useState('')
   const [taskDraftModel, setTaskDraftModel] = useState('')
   const [taskDraftProvider, setTaskDraftProvider] = useState('')
+  const [critiqueModel, setCritiqueModel] = useState('')
+  const [critiqueProvider, setCritiqueProvider] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -121,6 +123,8 @@ export function SettingsModal({ onClose }: Props) {
         setRedesignProvider(llmData.redesign_provider ?? '')
         setTaskDraftModel(llmData.task_draft_model ?? '')
         setTaskDraftProvider(llmData.task_draft_provider ?? '')
+        setCritiqueModel(llmData.critique_model ?? '')
+        setCritiqueProvider(llmData.critique_provider ?? '')
         setLoading(false)
       })
       .catch(() => {
@@ -144,6 +148,8 @@ export function SettingsModal({ onClose }: Props) {
           redesign_provider: redesignProvider,
           task_draft_model: taskDraftModel,
           task_draft_provider: taskDraftProvider,
+          critique_model: critiqueModel,
+          critique_provider: critiqueProvider,
         }),
       })
       if (!res.ok) {
@@ -164,7 +170,7 @@ export function SettingsModal({ onClose }: Props) {
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-xl w-[1100px] max-w-[95vw] max-h-[80vh] flex flex-col border border-zinc-200 dark:border-zinc-700">
+      <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-xl w-[1400px] max-w-[95vw] max-h-[80vh] flex flex-col border border-zinc-200 dark:border-zinc-700">
         {/* 헤더 */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-200 dark:border-zinc-700 flex-shrink-0">
           <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">설정</h2>
@@ -185,7 +191,7 @@ export function SettingsModal({ onClose }: Props) {
           ) : models.length === 0 ? (
             <div className="px-5 py-5 text-xs text-zinc-400 dark:text-zinc-500">사용 가능한 모델이 없습니다.</div>
           ) : (
-            <div className="grid grid-cols-3 divide-x divide-zinc-200 dark:divide-zinc-700">
+            <div className="grid grid-cols-4 divide-x divide-zinc-200 dark:divide-zinc-700">
               {/* 첫 번째 컬럼: Discord 핫라인 */}
               <div className="px-5 py-5">
                 <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-3">
@@ -227,6 +233,20 @@ export function SettingsModal({ onClose }: Props) {
                   onSelect={m => { setTaskDraftModel(m.id); setTaskDraftProvider(m.provider) }}
                 />
               </div>
+
+              {/* 네 번째 컬럼: Critique LLM */}
+              <div className="px-5 py-5">
+                <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-3">
+                  Critique LLM
+                </p>
+                <ModelSelector
+                  models={models}
+                  selectedModel={critiqueModel}
+                  selectedProvider={critiqueProvider}
+                  radioName="critique_model"
+                  onSelect={m => { setCritiqueModel(m.id); setCritiqueProvider(m.provider) }}
+                />
+              </div>
             </div>
           )}
         </div>
@@ -249,7 +269,7 @@ export function SettingsModal({ onClose }: Props) {
             </button>
             <button
               onClick={handleSave}
-              disabled={saving || loading || !convModel || !redesignModel || !taskDraftModel}
+              disabled={saving || loading || !convModel || !redesignModel || !taskDraftModel || !critiqueModel}
               className="px-3 py-1.5 text-xs rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
             >
               {saving ? '저장 중…' : '저장'}
