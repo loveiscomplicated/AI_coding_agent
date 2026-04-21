@@ -275,7 +275,6 @@ export function PipelineModelModal({ models, onConfirm, onCancel, tasks }: Pipel
           selectedModel={capableModel}
           onProviderChange={handleCapableProviderChange}
           onModelChange={setCapableModel}
-          disabled={autoByComplexity}
         />
 
         {/* 병렬 에이전트 수 */}
