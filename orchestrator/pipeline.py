@@ -182,18 +182,14 @@ class TDDPipeline:
         reviewer_max_iterations: int = 8,
         implementer_write_deadline: int = 8,
         test_writer_write_deadline: int = 5,
-        # 역할별 모델 오버라이드 (None이면 agent_llm/implementer_llm 사용)
+        # 역할별 모델 오버라이드 (None이면 default_role_models 사용)
         role_models: dict[str, RoleModelConfig] | None = None,
-        provider: str | None = None,
-        model_fast: str | None = None,
-        model_capable: str | None = None,
-        provider_fast: str | None = None,
-        provider_capable: str | None = None,
+        default_role_models: dict[str, RoleModelConfig | dict[str, str]] | None = None,
         role_compaction_tuning_enabled: bool = False,
         role_compaction_tuning_preset: str = "balanced",
         role_compaction_tuning_overrides: dict[str, str] | None = None,
         auto_select_by_complexity: bool = False,
-        complexity_map: dict[str, dict[str, str]] | None = None,
+        complexity_map: dict[str, dict[str, RoleModelConfig | dict[str, str]]] | None = None,
     ):
         self.agent_llm = agent_llm
         self.implementer_llm = implementer_llm or agent_llm
@@ -205,11 +201,7 @@ class TDDPipeline:
         self.implementer_write_deadline = implementer_write_deadline
         self.test_writer_write_deadline = test_writer_write_deadline
         self.role_models = role_models
-        self.provider = provider
-        self.model_fast = model_fast
-        self.model_capable = model_capable
-        self.provider_fast = provider_fast
-        self.provider_capable = provider_capable
+        self.default_role_models = default_role_models or {}
         self.role_compaction_tuning_enabled = role_compaction_tuning_enabled
         self.role_compaction_tuning_preset = role_compaction_tuning_preset
         self.role_compaction_tuning_overrides = role_compaction_tuning_overrides or {}
@@ -229,7 +221,7 @@ class TDDPipeline:
         우선순위:
           1) role_models[role] 부분 override — compose_role_override로 base에 덮어씀
           2) auto_select_by_complexity=True & task 있음 → complexity 기반 매핑
-          3) resolve_model_for_role() 기본 해석
+          3) default_role_models 기반 기본 해석
           4) model config 미주입 + 완전 override만 있음 → override 그대로 반환
           5) 그 외 → None (호출자가 fallback 처리)
         """
@@ -237,15 +229,11 @@ class TDDPipeline:
 
         if self.auto_select_by_complexity and task is not None and self.complexity_map:
             base_p, base_m = resolve_complexity_model(role, task.complexity, self.complexity_map)
-        elif self.provider and self.model_fast and self.model_capable:
+        elif self.default_role_models:
             base_p, base_m = resolve_model_for_role(
                 role=role,
                 role_models=None,  # override는 아래 compose에서 합성
-                provider=self.provider,
-                model_fast=self.model_fast,
-                model_capable=self.model_capable,
-                provider_fast=self.provider_fast,
-                provider_capable=self.provider_capable,
+                default_role_models=self.default_role_models,
             )
         else:
             role_cfg = (self.role_models or {}).get(role)

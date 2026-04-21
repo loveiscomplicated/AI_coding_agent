@@ -190,16 +190,12 @@ logger = logging.getLogger(__name__)
 _analyze_llm: BaseLLMClient | None = None
 _report_llm: BaseLLMClient | None = None
 
-# 역할별 모델 오버라이드 지원을 위한 모델 config 글로벌
-_provider: str = "claude"
-_model_fast: str = ""
-_model_capable: str = ""
-_provider_fast: str | None = None
-_provider_capable: str | None = None
+# 역할별 모델 오버라이드 지원을 위한 기본 모델 config 글로벌
+_default_role_models: dict[str, RoleModelConfig | dict[str, str]] = {}
 
 # 복잡도 기반 자동 선택 config 글로벌
 _auto_select_by_complexity: bool = False
-_complexity_map: dict[str, dict[str, str]] = {}
+_complexity_map: dict[str, dict[str, RoleModelConfig | dict[str, str]]] = {}
 
 
 def set_llm(analyze_llm: BaseLLMClient, report_llm: BaseLLMClient) -> None:
@@ -210,24 +206,16 @@ def set_llm(analyze_llm: BaseLLMClient, report_llm: BaseLLMClient) -> None:
 
 
 def set_model_config(
-    provider: str,
-    model_fast: str,
-    model_capable: str,
-    provider_fast: str | None = None,
-    provider_capable: str | None = None,
+    default_role_models: dict[str, RoleModelConfig | dict[str, str]] | None,
 ) -> None:
     """모델 config를 주입한다. role_models 오버라이드 적용 시 사용."""
-    global _provider, _model_fast, _model_capable, _provider_fast, _provider_capable
-    _provider = provider
-    _model_fast = model_fast
-    _model_capable = model_capable
-    _provider_fast = provider_fast
-    _provider_capable = provider_capable
+    global _default_role_models
+    _default_role_models = default_role_models or {}
 
 
 def set_complexity_routing(
     auto_select_by_complexity: bool,
-    complexity_map: dict[str, dict[str, str]] | None,
+    complexity_map: dict[str, dict[str, RoleModelConfig | dict[str, str]]] | None,
 ) -> None:
     """복잡도 기반 자동 선택 플래그와 매핑을 주입한다.
 
@@ -253,6 +241,33 @@ def create_intervention_llms(provider: str, model: str) -> tuple[BaseLLMClient, 
         provider, LLMConfig(model=model, system_prompt=_REPORT_SYSTEM, max_tokens=4096)
     )
     return analyze_llm, report_llm
+
+
+def _resolve_intervention_provider_model(
+    task: Task,
+    role_models: dict[str, RoleModelConfig] | None,
+) -> tuple[str, str] | None:
+    """intervention 역할의 최종 provider/model을 해석한다."""
+    from agents.roles import compose_role_override, resolve_complexity_model, resolve_model_for_role
+
+    intervention_override = (role_models or {}).get(ROLE_INTERVENTION)
+
+    if _auto_select_by_complexity and _complexity_map:
+        base_provider, base_model = resolve_complexity_model(
+            ROLE_INTERVENTION, task.complexity, _complexity_map
+        )
+    elif _default_role_models:
+        base_provider, base_model = resolve_model_for_role(
+            role=ROLE_INTERVENTION,
+            role_models=None,
+            default_role_models=_default_role_models,
+        )
+    else:
+        if intervention_override and intervention_override.provider and intervention_override.model:
+            return intervention_override.provider, intervention_override.model
+        return None
+
+    return compose_role_override(intervention_override, base_provider, base_model)
 
 _ANALYZE_SYSTEM = """\
 당신은 AI 코딩 에이전트 파이프라인의 중앙 오케스트레이터입니다.
@@ -453,37 +468,18 @@ def analyze(
     """
     # 우선순위 (TDDPipeline._llm_for_role와 동일 계약):
     #  1) role_models['intervention'] override — 부분 지정 시 base와 합성
-    #  2) auto_select_by_complexity=True → task.complexity 기반 per-task capable 모델
+    #  2) auto_select_by_complexity=True → task.complexity 기반 per-task intervention 모델
     #  3) 전역 _analyze_llm (파이프라인 시작 시 주입된 기본 LLM)
-    intervention_override = (role_models or {}).get(ROLE_INTERVENTION)
-    use_override = intervention_override and (intervention_override.provider or intervention_override.model)
+    resolved = _resolve_intervention_provider_model(task, role_models)
+    use_resolved_model = bool((role_models or {}).get(ROLE_INTERVENTION)) or _auto_select_by_complexity
 
-    # base (override의 미지정 필드를 채우는 기본값)
-    base_provider = ""
-    base_model = ""
-    if _auto_select_by_complexity and _complexity_map:
-        from agents.roles import resolve_complexity_model
-        base_provider, base_model = resolve_complexity_model(
-            ROLE_INTERVENTION, task.complexity, _complexity_map
-        )
-    elif _model_capable:
-        base_provider = _provider_capable or _provider
-        base_model = _model_capable
-
-    if use_override:
-        from agents.roles import compose_role_override
-        int_provider, int_model = compose_role_override(
-            intervention_override, base_provider, base_model,
-        )
-        if not (int_provider and int_model):
-            logger.error("intervention override 합성 실패: base=(%r, %r)", base_provider, base_model)
+    if use_resolved_model:
+        if not resolved:
+            logger.error("intervention 모델 해석 실패")
             return AnalysisResult(should_retry=False, hint="오케스트레이터 모델 해석 실패", raw="")
+        int_provider, int_model = resolved
         llm: BaseLLMClient = create_client(
             int_provider, LLMConfig(model=int_model, system_prompt=_ANALYZE_SYSTEM, max_tokens=1024)
-        )
-    elif _auto_select_by_complexity and _complexity_map:
-        llm = create_client(
-            base_provider, LLMConfig(model=base_model, system_prompt=_ANALYZE_SYSTEM, max_tokens=1024)
         )
     elif _analyze_llm is None:
         logger.error("intervention.set_llm()이 호출되지 않았습니다.")
@@ -615,32 +611,13 @@ def _resolve_intervention_llm_for_skeleton(
     선택 우선순위는 `analyze()` 와 동일:
       1) role_models['intervention'] override
       2) auto_select_by_complexity + task.complexity
-      3) 전역 _model_capable (_analyze_llm 은 system prompt 가 달라 재사용 불가)
+      3) 전역 default role model (_analyze_llm 은 system prompt 가 달라 재사용 불가)
     """
-    intervention_override = (role_models or {}).get(ROLE_INTERVENTION)
-    use_override = intervention_override and (
-        intervention_override.provider or intervention_override.model
-    )
-
-    base_provider = ""
-    base_model = ""
-    if _auto_select_by_complexity and _complexity_map:
-        from agents.roles import resolve_complexity_model
-        base_provider, base_model = resolve_complexity_model(
-            ROLE_INTERVENTION, task.complexity, _complexity_map
-        )
-    elif _model_capable:
-        base_provider = _provider_capable or _provider
-        base_model = _model_capable
-
-    if use_override:
-        from agents.roles import compose_role_override
-        provider, model = compose_role_override(
-            intervention_override, base_provider, base_model,
-        )
-    else:
-        provider, model = base_provider, base_model
-
+    resolved = _resolve_intervention_provider_model(task, role_models)
+    if not resolved:
+        logger.error("스켈레톤 LLM 해석 실패")
+        return None
+    provider, model = resolved
     if not (provider and model):
         logger.error("스켈레톤 LLM 해석 실패: provider=%r model=%r", provider, model)
         return None
@@ -737,38 +714,19 @@ def generate_report_with_metrics(
         생성된 보고서와 LLM 메타데이터
     """
     # analyze()와 동일한 우선순위: override > complexity > 전역 _report_llm
-    intervention_override = (role_models or {}).get(ROLE_INTERVENTION)
-    use_override = intervention_override and (intervention_override.provider or intervention_override.model)
-
-    base_provider = ""
-    base_model = ""
-    if _auto_select_by_complexity and _complexity_map:
-        from agents.roles import resolve_complexity_model
-        base_provider, base_model = resolve_complexity_model(
-            ROLE_INTERVENTION, task.complexity, _complexity_map
-        )
-    elif _model_capable:
-        base_provider = _provider_capable or _provider
-        base_model = _model_capable
+    resolved = _resolve_intervention_provider_model(task, role_models)
+    use_resolved_model = bool((role_models or {}).get(ROLE_INTERVENTION)) or _auto_select_by_complexity
 
     report_llm: BaseLLMClient | None
-    if use_override:
-        from agents.roles import compose_role_override
-        int_provider, int_model = compose_role_override(
-            intervention_override, base_provider, base_model,
-        )
-        if not (int_provider and int_model):
-            logger.error("intervention 보고서 override 합성 실패: base=(%r, %r)",
-                         base_provider, base_model)
+    if use_resolved_model:
+        if not resolved:
+            logger.error("intervention 보고서 모델 해석 실패")
             return ReportGenerationResult(
                 text=f"# 보고서 생성 실패\n\n모델 해석 실패\n\n## 최종 실패 원인\n{failure_reason}"
             )
+        int_provider, int_model = resolved
         report_llm = create_client(
             int_provider, LLMConfig(model=int_model, system_prompt=_REPORT_SYSTEM, max_tokens=4096)
-        )
-    elif _auto_select_by_complexity and _complexity_map:
-        report_llm = create_client(
-            base_provider, LLMConfig(model=base_model, system_prompt=_REPORT_SYSTEM, max_tokens=4096)
         )
     else:
         report_llm = _report_llm

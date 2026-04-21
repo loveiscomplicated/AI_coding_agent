@@ -58,7 +58,18 @@ from orchestrator.task_redesign import (
     create_redesign_llm,
     split_task as _split_task,
 )
-from agents.roles import RoleModelConfig, resolve_model_for_role, ROLE_MERGE_AGENT, ROLE_ORCHESTRATOR, compose_role_override
+from agents.roles import (
+    RoleModelConfig,
+    compose_role_override,
+    resolve_complexity_model,
+    resolve_model_for_role,
+    ROLE_IMPLEMENTER,
+    ROLE_INTERVENTION,
+    ROLE_MERGE_AGENT,
+    ROLE_ORCHESTRATOR,
+    ROLE_REVIEWER,
+    ROLE_TEST_WRITER,
+)
 from orchestrator.pipeline import TDDPipeline
 from orchestrator.report import build_report, load_reports, save_report
 from orchestrator.task import Task, TaskStatus, load_tasks, save_tasks
@@ -78,6 +89,42 @@ def _ok(msg: str)   -> str: return f"{_GREEN}✓{_RESET} {msg}"
 def _fail(msg: str) -> str: return f"{_RED}✗{_RESET} {msg}"
 def _warn(msg: str) -> str: return f"{_YELLOW}⚠{_RESET} {msg}"
 def _info(msg: str) -> str: return f"{_CYAN}→{_RESET} {msg}"
+
+
+_RUN_DEFAULT_ROLE_MODELS: dict[str, RoleModelConfig] = {
+    ROLE_TEST_WRITER: RoleModelConfig(provider="claude", model="claude-haiku-4-5"),
+    ROLE_IMPLEMENTER: RoleModelConfig(provider="claude", model="claude-haiku-4-5"),
+    ROLE_REVIEWER: RoleModelConfig(provider="claude", model="claude-haiku-4-5"),
+    ROLE_MERGE_AGENT: RoleModelConfig(provider="claude", model="claude-haiku-4-5"),
+    ROLE_ORCHESTRATOR: RoleModelConfig(provider="claude", model="claude-sonnet-4-6"),
+    ROLE_INTERVENTION: RoleModelConfig(provider="claude", model="claude-sonnet-4-6"),
+}
+
+
+def _copy_role_model_map(
+    role_models: dict[str, RoleModelConfig | dict[str, str]] | None,
+) -> dict[str, RoleModelConfig]:
+    copied: dict[str, RoleModelConfig] = {}
+    for role, cfg in (role_models or {}).items():
+        if isinstance(cfg, RoleModelConfig):
+            copied[role] = RoleModelConfig(provider=cfg.provider, model=cfg.model)
+        else:
+            copied[role] = RoleModelConfig(provider=cfg.get("provider"), model=cfg.get("model"))
+    return copied
+
+
+def _build_effective_default_role_models(
+    role_models: dict[str, RoleModelConfig | dict[str, str]] | None,
+) -> dict[str, RoleModelConfig]:
+    effective = _copy_role_model_map(_RUN_DEFAULT_ROLE_MODELS)
+    for role, cfg in _copy_role_model_map(role_models).items():
+        base = effective.get(role)
+        if base is None:
+            effective[role] = cfg
+            continue
+        provider, model = compose_role_override(cfg, base.provider or "", base.model or "")
+        effective[role] = RoleModelConfig(provider=provider, model=model)
+    return effective
 
 
 def _accumulate_external_tokens(metrics, role: str, token_usage: tuple[int, int, int, int], call_log: list[dict]) -> None:
@@ -439,17 +486,13 @@ def run_pipeline(
     max_orchestrator_retries: int = 3,
     intervention_auto_split: bool = False,
     auto_merge: bool = False,
-    provider: str = "claude",
-    model_fast: str = "claude-haiku-4-5",
-    model_capable: str = "claude-sonnet-4-6",
-    provider_fast: str | None = None,    # None이면 provider 사용
-    provider_capable: str | None = None, # None이면 provider 사용
+    default_role_models: dict[str, RoleModelConfig | dict[str, str]] | None = None,
     role_models: dict[str, RoleModelConfig] | None = None,  # 역할별 모델 오버라이드
     role_compaction_tuning_enabled: bool = False,
     role_compaction_tuning_preset: str = "balanced",
     role_compaction_tuning_overrides: dict[str, str] | None = None,
     auto_select_by_complexity: bool = False,
-    complexity_map: dict[str, dict[str, str]] | None = None,
+    complexity_map: dict[str, dict[str, RoleModelConfig | dict[str, str]]] | None = None,
 ) -> dict:
     """
     파이프라인 실행 핵심 로직. CLI와 FastAPI 백엔드 양쪽에서 호출된다.
@@ -529,17 +572,26 @@ def run_pipeline(
     groups = resolve_execution_groups(pending, all_valid_ids=all_task_ids)
 
     # LLM 클라이언트 + 파이프라인 초기화
-    _provider_fast = provider_fast or provider
-    _provider_capable = provider_capable or provider
-    fast_llm = create_client(_provider_fast, LLMConfig(model=model_fast, max_tokens=8192))
-    capable_llm = create_client(_provider_capable, LLMConfig(model=model_capable, max_tokens=8192))
+    _effective_default_role_models = _build_effective_default_role_models(default_role_models)
+    _tw_provider, _tw_model = resolve_model_for_role(
+        role=ROLE_TEST_WRITER,
+        role_models=None,
+        default_role_models=_effective_default_role_models,
+    )
+    _impl_provider, _impl_model = resolve_model_for_role(
+        role=ROLE_IMPLEMENTER,
+        role_models=None,
+        default_role_models=_effective_default_role_models,
+    )
+    test_writer_llm = create_client(_tw_provider, LLMConfig(model=_tw_model, max_tokens=8192))
+    implementer_llm = create_client(_impl_provider, LLMConfig(model=_impl_model, max_tokens=8192))
     runner = DockerTestRunner()
 
     # 복잡도 기반 자동 선택이 켜져 있고 매핑이 주입되지 않은 경우 backend.config 기본값 사용.
     # (circular import 회피: 함수 내부에서 import)
     _complexity_map = complexity_map
     if auto_select_by_complexity and not _complexity_map:
-        from backend.config import COMPLEXITY_MODEL_MAP as _DEFAULT_COMPLEXITY_MAP
+        from backend.config import COMPLEXITY_ROLE_MODEL_MAP as _DEFAULT_COMPLEXITY_MAP
         _complexity_map = _DEFAULT_COMPLEXITY_MAP
 
     # role_models 우선순위: auto_select ON이어도 사용자가 명시한 role override는 존중한다.
@@ -547,13 +599,9 @@ def run_pipeline(
     _effective_role_models = role_models
 
     pipeline = TDDPipeline(
-        agent_llm=fast_llm, implementer_llm=fast_llm, test_runner=runner,
+        agent_llm=test_writer_llm, implementer_llm=implementer_llm, test_runner=runner,
         role_models=_effective_role_models,
-        provider=provider,
-        model_fast=model_fast,
-        model_capable=model_capable,
-        provider_fast=provider_fast,
-        provider_capable=provider_capable,
+        default_role_models=_effective_default_role_models,
         role_compaction_tuning_enabled=role_compaction_tuning_enabled,
         role_compaction_tuning_preset=role_compaction_tuning_preset,
         role_compaction_tuning_overrides=role_compaction_tuning_overrides,
@@ -562,21 +610,18 @@ def run_pipeline(
     )
     git = GitWorkflow(repo_path, base_branch=base_branch)
     # merge_agent는 cross-task(그룹 단위)이므로 단일 complexity가 없다.
-    # base: 토글 ON → standard tier fast / 토글 OFF → resolve_model_for_role로 기본값 해석.
+    # base: 토글 ON → standard tier merge_agent / 토글 OFF → default_role_models 기본값 해석.
     # 그 위에 role_models['merge_agent']가 지정되어 있으면 부분 override를 합성한다
     # (API 계약: role_models는 auto_select 여부와 무관하게 최상위 override).
     if auto_select_by_complexity and _complexity_map:
-        _base_merge_provider = _complexity_map["standard"]["provider_fast"]
-        _base_merge_model = _complexity_map["standard"]["model_fast"]
+        _base_merge_provider, _base_merge_model = resolve_complexity_model(
+            ROLE_MERGE_AGENT, "standard", _complexity_map
+        )
     else:
         _base_merge_provider, _base_merge_model = resolve_model_for_role(
             role=ROLE_MERGE_AGENT,
             role_models=None,  # override는 아래에서 별도 합성
-            provider=provider,
-            model_fast=model_fast,
-            model_capable=model_capable,
-            provider_fast=provider_fast,
-            provider_capable=provider_capable,
+            default_role_models=_effective_default_role_models,
         )
     _merge_provider, _merge_model = compose_role_override(
         (_effective_role_models or {}).get(ROLE_MERGE_AGENT),
@@ -590,27 +635,37 @@ def run_pipeline(
     _set_hotline_notifier(notifier)
     _set_hotline_repo_path(repo_path)
     _set_hotline_tasks_path(tasks_path)
-    # 토글 ON 시 cross-task LLM(hotline + intervention 전역 fallback)도 standard tier capable을 사용.
+    # 토글 ON 시 cross-task LLM(hotline + intervention 전역 fallback)도 standard tier의
+    # orchestrator/intervention role 설정을 사용한다.
     # 실제 per-task intervention 모델은 intervention.analyze()에서 다시 task.complexity로 해석한다.
     # 단, 사용자가 오케스트레이터 role override를 명시한 경우 그것을 우선한다.
     _orch_override = (role_models or {}).get(ROLE_ORCHESTRATOR)
     _orch_override_active = _orch_override and (_orch_override.provider or _orch_override.model)
     if _orch_override_active:
+        _base_orch_provider, _base_orch_model = resolve_model_for_role(
+            role=ROLE_ORCHESTRATOR,
+            role_models=None,
+            default_role_models=_effective_default_role_models,
+        )
         _cross_provider, _cross_capable_model = compose_role_override(
-            _orch_override, _provider_capable, model_capable
+            _orch_override, _base_orch_provider, _base_orch_model
         )
     elif auto_select_by_complexity and _complexity_map:
-        _cross_provider = _complexity_map["standard"]["provider_capable"]
-        _cross_capable_model = _complexity_map["standard"]["model_capable"]
+        _cross_provider, _cross_capable_model = resolve_complexity_model(
+            ROLE_ORCHESTRATOR, "standard", _complexity_map
+        )
     else:
-        _cross_provider = _provider_capable
-        _cross_capable_model = model_capable
+        _cross_provider, _cross_capable_model = resolve_model_for_role(
+            role=ROLE_ORCHESTRATOR,
+            role_models=None,
+            default_role_models=_effective_default_role_models,
+        )
     conv_llm, sum_llm = create_hotline_llms(_cross_provider, _cross_capable_model)
     _set_hotline_llm(conv_llm, sum_llm)
     # 오케스트레이터 개입 LLM 주입
     analyze_llm, report_llm = create_intervention_llms(_cross_provider, _cross_capable_model)
     _set_intervention_llm(analyze_llm, report_llm)
-    _set_intervention_model_config(provider, model_fast, model_capable, provider_fast, provider_capable)
+    _set_intervention_model_config(_effective_default_role_models)
     _set_intervention_complexity_routing(auto_select_by_complexity, _complexity_map)
 
     # ── auto_merge catch-up: 이전 실행에서 완료됐지만 미머지된 브랜치 처리 ────────
@@ -1026,8 +1081,8 @@ def run_pipeline(
 
                     report_result = orch_report_with_metrics(
                         task, failure_reason, orch_attempt + 1, hints_tried,
-                        orchestrator_model=model_capable,
-                        coding_agent_model=model_fast,
+                        orchestrator_model=_cross_capable_model,
+                        coding_agent_model=_impl_model,
                         models_used=result.models_used or None,
                         role_models=_effective_role_models,
                     )
@@ -1071,8 +1126,8 @@ def run_pipeline(
                 report = build_report(
                     task, result, elapsed_seconds=elapsed, pr_url="",
                     orchestrator_attempts=orch_attempt + 1 if hints_tried else 0,
-                    orchestrator_model=model_capable if hints_tried else "",
-                    coding_agent_model=model_fast if hints_tried else "",
+                    orchestrator_model=_cross_capable_model if hints_tried else "",
+                    coding_agent_model=_impl_model if hints_tried else "",
                     orchestrator_summary=_extract_orch_summary(orch_report_text),
                     models_used=result.models_used or None,
                     call_logs_dir=logs_dir,
@@ -1776,6 +1831,25 @@ def _apply_rate_limit_overrides(args: argparse.Namespace) -> None:
         print(f"rate_limiter: TPM override {provider}/{model} → {tpm}")
 
 
+def _parse_role_model_specs(specs: list[str]) -> dict[str, RoleModelConfig]:
+    parsed: dict[str, RoleModelConfig] = {}
+    for spec in specs:
+        try:
+            role, ref = spec.split("=", 1)
+            provider, model = ref.split(":", 1)
+        except ValueError:
+            raise ValueError(f"--role-model 형식 오류: '{spec}' (role=provider:model)") from None
+        role = role.strip()
+        provider = provider.strip()
+        model = model.strip()
+        if role not in _RUN_DEFAULT_ROLE_MODELS:
+            raise ValueError(f"지원하지 않는 role: '{role}'")
+        if not provider or not model:
+            raise ValueError(f"--role-model 형식 오류: '{spec}' (provider/model 비어 있음)")
+        parsed[role] = RoleModelConfig(provider=provider, model=model)
+    return parsed
+
+
 def main() -> int:
     args = _parse_args()
 
@@ -1854,24 +1928,44 @@ def main() -> int:
     # Docker 이미지 (언어별 자동 빌드 — DockerTestRunner.run() 내부에서 처리)
     runner = DockerTestRunner()
 
-    # LLM 클라이언트
     try:
-        fast_llm = create_client(args.provider, LLMConfig(model=args.model_fast, max_tokens=8192))
-        capable_llm = create_client(args.provider, LLMConfig(model=args.model_capable, max_tokens=8192))
+        cli_default_role_models = _build_effective_default_role_models(
+            _parse_role_model_specs(args.role_model)
+        )
+        tw_provider, tw_model = resolve_model_for_role(
+            ROLE_TEST_WRITER, None, cli_default_role_models
+        )
+        impl_provider, impl_model = resolve_model_for_role(
+            ROLE_IMPLEMENTER, None, cli_default_role_models
+        )
+        orch_provider, orch_model = resolve_model_for_role(
+            ROLE_ORCHESTRATOR, None, cli_default_role_models
+        )
+        merge_provider, merge_model = resolve_model_for_role(
+            ROLE_MERGE_AGENT, None, cli_default_role_models
+        )
+        test_writer_llm = create_client(tw_provider, LLMConfig(model=tw_model, max_tokens=8192))
+        implementer_llm = create_client(impl_provider, LLMConfig(model=impl_model, max_tokens=8192))
+        merge_llm = create_client(merge_provider, LLMConfig(model=merge_model, max_tokens=8192))
     except ValueError as e:
         print(_fail(f"LLM 클라이언트 초기화 실패: {e}"))
         return 1
 
     # 오케스트레이터 개입 + hotline LLM 주입
-    analyze_llm, report_llm = create_intervention_llms(args.provider, args.model_capable)
+    analyze_llm, report_llm = create_intervention_llms(orch_provider, orch_model)
     _set_intervention_llm(analyze_llm, report_llm)
-    conv_llm, sum_llm = create_hotline_llms(args.provider, args.model_capable)
+    conv_llm, sum_llm = create_hotline_llms(orch_provider, orch_model)
     _set_hotline_llm(conv_llm, sum_llm)
     _set_hotline_tasks_path(tasks_path)
 
-    pipeline = TDDPipeline(agent_llm=fast_llm, implementer_llm=fast_llm, test_runner=runner)
+    pipeline = TDDPipeline(
+        agent_llm=test_writer_llm,
+        implementer_llm=implementer_llm,
+        test_runner=runner,
+        default_role_models=cli_default_role_models,
+    )
     git = GitWorkflow(repo_path, base_branch=args.base_branch)
-    merge_agent = MergeAgent(llm=fast_llm, repo_path=repo_path)
+    merge_agent = MergeAgent(llm=merge_llm, repo_path=repo_path)
 
     # reports_dir: --reports-dir 명시 시 해당 경로, 기본값이면 repo 기준 자동 해석
     reports_dir = (
@@ -1938,12 +2032,12 @@ def main() -> int:
     if success_count > 0:
         try:
             _milestone_llm = create_client(
-                args.provider, LLMConfig(model=args.model_capable, max_tokens=4096)
+                orch_provider, LLMConfig(model=orch_model, max_tokens=4096)
             )
 
             def _llm_fn(system: str, user: str) -> str:
                 from llm import LLMConfig as _LLMConfig, Message as _Message, create_client as _cc
-                llm = _cc(args.provider, _LLMConfig(model=args.model_capable, system_prompt=system, max_tokens=4096))
+                llm = _cc(orch_provider, _LLMConfig(model=orch_model, system_prompt=system, max_tokens=4096))
                 resp = llm.chat([_Message(role="user", content=user)])
                 for block in resp.content:
                     if isinstance(block, dict) and block.get("type") == "text":
@@ -2005,15 +2099,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--reports-dir", default="agent-data/reports",
                         metavar="DIR",
                         help="Task Report 저장 디렉토리 (기본값: agent-data/reports)")
-    parser.add_argument("--provider", default="claude",
-                        choices=["claude", "openai", "glm", "ollama"],
-                        help="LLM 프로바이더 (기본값: claude)")
-    parser.add_argument("--model-fast", default="claude-haiku-4-5",
-                        metavar="MODEL",
-                        help="빠른 작업용 모델 (기본값: claude-haiku-4-5)")
-    parser.add_argument("--model-capable", default="claude-sonnet-4-6",
-                        metavar="MODEL",
-                        help="복잡한 작업용 모델 (기본값: claude-sonnet-4-6)")
+    parser.add_argument("--role-model", action="append", default=[],
+                        metavar="ROLE=PROVIDER:MODEL",
+                        help="역할별 기본 모델 override. 예: --role-model implementer=openai:gpt-5")
     return parser.parse_args()
 
 
