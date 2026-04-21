@@ -76,9 +76,9 @@ describe('PipelineModelModal — 복잡도 기반 자동 선택 토글', () => {
     expect(table).toBeInTheDocument()
 
     // 세 tier 및 대표 모델명이 모두 노출된다
-    expect(within(table).getByText(/simple/)).toBeInTheDocument()
-    expect(within(table).getByText(/standard/)).toBeInTheDocument()
-    expect(within(table).getByText(/complex/)).toBeInTheDocument()
+    expect(within(table).getAllByText(/simple/).length).toBeGreaterThan(0)
+    expect(within(table).getAllByText(/standard/).length).toBeGreaterThan(0)
+    expect(within(table).getAllByText(/complex/).length).toBeGreaterThan(0)
     expect(within(table).getAllByText(/gpt-4.1-mini/).length).toBeGreaterThan(0)
     expect(within(table).getAllByText(/gemini-2.5-flash-lite/).length).toBeGreaterThan(0)
     expect(within(table).getAllByText(/gpt-5-mini/).length).toBeGreaterThan(0)
