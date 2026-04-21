@@ -16,6 +16,7 @@ from tools.hotline_tools import (
     get_conv_model, set_conv_model,
     get_redesign_model, set_redesign_model,
     get_task_draft_model, set_task_draft_model,
+    get_critique_model, set_critique_model,
 )
 
 router = APIRouter()
@@ -38,6 +39,8 @@ class LLMSettingsRequest(BaseModel):
     redesign_provider: str = ""
     task_draft_model: str = ""
     task_draft_provider: str = ""
+    critique_model: str = ""
+    critique_provider: str = ""
 
 
 @router.get("/config/llm")
@@ -46,13 +49,18 @@ def get_llm_settings() -> dict:
     conv_info = get_conv_model()
     redesign_info = get_redesign_model()
     draft_info = get_task_draft_model()
+    critique_info = get_critique_model()
+    _default_model = "glm-5.1"
+    _default_provider = "glm"
     return {
-        "hotline_conv_model": conv_info["model"] or LLM_MODEL_CAPABLE,
-        "hotline_conv_provider": conv_info["provider"] or LLM_PROVIDER,
-        "redesign_model": redesign_info["model"] or LLM_MODEL_CAPABLE,
-        "redesign_provider": redesign_info["provider"] or LLM_PROVIDER,
-        "task_draft_model": draft_info["model"] or LLM_MODEL_CAPABLE,
-        "task_draft_provider": draft_info["provider"] or LLM_PROVIDER,
+        "hotline_conv_model": conv_info["model"] or _default_model,
+        "hotline_conv_provider": conv_info["provider"] or _default_provider,
+        "redesign_model": redesign_info["model"] or _default_model,
+        "redesign_provider": redesign_info["provider"] or _default_provider,
+        "task_draft_model": draft_info["model"] or _default_model,
+        "task_draft_provider": draft_info["provider"] or _default_provider,
+        "critique_model": critique_info["model"] or _default_model,
+        "critique_provider": critique_info["provider"] or _default_provider,
     }
 
 
@@ -77,6 +85,11 @@ def update_llm_settings(body: LLMSettingsRequest) -> dict:
     if draft_m and draft_p:
         set_task_draft_model(draft_m, draft_p)
 
+    critique_m = body.critique_model.strip()
+    critique_p = body.critique_provider.strip()
+    if critique_m and critique_p:
+        set_critique_model(critique_m, critique_p)
+
     return {
         "hotline_conv_model": model,
         "hotline_conv_provider": provider,
@@ -84,6 +97,8 @@ def update_llm_settings(body: LLMSettingsRequest) -> dict:
         "redesign_provider": redesign_p or provider,
         "task_draft_model": draft_m or model,
         "task_draft_provider": draft_p or provider,
+        "critique_model": critique_m or model,
+        "critique_provider": critique_p or provider,
     }
 
 

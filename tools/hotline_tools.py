@@ -35,16 +35,20 @@ _sum_llm: BaseLLMClient | None = None
 _llm_lock = threading.Lock()
 
 # 현재 사용 중인 provider/model 기록 (런타임 변경 지원용)
-_hotline_provider: str = "claude"
-_hotline_conv_model: str = ""
+_hotline_provider: str = "glm"
+_hotline_conv_model: str = "glm-5.1"
 
 # 태스크 재설계용 LLM 설정 (런타임 변경 지원용)
-_redesign_provider: str = ""
-_redesign_model: str = ""
+_redesign_provider: str = "glm"
+_redesign_model: str = "glm-5.1"
 
 # 태스크 초안 생성용 LLM 설정 (런타임 변경 지원용)
-_task_draft_provider: str = ""
-_task_draft_model: str = ""
+_task_draft_provider: str = "glm"
+_task_draft_model: str = "glm-5.1"
+
+# Critique LLM 설정 (런타임 변경 지원용)
+_critique_provider: str = "glm"
+_critique_model: str = "glm-5.1"
 
 
 def set_llm(conv_llm: BaseLLMClient, sum_llm: BaseLLMClient) -> None:
@@ -99,6 +103,18 @@ def set_task_draft_model(model: str, provider: str) -> None:
     global _task_draft_provider, _task_draft_model
     _task_draft_provider = provider
     _task_draft_model = model
+
+
+def get_critique_model() -> dict:
+    """현재 Critique LLM provider/model을 반환한다."""
+    return {"provider": _critique_provider, "model": _critique_model}
+
+
+def set_critique_model(model: str, provider: str) -> None:
+    """Critique LLM 모델을 런타임에 변경한다."""
+    global _critique_provider, _critique_model
+    _critique_provider = provider
+    _critique_model = model
 
 
 def create_hotline_llms(provider: str, model: str) -> tuple[BaseLLMClient, BaseLLMClient]:
