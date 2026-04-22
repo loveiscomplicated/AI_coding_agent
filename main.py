@@ -16,14 +16,22 @@ main.py — AI Coding Agent 진입점
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import pathlib
 import re
 import sys
+from typing import Callable
 
 from cli import interface as ui
 from cli.commands import Action, handle
+from cli.config import find_repo_root, load_config as load_cli_config
+from cli.instant_runner import InstantRunner, RunMode
+from cli.interface import CLIMode, get_current_mode, set_mode
 from cli.interrupt import EscInterruptHandler
+from cli.pipeline_confirm import PipelineConfirmManager
+from cli.retry_prompt import RetryPrompt
+from cli.task_converter import TaskConverter
 from core.config import load_config
 from core.loop import ReactLoop
 from core.undo import ChangeTracker
@@ -164,6 +172,64 @@ def expand_at_mentions(text: str) -> str:
     return re.sub(r"@(\S+)", replace, text)
 
 
+# ── 모드 분기 (테스트용으로 분리) ────────────────────────────────────────────
+
+
+def _run_turn(
+    raw: str,
+    *,
+    mode: CLIMode,
+    get_runner: Callable[[], InstantRunner] | None,
+) -> bool:
+    """현재 모드에 따라 입력을 라우팅.
+
+    Returns:
+        True  — TDD 모드로 처리됨 (호출자는 continue)
+        False — 일반 모드로 처리 필요 (호출자가 ReactLoop로 진행)
+    """
+    if mode == CLIMode.TDD and get_runner is not None:
+        try:
+            runner = get_runner()
+            asyncio.run(runner.run(raw))
+        except KeyboardInterrupt:
+            ui.print_info("TDD 파이프라인 중단됨.")
+        except Exception as e:
+            ui.print_error(f"TDD 실행 오류: {e}")
+        return True
+    return False
+
+
+def _build_tdd_runner(repo_root: str, cli_cfg) -> InstantRunner:
+    llm_cfg_fast = LLMConfig(model=cli_cfg.model_fast)
+    llm_cfg_capable = LLMConfig(model=cli_cfg.model_capable)
+    converter = TaskConverter(
+        repo_path=repo_root,
+        llm_config=llm_cfg_capable,
+        provider=cli_cfg.provider,
+    )
+    return InstantRunner(
+        repo_path=repo_root,
+        converter=converter,
+        confirm=PipelineConfirmManager(),
+        retry=RetryPrompt(),
+        llm_config_fast=llm_cfg_fast,
+        llm_config_capable=llm_cfg_capable,
+        mode=RunMode.FULL_TDD,
+    )
+
+
+def _make_tdd_runner_loader(repo_root: str, cli_cfg) -> Callable[[], InstantRunner]:
+    runner: InstantRunner | None = None
+
+    def _get_runner() -> InstantRunner:
+        nonlocal runner
+        if runner is None:
+            runner = _build_tdd_runner(repo_root, cli_cfg)
+        return runner
+
+    return _get_runner
+
+
 # ── 모델 목록 출력 ───────────────────────────────────────────────────────────
 
 
@@ -270,6 +336,25 @@ def main() -> None:
     # ── 세션 초기화 ───────────────────────────────────────────────────────────
     mgr = SessionManager()
 
+    # ── TDD 모드 초기화 ───────────────────────────────────────────────────────
+    repo_root = find_repo_root()
+    cli_cfg = load_cli_config(repo_root)
+
+    ui.configure_tdd_availability(repo_root is not None)
+
+    get_tdd_runner: Callable[[], InstantRunner] | None = None
+    if repo_root is None:
+        ui.print_info(
+            "경고: .git을 찾지 못했습니다. TDD 모드는 git 프로젝트 내에서 실행하세요."
+        )
+        set_mode(CLIMode.NORMAL)
+    else:
+        get_tdd_runner = _make_tdd_runner_loader(repo_root, cli_cfg)
+        if cli_cfg.default_mode == "tdd":
+            set_mode(CLIMode.TDD)
+        else:
+            set_mode(CLIMode.NORMAL)
+
     if args.session:
         summaries = mgr.list_all()
         matches = [s for s in summaries if s.session_id.startswith(args.session)]
@@ -312,6 +397,10 @@ def main() -> None:
             if result.action in (Action.NEW_SESSION, Action.LOAD_SESSION):
                 assert result.session is not None
                 session = result.session
+            continue
+
+        # ── TDD 모드 분기 ────────────────────────────────────────────────────
+        if _run_turn(raw, mode=get_current_mode(), get_runner=get_tdd_runner):
             continue
 
         # ── 일반 대화 → ReAct 루프 실행 ──────────────────────────────────────
