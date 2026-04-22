@@ -4,6 +4,7 @@ cli/interface.py — 입출력, 색상, 포맷팅 (rich + prompt_toolkit)
 공개 함수:
   print_banner       : 시작 배너 출력
   print_answer       : LLM 최종 답변을 Markdown으로 렌더링
+  print_task_summary : TaskConverter가 생성한 Task 객체를 사람이 읽기 쉬운 형태로 출력
   print_tool_call    : 도구 호출 시작 표시
   print_tool_result  : 도구 실행 결과 표시
   print_sessions     : 세션 목록 테이블 출력
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -31,14 +33,45 @@ from prompt_toolkit.completion import Completer, Completion, PathCompleter
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.filters import has_completions
+from prompt_toolkit.key_binding import KeyBindings
 
 if TYPE_CHECKING:
     from core.loop import ToolCall, ToolResult
     from core.undo import ChangeTracker
     from memory.session import SessionSummary
     from llm.base import Message
+    from orchestrator.pipeline import PipelineResult
+    from orchestrator.task import Task
 
 console = Console()
+
+
+# ── 모드 관리 ─────────────────────────────────────────────────────────────────
+
+
+class CLIMode(Enum):
+    NORMAL = "일반"
+    TDD = "TDD"
+
+
+_current_mode: CLIMode = CLIMode.NORMAL
+
+
+def get_current_mode() -> CLIMode:
+    return _current_mode
+
+
+def set_mode(mode: CLIMode) -> None:
+    global _current_mode
+    _current_mode = mode
+
+
+def toggle_mode() -> CLIMode:
+    global _current_mode
+    _current_mode = CLIMode.TDD if _current_mode == CLIMode.NORMAL else CLIMode.NORMAL
+    return _current_mode
+
 
 # ── 색상 팔레트 ───────────────────────────────────────────────────────────────
 _C_TOOL   = "cyan"
@@ -96,11 +129,24 @@ class AgentCompleter(Completer):
                     )
 
 
+# ── 키 바인딩 (Shift+Tab 모드 전환) ──────────────────────────────────────────
+
+_kb = KeyBindings()
+
+
+@_kb.add("s-tab", filter=~has_completions)
+def _toggle_mode_handler(event) -> None:
+    new_mode = toggle_mode()
+    print_mode_changed(new_mode)
+    event.app.invalidate()
+
+
 # PromptSession은 모듈 수준에서 한 번만 생성 (히스토리 유지)
 _prompt_session: PromptSession = PromptSession(
     history=InMemoryHistory(),
     completer=AgentCompleter(),
     complete_while_typing=True,   # @ / / 입력 시 즉시 자동완성 목록 표시
+    key_bindings=_kb,
 )
 
 
@@ -108,12 +154,19 @@ _prompt_session: PromptSession = PromptSession(
 
 
 def print_banner() -> None:
+    mode = get_current_mode()
+    mode_label = f"[bold magenta][{mode.value} 모드][/bold magenta]"
     console.print(Panel(
-        "[bold cyan]AI Coding Agent[/bold cyan]\n"
-        "[dim]/help 로 명령어 목록 · Tab 으로 자동완성 · @경로 로 파일 첨부[/dim]",
+        f"[bold cyan]AI Coding Agent[/bold cyan]  {mode_label}\n"
+        "[dim]/help · Tab 자동완성 · @경로 파일 첨부 · Shift+Tab 모드 전환[/dim]",
         box=box.ROUNDED,
         expand=False,
     ))
+
+
+def print_mode_changed(mode: CLIMode) -> None:
+    """모드 전환 시 알림을 한 줄로 출력."""
+    console.print(f"  [dim magenta]✓ {mode.value} 모드로 전환[/dim magenta]")
 
 
 # ── 답변 ──────────────────────────────────────────────────────────────────────
@@ -123,6 +176,56 @@ def print_answer(text: str) -> None:
     """LLM 최종 답변을 Markdown으로 렌더링합니다."""
     console.print()
     console.print(Markdown(text))
+    console.print()
+
+
+def print_task_summary(task: "Task", warnings: list[str] | None = None) -> None:
+    """태스크를 사람이 읽기 쉬운 형태로 출력합니다.
+
+    TaskConverter가 생성한 Task 객체를 사용자에게 보여줄 때 사용합니다.
+    (S2에서 더 풍부한 레이아웃으로 확장 예정)
+    """
+    lines: list[str] = []
+    lines.append(f"[bold]ID:[/bold]       {task.id}")
+    lines.append(f"[bold]제목:[/bold]     {task.title}")
+    if task.description:
+        desc_lines = task.description.strip().splitlines()
+        lines.append(f"[bold]설명:[/bold]     {desc_lines[0]}")
+        for dl in desc_lines[1:]:
+            lines.append(f"          {dl}")
+    lines.append(f"[bold]언어:[/bold]     {task.language} ({task.test_framework})")
+    lines.append(f"[bold]타입:[/bold]     {task.task_type}")
+    lines.append(f"[bold]복잡도:[/bold]   {task.complexity or '(미지정)'}")
+
+    if task.target_files:
+        lines.append(f"[bold]대상 파일:[/bold] {task.target_files[0]}")
+        for path in task.target_files[1:]:
+            lines.append(f"          {path}")
+    else:
+        lines.append("[bold]대상 파일:[/bold] (없음)")
+
+    if task.acceptance_criteria:
+        lines.append("[bold]수락 기준:[/bold]")
+        for i, c in enumerate(task.acceptance_criteria, 1):
+            lines.append(f"  {i}. {c}")
+
+    if getattr(task, "depends_on", None):
+        lines.append(f"[bold]선행 태스크:[/bold] {', '.join(task.depends_on)}")
+
+    if warnings:
+        lines.append("")
+        lines.append("[yellow]⚠ 경고:[/yellow]")
+        for w in warnings:
+            lines.append(f"  • {w}")
+
+    console.print()
+    console.print(Panel(
+        "\n".join(lines),
+        title="📋 태스크 요약",
+        border_style=_C_TOOL,
+        box=box.ROUNDED,
+        expand=False,
+    ))
     console.print()
 
 
@@ -221,6 +324,102 @@ def print_token_usage(result) -> None:
         f"[{_C_INFO}]tokens: input={result.total_input_tokens}  "
         f"output={result.total_output_tokens}  total={total}[/{_C_INFO}]"
     )
+
+
+def _pipeline_token_totals(result: "PipelineResult") -> tuple[int, int, int, int]:
+    total_in = total_out = total_cached_read = total_cached_write = 0
+    for usage in result.metrics.token_usage.values():
+        if not isinstance(usage, tuple):
+            continue
+        total_in += int(usage[0] or 0) if len(usage) > 0 else 0
+        total_out += int(usage[1] or 0) if len(usage) > 1 else 0
+        total_cached_read += int(usage[2] or 0) if len(usage) > 2 else 0
+        total_cached_write += int(usage[3] or 0) if len(usage) > 3 else 0
+    return total_in, total_out, total_cached_read, total_cached_write
+
+
+def _format_pipeline_cost(result: "PipelineResult") -> str | None:
+    if not result.metrics.token_usage or not result.models_used:
+        return None
+
+    from orchestrator.report import _calculate_cost
+
+    cost_usd = _calculate_cost(result.metrics.token_usage, result.models_used)
+    if cost_usd is None:
+        return None
+    if cost_usd >= 0.001:
+        return f"${cost_usd:.3f}"
+    return f"${cost_usd:.6f}"
+
+
+def _pipeline_retry_summary(result: "PipelineResult") -> str | None:
+    metrics = result.metrics
+    automatic_attempts = len(metrics.call_logs.get("implementer", []))
+    orchestrator_attempts = len(metrics.call_logs.get("intervention", []))
+
+    if automatic_attempts == 0 and metrics.failed_stage in {"implementing", "testing", "reviewing"}:
+        automatic_attempts = max(metrics.impl_retries + 1, 1)
+
+    total_attempts = automatic_attempts + orchestrator_attempts
+    if total_attempts == 0:
+        return None
+    if orchestrator_attempts:
+        return (
+            f"{total_attempts}회 "
+            f"(자동 {automatic_attempts} + 오케스트레이터 {orchestrator_attempts})"
+        )
+    return f"{automatic_attempts}회"
+
+
+def print_pipeline_result(result: "PipelineResult") -> None:
+    """TDD 파이프라인 완료 후 결과 카드를 출력한다."""
+    title = result.task.title
+    metrics = result.metrics
+    total_in, total_out, total_cached_read, _total_cached_write = _pipeline_token_totals(result)
+    total_tokens = total_in + total_out + total_cached_read
+    cost_label = _format_pipeline_cost(result)
+
+    if result.succeeded:
+        lines: list[str] = [f"[bold green]✅ {title}[/bold green]", ""]
+        if result.test_result is not None:
+            summary = (result.test_result.summary or "통과").strip()
+            lines.append(f"[bold]Tests:[/bold]    {summary}")
+        if result.review is not None:
+            lines.append(f"[bold]Reviewer:[/bold] {result.review.verdict}")
+        files = list(result.impl_files) + list(result.test_files)
+        if files:
+            lines.append(f"[bold]Files:[/bold]    {files[0]}")
+            for f in files[1:]:
+                lines.append(f"           {f}")
+        token_line = f"[bold]Tokens:[/bold]   {total_tokens:,}"
+        if cost_label:
+            token_line += f" (cost: {cost_label})"
+        lines.append(token_line)
+        title_str = "TDD 완료"
+        border = _C_OK
+    else:
+        lines = [f"[bold red]❌ {title}[/bold red]", ""]
+        reason = (result.failure_reason or "알 수 없음")[:200]
+        lines.append(f"[bold]실패 원인:[/bold] {reason}")
+        retry_summary = _pipeline_retry_summary(result)
+        if retry_summary:
+            lines.append(f"[bold]재시도:[/bold]   {retry_summary}")
+        token_line = f"[bold]Tokens:[/bold]   {total_tokens:,}"
+        if cost_label:
+            token_line += f" (cost: {cost_label})"
+        lines.append(token_line)
+        title_str = "TDD 실패"
+        border = _C_ERR
+
+    console.print()
+    console.print(Panel(
+        "\n".join(lines),
+        title=title_str,
+        border_style=border,
+        box=box.ROUNDED,
+        expand=False,
+    ))
+    console.print()
 
 
 # ── Diff & 승인 ───────────────────────────────────────────────────────────────
@@ -372,13 +571,21 @@ def get_input(session_id_short: str) -> str:
     사용자 입력을 받아 반환합니다.
 
     - Tab: 자동완성 (@경로, /명령어)
+    - Shift+Tab: 일반/TDD 모드 토글
     - ↑↓ 방향키: 이전 입력 히스토리
     - Ctrl-C: KeyboardInterrupt (종료)
     - Ctrl-D / EOF: 빈 문자열 반환
     """
-    try:
-        return _prompt_session.prompt(
-            HTML(f"<ansiblue><b>[{session_id_short}] ❯ </b></ansiblue>"),
+    def _prompt_message():
+        prefix_html = ""
+        if get_current_mode() == CLIMode.TDD:
+            prefix_html = "<ansimagenta><b>[TDD] </b></ansimagenta>"
+        return HTML(
+            f"{prefix_html}"
+            f"<ansiblue><b>[{session_id_short}] ❯ </b></ansiblue>"
         )
+
+    try:
+        return _prompt_session.prompt(_prompt_message)
     except EOFError:
         return ""
