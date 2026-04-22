@@ -190,6 +190,7 @@ class TDDPipeline:
         role_compaction_tuning_overrides: dict[str, str] | None = None,
         auto_select_by_complexity: bool = False,
         complexity_map: dict[str, dict[str, RoleModelConfig | dict[str, str]]] | None = None,
+        skip_test_writer: bool = False,
     ):
         self.agent_llm = agent_llm
         self.implementer_llm = implementer_llm or agent_llm
@@ -207,6 +208,7 @@ class TDDPipeline:
         self.role_compaction_tuning_overrides = role_compaction_tuning_overrides or {}
         self.auto_select_by_complexity = auto_select_by_complexity
         self.complexity_map = complexity_map or {}
+        self._skip_test_writer = skip_test_writer
         # escalation tier override: _run_pipeline이 run() 호출 시 설정, 종료 시 리셋.
         # _resolve_provider_model이 per-call tier보다 이 값을 우선하도록 설계됨.
         self._current_tier: str | None = None
@@ -427,175 +429,183 @@ class TDDPipeline:
             injected_files = _parse_dependency_artifact_files(dep_artifact)
             metrics.dep_files_injected = len(injected_files - original_targets)
 
-        # ── Step 1: 테스트 작성 ───────────────────────────────────────────────
-        # TestWriter 실행 전 기존 테스트 파일 스냅샷 (새로 생성된 파일만 DockerTestRunner에 전달하기 위함)
-        _ws_path = str(workspace.path)
-        _test_files_before = set(glob.glob(os.path.join(_ws_path, "**", "test_*.py"), recursive=True))
+        # ── Step 1 & 1.5: 테스트 작성 및 품질 게이트 (skip_test_writer=True 시 건너뜀) ─
+        _created_test_files: list[str] = []   # TestWriter가 신규 생성한 파일만 저장
+        if not self._skip_test_writer:
+            # TestWriter 실행 전 기존 테스트 파일 스냅샷 (새로 생성된 파일만 DockerTestRunner에 전달하기 위함)
+            _ws_path = str(workspace.path)
+            _test_files_before = set(glob.glob(os.path.join(_ws_path, "**", "test_*.py"), recursive=True))
 
-        task.status = TaskStatus.WRITING_TESTS
-        _p({"type": "step", "step": "test_writing", "message": "TestWriter: 테스트 작성 중…"})
-        test_scoped = self._run_test_writer(task, workspace, on_progress=_agent_p, pause_ctrl=pause_ctrl, enriched_desc=enriched_desc)
-        _accumulate_tokens(metrics, "test_writer", test_scoped)
+            task.status = TaskStatus.WRITING_TESTS
+            _p({"type": "step", "step": "test_writing", "message": "TestWriter: 테스트 작성 중…"})
+            test_scoped = self._run_test_writer(task, workspace, on_progress=_agent_p, pause_ctrl=pause_ctrl, enriched_desc=enriched_desc)
+            _accumulate_tokens(metrics, "test_writer", test_scoped)
 
-        # TestWriter 종료 가드:
-        #  - LLM 실패(succeeded=False)  → 기존과 동일하게 WRITE_LOOP 여부로 분기
-        #  - LLM 성공(succeeded=True)   → 출력 가드 실행 → 실패 사유가 있으면 재시도
-        # 두 경우 모두 최대 1회 재시도 (기존 동작 유지) 후에도 실패면 파이프라인 실패.
-        _retry_scoped: ScopedResult | None = None
-        _retry_reason: str | None = None
-        _retry_label: str = ""
+            # TestWriter 종료 가드:
+            #  - LLM 실패(succeeded=False)  → 기존과 동일하게 WRITE_LOOP 여부로 분기
+            #  - LLM 성공(succeeded=True)   → 출력 가드 실행 → 실패 사유가 있으면 재시도
+            # 두 경우 모두 최대 1회 재시도 (기존 동작 유지) 후에도 실패면 파이프라인 실패.
+            _retry_scoped: ScopedResult | None = None
+            _retry_reason: str | None = None
+            _retry_label: str = ""
 
-        if not test_scoped.succeeded:
-            if _is_write_loop(test_scoped):
-                _retry_reason = (
-                    "[WRITE_LOOP] 탐색만 하고 write_file 을 호출하지 않은 채 종료했습니다."
-                )
-                _retry_label = "탐색 루프 감지 — TestWriter 재시도…"
+            if not test_scoped.succeeded:
+                if _is_write_loop(test_scoped):
+                    _retry_reason = (
+                        "[WRITE_LOOP] 탐색만 하고 write_file 을 호출하지 않은 채 종료했습니다."
+                    )
+                    _retry_label = "탐색 루프 감지 — TestWriter 재시도…"
+                else:
+                    prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
+                    metrics.failed_stage = "test_writing"
+                    return PipelineResult.failed(task, f"{prefix}TestWriter 실패: {test_scoped.answer}", metrics=metrics)
             else:
-                prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
-                metrics.failed_stage = "test_writing"
-                return PipelineResult.failed(task, f"{prefix}TestWriter 실패: {test_scoped.answer}", metrics=metrics)
-        else:
-            _retry_reason = _validate_testwriter_output(workspace, task, test_scoped)
+                _retry_reason = _validate_testwriter_output(workspace, task, test_scoped)
+                if _retry_reason:
+                    _retry_label = f"TestWriter 출력 가드 — {_retry_reason[:80]}"
+
             if _retry_reason:
-                _retry_label = f"TestWriter 출력 가드 — {_retry_reason[:80]}"
-
-        if _retry_reason:
-            # TaskReport 집계용: 가드 reject 횟수·사유 누적
-            metrics.quality_gate_rejections += 1
-            metrics.quality_gate_reasons.append(f"test_writer: {_retry_reason}")
-
-            logger.warning("[%s] TestWriter 가드 — 재시도: %s", task.id, _retry_reason)
-            _p({"type": "step", "step": "test_writing_retry", "message": _retry_label})
-            test_scoped = self._run_test_writer(
-                task, workspace, retry=True,
-                on_progress=_agent_p, pause_ctrl=pause_ctrl,
-                enriched_desc=enriched_desc,
-                prior_failure_reason=_retry_reason,
-                prior_explored_paths=list(test_scoped.explored_paths),
-            )
-            _accumulate_tokens(metrics, "test_writer", test_scoped)
-
-            if not test_scoped.succeeded:
-                prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
-                metrics.failed_stage = "test_writing"
-                return PipelineResult.failed(
-                    task,
-                    f"{prefix}TestWriter 실패 (가드 후 재시도도 실패): {test_scoped.answer}",
-                    metrics=metrics,
-                )
-            # 재시도 후에도 출력 가드 위반이면 파이프라인 실패 (기존 retry 한도 소진)
-            _final_reason = _validate_testwriter_output(workspace, task, test_scoped)
-            if _final_reason:
+                # TaskReport 집계용: 가드 reject 횟수·사유 누적
                 metrics.quality_gate_rejections += 1
-                metrics.quality_gate_reasons.append(f"test_writer (retry): {_final_reason}")
-                metrics.failed_stage = "test_writing"
-                return PipelineResult.failed(
-                    task,
-                    f"TestWriter 가드 재시도 후에도 실패: {_final_reason}",
-                    metrics=metrics,
+                metrics.quality_gate_reasons.append(f"test_writer: {_retry_reason}")
+
+                logger.warning("[%s] TestWriter 가드 — 재시도: %s", task.id, _retry_reason)
+                _p({"type": "step", "step": "test_writing_retry", "message": _retry_label})
+                test_scoped = self._run_test_writer(
+                    task, workspace, retry=True,
+                    on_progress=_agent_p, pause_ctrl=pause_ctrl,
+                    enriched_desc=enriched_desc,
+                    prior_failure_reason=_retry_reason,
+                    prior_explored_paths=list(test_scoped.explored_paths),
                 )
+                _accumulate_tokens(metrics, "test_writer", test_scoped)
 
-        test_files = workspace.list_test_files()
-        # 가드가 통과했다면 반드시 파일이 있다 — 방어적으로 한 번 더 확인.
-        if not test_files:
-            metrics.failed_stage = "test_writing"
-            return PipelineResult.failed(
-                task,
-                "[TEST_MISSING] TestWriter 가 tests/ 에 파일을 생성하지 않았습니다.",
-                metrics=metrics,
-            )
+                if not test_scoped.succeeded:
+                    prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
+                    metrics.failed_stage = "test_writing"
+                    return PipelineResult.failed(
+                        task,
+                        f"{prefix}TestWriter 실패 (가드 후 재시도도 실패): {test_scoped.answer}",
+                        metrics=metrics,
+                    )
+                # 재시도 후에도 출력 가드 위반이면 파이프라인 실패 (기존 retry 한도 소진)
+                _final_reason = _validate_testwriter_output(workspace, task, test_scoped)
+                if _final_reason:
+                    metrics.quality_gate_rejections += 1
+                    metrics.quality_gate_reasons.append(f"test_writer (retry): {_final_reason}")
+                    metrics.failed_stage = "test_writing"
+                    return PipelineResult.failed(
+                        task,
+                        f"TestWriter 가드 재시도 후에도 실패: {_final_reason}",
+                        metrics=metrics,
+                    )
 
-        _p({"type": "step", "step": "test_written",
-            "message": f"테스트 파일 생성: {', '.join(test_files)}"})
-        logger.info("[%s] 테스트 파일 생성: %s", task.id, test_files)
-
-        # ── Step 1.5: Quality Gate — TestWriter 종료 직후 1회 실행 ─────────────
-        #
-        # 형식적 유효성(syntax / assertion / test_* 존재 / placeholder 금지 /
-        # import 가능성 / 커버리지 heuristic) 을 룰 기반으로 검증한다.
-        # BLOCKED → TestWriter 재시도 1회; 재시도 후에도 BLOCKED 면 파이프라인 실패.
-        # WARNING → 진행하고 PR body 기록.
-        # 기능적 올바름은 Reviewer 담당이므로 QG 는 여기서 단일 콜만 수행.
-        qg_verdict = run_quality_gate(workspace.tests_dir, task)
-        metrics.quality_gate_verdict = qg_verdict.verdict
-        metrics.quality_gate_rule_results = verdict_to_rule_results_dict(qg_verdict)
-
-        if qg_verdict.verdict == "BLOCKED":
-            blocking_msgs = [
-                f"{rid}: {r.message}" for rid, r in qg_verdict.failed_rules("BLOCKING")
-            ]
-            metrics.quality_gate_rejections += 1
-            metrics.quality_gate_reasons.extend(blocking_msgs)
-            logger.warning(
-                "[%s] Quality Gate BLOCKED — %s", task.id, "; ".join(blocking_msgs),
-            )
-            issues_summary = "; ".join(blocking_msgs)
-            _p({"type": "step", "step": "quality_gate",
-                "message": f"품질 게이트 재시도 — {issues_summary[:120]}"})
-            test_scoped = self._run_test_writer(
-                task, workspace,
-                static_issues=blocking_msgs,
-                on_progress=_agent_p,
-                pause_ctrl=pause_ctrl,
-                enriched_desc=enriched_desc,
-            )
-            _accumulate_tokens(metrics, "test_writer", test_scoped)
-            if not test_scoped.succeeded:
-                prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
-                metrics.failed_stage = "test_writing"
-                return PipelineResult.failed(
-                    task, f"{prefix}TestWriter 품질 보완 실패: {test_scoped.answer}",
-                    metrics=metrics,
-                )
-            # 재시도 후 QG 재실행 — 단일 콜 원칙 유지 (TestWriter 재시도 → 1회 재검증)
-            qg_verdict_retry = run_quality_gate(workspace.tests_dir, task)
-            metrics.quality_gate_verdict = qg_verdict_retry.verdict
-            metrics.quality_gate_rule_results = verdict_to_rule_results_dict(qg_verdict_retry)
-            if qg_verdict_retry.verdict == "BLOCKED":
-                blocking_msgs_retry = [
-                    f"{rid}: {r.message}"
-                    for rid, r in qg_verdict_retry.failed_rules("BLOCKING")
-                ]
-                metrics.quality_gate_rejections += 1
-                metrics.quality_gate_reasons.extend(blocking_msgs_retry)
-                metrics.failed_stage = "test_writing"
-                return PipelineResult.failed(
-                    task,
-                    "Quality Gate 재시도 후에도 BLOCKED: " + "; ".join(blocking_msgs_retry),
-                    metrics=metrics,
-                )
             test_files = workspace.list_test_files()
+            # 가드가 통과했다면 반드시 파일이 있다 — 방어적으로 한 번 더 확인.
             if not test_files:
                 metrics.failed_stage = "test_writing"
                 return PipelineResult.failed(
-                    task, "TestWriter 품질 게이트 후 파일 미생성", metrics=metrics,
+                    task,
+                    "[TEST_MISSING] TestWriter 가 tests/ 에 파일을 생성하지 않았습니다.",
+                    metrics=metrics,
                 )
-            _p({"type": "step", "step": "quality_gate_ok",
-                "message": f"품질 게이트 통과 — {', '.join(test_files)}"})
-            logger.info("[%s] 품질 게이트 통과 후 테스트 파일: %s", task.id, test_files)
-            qg_verdict = qg_verdict_retry
 
-        if qg_verdict.verdict == "WARNING":
-            warning_msgs = [
-                f"{rid}: {r.message}" for rid, r in qg_verdict.failed_rules("WARNING")
-            ]
-            metrics.quality_gate_reasons.extend(warning_msgs)
-            logger.info(
-                "[%s] Quality Gate WARNING (진행) — %s",
-                task.id, "; ".join(warning_msgs),
-            )
-            _p({"type": "step", "step": "quality_gate_warning",
-                "message": f"품질 게이트 WARNING — {('; '.join(warning_msgs))[:120]}"})
+            _p({"type": "step", "step": "test_written",
+                "message": f"테스트 파일 생성: {', '.join(test_files)}"})
+            logger.info("[%s] 테스트 파일 생성: %s", task.id, test_files)
 
-        # TestWriter가 새로 생성한 테스트 파일만 DockerTestRunner에 전달
-        _test_files_after = set(glob.glob(os.path.join(_ws_path, "**", "test_*.py"), recursive=True))
-        _new_test_files = sorted(_test_files_after - _test_files_before)
-        if _new_test_files:
-            _new_test_relative = [os.path.relpath(f, _ws_path) for f in _new_test_files]
-            logger.info("[%s] TestWriter 신규 테스트 파일: %s", task.id, _new_test_relative)
+            # ── Step 1.5: Quality Gate — TestWriter 종료 직후 1회 실행 ─────────────
+            #
+            # 형식적 유효성(syntax / assertion / test_* 존재 / placeholder 금지 /
+            # import 가능성 / 커버리지 heuristic) 을 룰 기반으로 검증한다.
+            # BLOCKED → TestWriter 재시도 1회; 재시도 후에도 BLOCKED 면 파이프라인 실패.
+            # WARNING → 진행하고 PR body 기록.
+            # 기능적 올바름은 Reviewer 담당이므로 QG 는 여기서 단일 콜만 수행.
+            qg_verdict = run_quality_gate(workspace.tests_dir, task)
+            metrics.quality_gate_verdict = qg_verdict.verdict
+            metrics.quality_gate_rule_results = verdict_to_rule_results_dict(qg_verdict)
+
+            if qg_verdict.verdict == "BLOCKED":
+                blocking_msgs = [
+                    f"{rid}: {r.message}" for rid, r in qg_verdict.failed_rules("BLOCKING")
+                ]
+                metrics.quality_gate_rejections += 1
+                metrics.quality_gate_reasons.extend(blocking_msgs)
+                logger.warning(
+                    "[%s] Quality Gate BLOCKED — %s", task.id, "; ".join(blocking_msgs),
+                )
+                issues_summary = "; ".join(blocking_msgs)
+                _p({"type": "step", "step": "quality_gate",
+                    "message": f"품질 게이트 재시도 — {issues_summary[:120]}"})
+                test_scoped = self._run_test_writer(
+                    task, workspace,
+                    static_issues=blocking_msgs,
+                    on_progress=_agent_p,
+                    pause_ctrl=pause_ctrl,
+                    enriched_desc=enriched_desc,
+                )
+                _accumulate_tokens(metrics, "test_writer", test_scoped)
+                if not test_scoped.succeeded:
+                    prefix = "[MAX_ITER] " if _is_max_iter(test_scoped) else ""
+                    metrics.failed_stage = "test_writing"
+                    return PipelineResult.failed(
+                        task, f"{prefix}TestWriter 품질 보완 실패: {test_scoped.answer}",
+                        metrics=metrics,
+                    )
+                # 재시도 후 QG 재실행 — 단일 콜 원칙 유지 (TestWriter 재시도 → 1회 재검증)
+                qg_verdict_retry = run_quality_gate(workspace.tests_dir, task)
+                metrics.quality_gate_verdict = qg_verdict_retry.verdict
+                metrics.quality_gate_rule_results = verdict_to_rule_results_dict(qg_verdict_retry)
+                if qg_verdict_retry.verdict == "BLOCKED":
+                    blocking_msgs_retry = [
+                        f"{rid}: {r.message}"
+                        for rid, r in qg_verdict_retry.failed_rules("BLOCKING")
+                    ]
+                    metrics.quality_gate_rejections += 1
+                    metrics.quality_gate_reasons.extend(blocking_msgs_retry)
+                    metrics.failed_stage = "test_writing"
+                    return PipelineResult.failed(
+                        task,
+                        "Quality Gate 재시도 후에도 BLOCKED: " + "; ".join(blocking_msgs_retry),
+                        metrics=metrics,
+                    )
+                test_files = workspace.list_test_files()
+                if not test_files:
+                    metrics.failed_stage = "test_writing"
+                    return PipelineResult.failed(
+                        task, "TestWriter 품질 게이트 후 파일 미생성", metrics=metrics,
+                    )
+                _p({"type": "step", "step": "quality_gate_ok",
+                    "message": f"품질 게이트 통과 — {', '.join(test_files)}"})
+                logger.info("[%s] 품질 게이트 통과 후 테스트 파일: %s", task.id, test_files)
+                qg_verdict = qg_verdict_retry
+
+            if qg_verdict.verdict == "WARNING":
+                warning_msgs = [
+                    f"{rid}: {r.message}" for rid, r in qg_verdict.failed_rules("WARNING")
+                ]
+                metrics.quality_gate_reasons.extend(warning_msgs)
+                logger.info(
+                    "[%s] Quality Gate WARNING (진행) — %s",
+                    task.id, "; ".join(warning_msgs),
+                )
+                _p({"type": "step", "step": "quality_gate_warning",
+                    "message": f"품질 게이트 WARNING — {('; '.join(warning_msgs))[:120]}"})
+
+            # TestWriter가 새로 생성한 테스트 파일만 DockerTestRunner에 전달
+            _test_files_after = set(glob.glob(os.path.join(_ws_path, "**", "test_*.py"), recursive=True))
+            _new_test_files = sorted(_test_files_after - _test_files_before)
+            if _new_test_files:
+                _new_test_relative = [os.path.relpath(f, _ws_path) for f in _new_test_files]
+                logger.info("[%s] TestWriter 신규 테스트 파일: %s", task.id, _new_test_relative)
+                _created_test_files = list(_new_test_relative)
+            else:
+                _new_test_relative = None  # 전체 실행 (기존 동작)
+                # 신규 생성 파일 없음 — 기존 테스트만 존재 (edge case)
         else:
-            _new_test_relative = None  # 전체 실행 (기존 동작)
+            # NO_TDD 모드: TestWriter / Quality Gate 건너뜀
+            test_files = []
+            _new_test_relative = None
 
         # ── 단계 사이 중단 체크 ───────────────────────────────────────────────
         if pause_ctrl is not None and pause_ctrl.is_stopped:
@@ -685,6 +695,12 @@ class TDDPipeline:
                         f"{', '.join(missing_targets)}",
                         metrics=metrics,
                     )
+
+                if self._skip_test_writer:
+                    # NO_TDD 모드: 테스트 파일 없으므로 DockerTest 건너뜀
+                    docker_result = None
+                    metrics.impl_retries = attempt
+                    break
 
                 task.status = TaskStatus.RUNNING_TESTS
                 _p({"type": "step", "step": "docker_running", "message": "Docker 테스트 실행 중…"})
@@ -827,7 +843,7 @@ class TDDPipeline:
             failure_reason=failure_reason,
             test_result=docker_result,
             review=review,
-            test_files=workspace.list_test_files(),
+            test_files=_created_test_files,
             impl_files=workspace.list_src_files(),
             metrics=metrics,
         )
@@ -914,7 +930,7 @@ class TDDPipeline:
         self,
         task: Task,
         workspace: WorkspaceManager,
-        docker_result: RunResult,
+        docker_result: RunResult | None,
         on_progress=None,
         pause_ctrl=None,
     ) -> ScopedResult:
@@ -1273,8 +1289,9 @@ def _build_implementer_prompt(
 
 
 def _build_reviewer_prompt(
-    task: Task, workspace: WorkspaceManager, docker_result: RunResult
+    task: Task, workspace: WorkspaceManager, docker_result: RunResult | None
 ) -> str:
+    test_summary = docker_result.summary if docker_result is not None else "(NO_TDD 모드 — 테스트 실행 없음)"
     return f"""## 검토 요청
 
 **{task.title}**
@@ -1285,7 +1302,7 @@ def _build_reviewer_prompt(
 
 ## 테스트 실행 결과
 
-{docker_result.summary}
+{test_summary}
 
 ## 워크스페이스 경로
 
