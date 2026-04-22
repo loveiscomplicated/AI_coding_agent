@@ -9,12 +9,12 @@ import os
 from dotenv import load_dotenv
 from agents.roles import (
     MODEL_ROLE_KEYS,
-    ROLE_IMPLEMENTER,
-    ROLE_INTERVENTION,
-    ROLE_MERGE_AGENT,
-    ROLE_ORCHESTRATOR,
-    ROLE_REVIEWER,
-    ROLE_TEST_WRITER,
+)
+from orchestrator.model_defaults import (
+    COMPLEXITY_ROLE_MODEL_MAP as _BASE_COMPLEXITY_ROLE_MODEL_MAP,
+    DEFAULT_ROLE_MODEL_MAP as _BASE_DEFAULT_ROLE_MODEL_MAP,
+    clone_complexity_role_model_map,
+    clone_role_model_map,
 )
 
 load_dotenv()
@@ -83,14 +83,9 @@ def _role_model(provider: str, model: str) -> dict[str, str]:
     return {"provider": provider, "model": model}
 
 
-DEFAULT_ROLE_MODEL_MAP: dict[str, dict[str, str]] = {
-    ROLE_TEST_WRITER: _role_model("claude", "claude-haiku-4-5-20251001"),
-    ROLE_IMPLEMENTER: _role_model("claude", "claude-haiku-4-5-20251001"),
-    ROLE_REVIEWER: _role_model("claude", "claude-haiku-4-5-20251001"),
-    ROLE_MERGE_AGENT: _role_model("claude", "claude-haiku-4-5-20251001"),
-    ROLE_ORCHESTRATOR: _role_model("claude", "claude-opus-4-6"),
-    ROLE_INTERVENTION: _role_model("claude", "claude-opus-4-6"),
-}
+DEFAULT_ROLE_MODEL_MAP: dict[str, dict[str, str]] = clone_role_model_map(
+    _BASE_DEFAULT_ROLE_MODEL_MAP
+)
 
 for _role in MODEL_ROLE_KEYS:
     _override = _parse_model_ref_env(f"LLM_ROLE_{_role.upper()}")
@@ -104,32 +99,9 @@ for _role in MODEL_ROLE_KEYS:
 # 자동으로 선택한다. 환경 변수 override 형식:
 # COMPLEXITY_SIMPLE_ROLE_TEST_WRITER=openai:gpt-4.1-mini
 
-COMPLEXITY_ROLE_MODEL_MAP: dict[str, dict[str, dict[str, str]]] = {
-    "simple": {
-        ROLE_TEST_WRITER: _role_model("openai", "gpt-4.1-mini"),
-        ROLE_IMPLEMENTER: _role_model("openai", "gpt-4.1-mini"),
-        ROLE_REVIEWER: _role_model("openai", "gpt-4.1-mini"),
-        ROLE_MERGE_AGENT: _role_model("openai", "gpt-4.1-mini"),
-        ROLE_ORCHESTRATOR: _role_model("gemini", "gemini-2.5-flash-lite"),
-        ROLE_INTERVENTION: _role_model("gemini", "gemini-2.5-flash-lite"),
-    },
-    "standard": {
-        ROLE_TEST_WRITER: _role_model("openai", "gpt-5-mini"),
-        ROLE_IMPLEMENTER: _role_model("openai", "gpt-5-mini"),
-        ROLE_REVIEWER: _role_model("openai", "gpt-5-mini"),
-        ROLE_MERGE_AGENT: _role_model("openai", "gpt-5-mini"),
-        ROLE_ORCHESTRATOR: _role_model("gemini", "gemini-2.5-flash"),
-        ROLE_INTERVENTION: _role_model("gemini", "gemini-2.5-flash"),
-    },
-    "complex": {
-        ROLE_TEST_WRITER: _role_model("openai", "gpt-5"),
-        ROLE_IMPLEMENTER: _role_model("openai", "gpt-5"),
-        ROLE_REVIEWER: _role_model("openai", "gpt-5"),
-        ROLE_MERGE_AGENT: _role_model("openai", "gpt-5"),
-        ROLE_ORCHESTRATOR: _role_model("gemini", "gemini-3-pro-preview"),
-        ROLE_INTERVENTION: _role_model("gemini", "gemini-3-pro-preview"),
-    },
-}
+COMPLEXITY_ROLE_MODEL_MAP: dict[str, dict[str, dict[str, str]]] = (
+    clone_complexity_role_model_map(_BASE_COMPLEXITY_ROLE_MODEL_MAP)
+)
 
 for _tier in ("simple", "standard", "complex"):
     for _role in MODEL_ROLE_KEYS:
