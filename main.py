@@ -87,8 +87,8 @@ def _parse_args() -> argparse.Namespace:
 
 
 _DEFAULT_MODELS: dict[str, str] = {
-    "ollama": "devstral:24b",
-    "openai": "gpt-4o",
+    "ollama": "kimi-k2.5:cloud",
+    "openai": "gpt-5.4-mini",
     "claude": "claude-sonnet-4-6",
     "gemini": "gemini-2.5-pro-preview-06-05",
     "glm": "glm-5.1",
@@ -261,7 +261,9 @@ def _print_model_list(provider: str, client) -> None:
         table.add_row(m, tag)
 
     ui.console.print(table)
-    ui.console.print(f"[dim]총 {len(models)}개  ·  기본값: {default or '(없음)'}[/dim]\n")
+    ui.console.print(
+        f"[dim]총 {len(models)}개  ·  기본값: {default or '(없음)'}[/dim]\n"
+    )
 
 
 # ── 메인 REPL ────────────────────────────────────────────────────────────────
@@ -275,14 +277,17 @@ def main() -> None:
     # 경로에서 터미널이 자동 복원된다 (SIGKILL 제외).
     import atexit
     import termios as _termios
+
     if sys.stdin.isatty():
         try:
             _saved_tty = _termios.tcgetattr(sys.stdin.fileno())
+
             def _restore_tty() -> None:
                 try:
                     _termios.tcsetattr(sys.stdin.fileno(), _termios.TCSANOW, _saved_tty)
                 except Exception:
                     pass
+
             atexit.register(_restore_tty)
         except Exception:
             pass
@@ -307,7 +312,9 @@ def main() -> None:
     elif args.provider is None or args.provider == agent_cfg.provider:
         model = agent_cfg.model
     else:
-        model = _DEFAULT_MODELS.get(args.provider or agent_cfg.provider, _DEFAULT_MODELS["claude"])
+        model = _DEFAULT_MODELS.get(
+            args.provider or agent_cfg.provider, _DEFAULT_MODELS["claude"]
+        )
 
     # provider 결정: CLI -p > 모델명 prefix 자동 추론 > config > 기본값
     provider = args.provider or _infer_provider(model) or agent_cfg.provider
@@ -416,6 +423,8 @@ def main() -> None:
 
         if not raw.strip():
             continue
+
+        ui.print_user_input(raw, session.session_id[:8])
 
         # ── 슬래시 명령어 처리 ────────────────────────────────────────────────
         result = handle(raw, mgr, session, tracker=tracker)
