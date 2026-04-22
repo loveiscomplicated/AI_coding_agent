@@ -24,6 +24,7 @@ WorkspaceManager 는 태스크 실행을 위한 격리된 작업 디렉토리를
 from __future__ import annotations
 
 import ast
+import hashlib
 import logging
 import shutil
 import subprocess
@@ -255,6 +256,13 @@ class WorkspaceManager:
     def list_src_files(self) -> list[str]:
         """src/ 디렉토리 안의 파일만 반환."""
         return [f for f in self.list_files() if f.startswith("src/")]
+
+    def snapshot_src_files(self) -> dict[str, str]:
+        """현재 src/ 파일들의 내용 다이제스트 스냅샷을 반환한다."""
+        return {
+            rel_path: self._file_digest(self.path / rel_path)
+            for rel_path in self.list_src_files()
+        }
 
     # ── 프로퍼티 ─────────────────────────────────────────────────────────────
 
@@ -599,6 +607,14 @@ class WorkspaceManager:
             if not init.exists():
                 init.touch()
             current = current.parent
+
+    def _file_digest(self, path: Path) -> str:
+        """파일 내용을 안정적으로 비교하기 위한 SHA-256 다이제스트를 반환한다."""
+        hasher = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
 
 
 def _extract_python_signatures(source: str, rel_path: str) -> str:
