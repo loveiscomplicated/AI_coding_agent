@@ -40,6 +40,8 @@ def inline_select(
     message: str | None = None,
     detail: str | None = None,
     default_index: int = 0,
+    *,
+    allow_back: bool = False,
 ) -> str | None:
     """
     터미널에 인라인 선택기를 표시하고 사용자 선택을 반환한다.
@@ -51,7 +53,8 @@ def inline_select(
         default_index: 초기 커서 위치
 
     Returns:
-        선택된 option의 value. Esc 취소 시 None.
+        선택된 option의 value.
+        Esc 취소 시 None, allow_back=True 에서 ← 입력 시 "__back__".
     """
     from cli.interface import console
 
@@ -83,6 +86,11 @@ def inline_select(
         result[0] = options[selected[0]].value
         event.app.exit()
 
+    @kb.add("right")
+    def _right(event):
+        result[0] = options[selected[0]].value
+        event.app.exit()
+
     @kb.add("escape")
     def _escape(event):
         result[0] = None
@@ -93,6 +101,12 @@ def inline_select(
     def _quit(event):
         result[0] = None
         event.app.exit()
+
+    if allow_back:
+        @kb.add("left")
+        def _left(event):
+            result[0] = "__back__"
+            event.app.exit()
 
     def _render():
         lines: list[tuple[str, str]] = []
@@ -121,10 +135,17 @@ def inline_select(
         full_screen=False,
         erase_when_done=True,
     )
-    app.run()
+    from cli.interrupt import pause_stdin_readers, resume_stdin_readers
+    pause_stdin_readers()
+    try:
+        app.run()
+    finally:
+        resume_stdin_readers()
 
     if result[0] is None:
         console.print("  [dim]✗ 취소됨[/dim]")
+    elif result[0] == "__back__":
+        console.print("  [dim]← 이전 단계[/dim]")
     else:
         chosen_label = next(
             (o.label for o in options if o.value == result[0]),

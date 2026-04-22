@@ -587,34 +587,33 @@ class ApprovalHandler:
 
         _show_tool_preview(tc)
 
+        from cli.selector import SelectOption, inline_select
+
+        options = [
+            SelectOption(label="승인", value="yes"),
+            SelectOption(label="항상 승인", value="always"),
+            SelectOption(label="거부", value="no"),
+        ]
         try:
-            answer = _prompt_session.prompt(
-                HTML(
-                    "<ansiyellow><b>"
-                    "  승인하시겠습니까? [Y/n/a(항상)]: "
-                    "</b></ansiyellow>"
-                )
-            )
-            console.print()
-            answer = answer.strip().lower()
-
-            if answer in ("a", "always", "항상"):
-                self._always.add(tc.name)
-                console.print(
-                    f"  [{_C_INFO}]{tc.name} 은(는) 이후 자동 승인됩니다.[/{_C_INFO}]"
-                )
-                self._record(tc)
-                return True
-
-            approved = answer in ("y", "yes", "")
-            if approved:
-                self._record(tc)
-            return approved
-
+            selected = inline_select(options)
         except (KeyboardInterrupt, EOFError):
             console.print()
             console.print(f"[{_C_INFO}]취소되었습니다.[/{_C_INFO}]")
             return False
+
+        if selected == "always":
+            self._always.add(tc.name)
+            console.print(
+                f"  [{_C_INFO}]{tc.name} 은(는) 이후 자동 승인됩니다.[/{_C_INFO}]"
+            )
+            self._record(tc)
+            return True
+
+        if selected == "yes":
+            self._record(tc)
+            return True
+
+        return False
 
 
 def get_input(session_id_short: str) -> str:

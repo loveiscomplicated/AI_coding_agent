@@ -15,12 +15,15 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from agents.roles import ROLE_INTERVENTION, ROLE_TEST_WRITER, ROLE_IMPLEMENTER, resolve_model_for_role
 from cli.interface import print_pipeline_result, print_task_summary
 from cli.pipeline_confirm import ConfirmType, PipelineConfirmManager
 from cli.retry_prompt import RetryDecision, RetryPrompt
 from cli.task_converter import ConversionError, TaskConverter
 from llm import LLMConfig, create_client
+from orchestrator.escalation import TIER_INTERNAL_MAX_RETRIES, resolve_tier_chain, should_escalate_tier
 from orchestrator.git_workflow import GitWorkflow
+from orchestrator.intervention import create_intervention_llms, set_complexity_routing, set_llm, set_model_config, classify_and_analyze
 from orchestrator.pipeline import TDDPipeline, PipelineResult
 from orchestrator.task import Task
 from orchestrator.workspace import WorkspaceManager
@@ -62,6 +65,8 @@ class _StopController:
 
     def __init__(self) -> None:
         self._stopped = False
+        self._paused = threading.Event()
+        self._yielded = threading.Event()
         self._thread: threading.Thread | None = None
 
     def start_q_listener(self) -> None:
@@ -69,29 +74,53 @@ class _StopController:
         import sys
         if not sys.stdin.isatty():
             return
+        from cli.interrupt import register_stdin_reader
+        register_stdin_reader(self)
         self._thread = threading.Thread(target=self._listen_q, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
+        from cli.interrupt import unregister_stdin_reader
+        unregister_stdin_reader(self)
         self._stopped = True
+
+    def pause(self) -> None:
+        """백그라운드 스레드가 터미널을 반환할 때까지 블록하며 일시정지한다."""
+        self._yielded.clear()
+        self._paused.set()
+        self._yielded.wait(timeout=0.3)
+
+    def resume(self) -> None:
+        """일시정지를 해제한다."""
+        self._paused.clear()
 
     def _listen_q(self) -> None:
         import os
         import sys
         import select
+        import time
         import tty
         import termios
 
         fd = sys.stdin.fileno()
         try:
             old = termios.tcgetattr(fd)
-            tty.setraw(fd, termios.TCSANOW)
+            tty.setcbreak(fd, termios.TCSANOW)
             try:
                 while not self._stopped:
+                    if self._paused.is_set():
+                        termios.tcsetattr(fd, termios.TCSANOW, old)
+                        self._yielded.set()
+                        while self._paused.is_set() and not self._stopped:
+                            time.sleep(0.05)
+                        if self._stopped:
+                            return
+                        tty.setcbreak(fd, termios.TCSANOW)
+                        continue
                     readable, _, _ = select.select([fd], [], [], 0.2)
                     if readable:
                         ch = os.read(fd, 1)
-                        if ch in (b"q", b"Q", b"\x03"):   # Q 또는 Ctrl+C
+                        if ch in (b"q", b"Q"):   # Q로 중단 (Ctrl+C는 SIGINT로 처리)
                             self._stopped = True
                             break
             finally:
@@ -133,16 +162,18 @@ class InstantRunner:
         converter: TaskConverter,
         confirm: PipelineConfirmManager,
         retry: RetryPrompt,
-        llm_config_fast: LLMConfig,
-        llm_config_capable: LLMConfig,
+        default_role_models: dict[str, dict[str, str]],
+        complexity_role_models: dict[str, dict[str, dict[str, str]]],
+        auto_select_by_complexity: bool = True,
         mode: RunMode = RunMode.FULL_TDD,
     ):
         self.repo_path = repo_path
         self.converter = converter
         self.confirm = confirm
         self.retry = retry
-        self.llm_config_fast = llm_config_fast
-        self.llm_config_capable = llm_config_capable
+        self.default_role_models = default_role_models
+        self.complexity_role_models = complexity_role_models
+        self.auto_select_by_complexity = auto_select_by_complexity
         self.mode = mode
 
     async def run(self, user_input: str) -> InstantRunResult:
@@ -195,6 +226,7 @@ class InstantRunner:
                     user_aborted=False, retry_count=0, total_auto_retries=0,
                 )
 
+        self._configure_intervention_llms()
         pipeline = self._build_pipeline()
         manual_retry_count = 0
         total_auto_retries = 0
@@ -202,50 +234,101 @@ class InstantRunner:
 
         # ── 3–6. 파이프라인 + 사용자 재시도 루프 ────────────────────────────
         while True:
-            stop_ctrl = _StopController()
-            _exc: BaseException | None = None
+            succeeded = False
+            user_aborted = False
+            manual_restart = False
+            hints_tried: list[str] = []
+            tier_chain = (
+                resolve_tier_chain(task.complexity)
+                if self.auto_select_by_complexity
+                else [None]
+            )
 
-            with WorkspaceManager(task, self.repo_path) as workspace:
-                initial_src_snapshot = workspace.snapshot_src_files()
-                stop_ctrl.start_q_listener()
-                try:
-                    result = pipeline.run(task, workspace, pause_ctrl=stop_ctrl)
+            for tier_idx, current_tier in enumerate(tier_chain):
+                orch_attempt = 0
+                while True:
+                    try:
+                        result = self._run_pipeline_once(task, pipeline, tier=current_tier)
+                    except KeyboardInterrupt:
+                        user_aborted = True
+                        break
+                    except Exception as exc:
+                        logger.exception("파이프라인 실행 중 예외 발생: %s", exc)
+                        decision = self.retry.ask_on_pipeline_error(str(exc))
+                        if decision.action == "retry":
+                            manual_retry_count += 1
+                            manual_restart = True
+                            break
+                        return InstantRunResult(
+                            task=task, success=False, pipeline_result=last_result,
+                            user_aborted=True, retry_count=manual_retry_count,
+                            total_auto_retries=total_auto_retries,
+                        )
+
                     last_result = result
                     total_auto_retries += result.metrics.impl_retries
-                except (Exception, KeyboardInterrupt) as exc:
-                    # with 블록 안에서 잡아 __exit__ 이 성공 경로로 workspace 정리
-                    _exc = exc
-                    workspace.cleanup()
-                else:
                     if result.succeeded:
-                        # ── 7. 스킵 불가능 확인 ──────────────────────────────
-                        ok = self._check_post_pipeline(
-                            task, workspace, result, initial_src_snapshot
-                        )
-                        if ok:
-                            # ── 8. GitWorkflow 로컬 커밋 ─────────────────────
-                            git = GitWorkflow(self.repo_path)
-                            git.run(task, workspace, result, no_push=True)
-                finally:
-                    stop_ctrl.stop()
+                        succeeded = True
+                        break
 
-            if _exc is not None:
-                if isinstance(_exc, KeyboardInterrupt):
-                    return InstantRunResult(
-                        task=task, success=False, pipeline_result=last_result,
-                        user_aborted=True, retry_count=manual_retry_count,
-                        total_auto_retries=total_auto_retries,
-                    )
-                logger.exception("파이프라인 실행 중 예외 발생: %s", _exc)
-                decision = self.retry.ask_on_pipeline_error(str(_exc))
-                if decision.action == "retry":
-                    manual_retry_count += 1
+                    failure_reason = result.failure_reason or "(알 수 없는 오류)"
+                    is_last_tier_attempt = orch_attempt >= TIER_INTERNAL_MAX_RETRIES
+                    if not is_last_tier_attempt:
+                        analysis = classify_and_analyze(
+                            task,
+                            failure_reason,
+                            orch_attempt + 1,
+                            test_stdout=result.test_result.stdout if result.test_result else "",
+                            previous_hints=hints_tried,
+                            role_models=None,
+                            tier=current_tier,
+                        )
+                        if analysis.should_retry:
+                            hints_tried.append(analysis.hint)
+                            task.last_error = (
+                                f"[Intervention 힌트 #{orch_attempt + 1}]\n{analysis.hint}\n\n"
+                                f"이전 오류:\n{task.last_error or ''}"
+                            )
+                            task.failure_reason = ""
+                            orch_attempt += 1
+                            continue
+                        is_last_tier_attempt = True
+
+                    if (
+                        self.auto_select_by_complexity
+                        and tier_idx < len(tier_chain) - 1
+                        and should_escalate_tier(failure_reason)
+                    ):
+                        task.failure_reason = ""
+                        task.last_error = ""
+                        break
+
+                    break
+
+                if manual_restart or user_aborted or succeeded:
+                    break
+                if last_result and last_result.succeeded:
+                    break
+                if (
+                    last_result is not None
+                    and last_result.failure_reason
+                    and self.auto_select_by_complexity
+                    and tier_idx < len(tier_chain) - 1
+                    and should_escalate_tier(last_result.failure_reason)
+                ):
                     continue
+                break
+
+            if user_aborted:
                 return InstantRunResult(
                     task=task, success=False, pipeline_result=last_result,
                     user_aborted=True, retry_count=manual_retry_count,
                     total_auto_retries=total_auto_retries,
                 )
+            if manual_restart:
+                continue
+            if last_result is not None and last_result.succeeded:
+                break
 
             # 예외 없는 경로 — 성공이면 루프 탈출
             if last_result is not None and last_result.succeeded:
@@ -304,15 +387,77 @@ class InstantRunner:
 
     def _build_pipeline(self) -> TDDPipeline:
         from docker.runner import DockerTestRunner
+
         skip = self.mode == RunMode.NO_TDD
-        agent_llm = create_client("claude", self.llm_config_fast)
-        impl_llm = create_client("claude", self.llm_config_capable)
+        tw_provider, tw_model = resolve_model_for_role(
+            role=ROLE_TEST_WRITER,
+            role_models=None,
+            default_role_models=self.default_role_models,
+        )
+        impl_provider, impl_model = resolve_model_for_role(
+            role=ROLE_IMPLEMENTER,
+            role_models=None,
+            default_role_models=self.default_role_models,
+        )
+        agent_llm = create_client(tw_provider, LLMConfig(model=tw_model, max_tokens=8192))
+        impl_llm = create_client(impl_provider, LLMConfig(model=impl_model, max_tokens=8192))
         return TDDPipeline(
             agent_llm=agent_llm,
             implementer_llm=impl_llm,
             test_runner=DockerTestRunner(),
+            default_role_models=self.default_role_models,
+            auto_select_by_complexity=self.auto_select_by_complexity,
+            complexity_map=self.complexity_role_models,
             skip_test_writer=skip,
         )
+
+    def _configure_intervention_llms(self) -> None:
+        provider, model = resolve_model_for_role(
+            role=ROLE_INTERVENTION,
+            role_models=None,
+            default_role_models=self.default_role_models,
+        )
+        analyze_llm, report_llm = create_intervention_llms(provider, model)
+        set_llm(analyze_llm, report_llm)
+        set_model_config(self.default_role_models)
+        # CLI TDD에서는 intervention 자체는 항상 capable 계열을 유지한다.
+        set_complexity_routing(False, None)
+
+    def _run_pipeline_once(
+        self,
+        task: Task,
+        pipeline: TDDPipeline,
+        *,
+        tier: str | None,
+    ) -> PipelineResult:
+        stop_ctrl = _StopController()
+        _exc: BaseException | None = None
+        last_result: PipelineResult | None = None
+
+        with WorkspaceManager(task, self.repo_path) as workspace:
+            initial_src_snapshot = workspace.snapshot_src_files()
+            stop_ctrl.start_q_listener()
+            try:
+                result = pipeline.run(task, workspace, pause_ctrl=stop_ctrl, tier=tier)
+                last_result = result
+            except (Exception, KeyboardInterrupt) as exc:
+                _exc = exc
+                workspace.cleanup()
+            else:
+                if result.succeeded:
+                    ok = self._check_post_pipeline(
+                        task, workspace, result, initial_src_snapshot
+                    )
+                    if ok:
+                        git = GitWorkflow(self.repo_path)
+                        git.run(task, workspace, result, no_push=True)
+            finally:
+                stop_ctrl.stop()
+
+        if _exc is not None:
+            raise _exc
+        assert last_result is not None
+        return last_result
 
     def _check_post_pipeline(
         self,

@@ -18,7 +18,14 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
 
 from cli import commands, interface as ui
 from cli.commands import Action
-from cli.config import AgentConfig, find_repo_root, load_config
+from cli.config import (
+    AgentConfig,
+    COMPLEXITY_TIERS,
+    ROLE_MINI_MEETING,
+    WORKER_ROLE_KEYS,
+    find_repo_root,
+    load_config,
+)
 from cli.interface import (
     CLIMode,
     configure_tdd_availability,
@@ -168,7 +175,7 @@ def test_tdd_switches_blocked_without_git(monkeypatch):
 
 
 def test_config_loads_from_toml(isolated_home, clean_env):
-    """agent.toml의 모든 필드가 정확히 파싱된다."""
+    """legacy fast/capable 설정도 새 역할별 구조로 마이그레이션된다."""
     repo = isolated_home / "repo"
     repo.mkdir()
     (repo / "agent.toml").write_text(
@@ -195,10 +202,16 @@ auto_push = true
     cfg = load_config(str(repo))
 
     assert cfg.provider == "glm"
-    assert cfg.model_fast == "glm-fast"
-    assert cfg.model_capable == "glm-pro"
-    assert cfg.provider_fast == "ollama"
-    assert cfg.provider_capable == "claude"
+    assert cfg.default_role_models["orchestrator"] == {"provider": "claude", "model": "glm-pro"}
+    assert cfg.default_role_models["intervention"] == {"provider": "claude", "model": "glm-pro"}
+    assert cfg.default_role_models[ROLE_MINI_MEETING] == {"provider": "claude", "model": "glm-pro"}
+    for role in WORKER_ROLE_KEYS:
+        assert cfg.default_role_models[role] == {"provider": "ollama", "model": "glm-fast"}
+        for tier in COMPLEXITY_TIERS:
+            assert cfg.complexity_role_models[tier][role] == {
+                "provider": "ollama",
+                "model": "glm-fast",
+            }
     assert cfg.language == "typescript"
     assert cfg.test_framework == "vitest"
     assert cfg.base_branch == "develop"
@@ -228,8 +241,8 @@ model_capable = "toml-capable"
 
     cfg = load_config(str(repo))
     assert cfg.provider == "openai"
-    assert cfg.model_fast == "env-fast"
-    assert cfg.model_capable == "toml-capable"  # 환경변수 없음 → toml 값
+    assert cfg.default_role_models["test_writer"]["model"] == "env-fast"
+    assert cfg.default_role_models["intervention"]["model"] == "toml-capable"
 
     # 기존 이름이 fallback 으로 쓰인다
     clean_env.delenv("LLM_MODEL_FAST", raising=False)
@@ -237,13 +250,13 @@ model_capable = "toml-capable"
     clean_env.setenv("LLM_DEFAULT_MODEL", "legacy-capable")
 
     cfg = load_config(str(repo))
-    assert cfg.model_fast == "legacy-fast"
-    assert cfg.model_capable == "legacy-capable"
+    assert cfg.default_role_models["test_writer"]["model"] == "legacy-fast"
+    assert cfg.default_role_models["intervention"]["model"] == "legacy-capable"
 
     # 새 이름과 기존 이름이 둘 다 있으면 새 이름이 이긴다
     clean_env.setenv("LLM_MODEL_FAST", "new-fast")
     cfg = load_config(str(repo))
-    assert cfg.model_fast == "new-fast"
+    assert cfg.default_role_models["test_writer"]["model"] == "new-fast"
 
 
 # ── 6) toml 없을 때 기본값 ────────────────────────────────────────────────────

@@ -21,7 +21,7 @@ from cli.instant_runner import InstantRunner, InstantRunResult, RunMode
 from cli.pipeline_confirm import ConfirmType, PipelineConfirmManager
 from cli.retry_prompt import RetryDecision, RetryPrompt
 from cli.task_converter import ConversionResult, TaskConverter
-from llm import LLMConfig
+from cli.config import default_complexity_role_models, default_role_models
 from orchestrator.pipeline import PipelineMetrics, PipelineResult, ReviewResult
 from orchestrator.task import Task
 
@@ -89,16 +89,17 @@ def _make_runner(
     converter: TaskConverter | None = None,
     confirm: PipelineConfirmManager | None = None,
     retry: RetryPrompt | None = None,
+    auto_select_by_complexity: bool = True,
     mode: RunMode = RunMode.FULL_TDD,
 ) -> InstantRunner:
-    cfg = LLMConfig(model="claude-haiku-4-5-20251001", max_tokens=100)
     return InstantRunner(
         repo_path="/tmp/repo",
         converter=converter or MagicMock(spec=TaskConverter),
         confirm=confirm or MagicMock(spec=PipelineConfirmManager),
         retry=retry or MagicMock(spec=RetryPrompt),
-        llm_config_fast=cfg,
-        llm_config_capable=cfg,
+        default_role_models=default_role_models(),
+        complexity_role_models=default_complexity_role_models(),
+        auto_select_by_complexity=auto_select_by_complexity,
         mode=mode,
     )
 
@@ -106,6 +107,7 @@ def _make_runner(
 def _inject_pipeline(runner: InstantRunner, mock_pipeline) -> None:
     """_build_pipeline을 mock pipeline 반환하도록 오버라이드한다."""
     runner._build_pipeline = lambda: mock_pipeline
+    runner._configure_intervention_llms = lambda: None
 
 
 def _stub_workspace_cls(src_files=None, test_files=None, src_snapshots=None):
@@ -191,6 +193,7 @@ def test_no_tdd_skips_test_writer(mock_pipeline_cls, mock_ws_cls, mock_git_cls, 
     mock_git_cls.return_value.run.return_value = ""
 
     runner = _make_runner(converter=converter, confirm=confirm, mode=RunMode.NO_TDD)
+    runner._configure_intervention_llms = lambda: None
 
     with patch("cli.instant_runner.print_pipeline_result"), \
          patch("cli.instant_runner.print_task_summary"):
@@ -241,7 +244,12 @@ def test_auto_retry_then_user_retry():
     retry = MagicMock(spec=RetryPrompt)
     retry.ask_on_test_failure.return_value = RetryDecision(action="retry")
 
-    runner = _make_runner(converter=converter, confirm=confirm, retry=retry)
+    runner = _make_runner(
+        converter=converter,
+        confirm=confirm,
+        retry=retry,
+        auto_select_by_complexity=False,
+    )
     _inject_pipeline(runner, mock_pipeline)
 
     with patch("cli.instant_runner.WorkspaceManager", ws_cls), \
@@ -280,7 +288,12 @@ def test_user_hint_injected():
         action="retry_with_hint", hint="힌트텍스트"
     )
 
-    runner = _make_runner(converter=converter, confirm=confirm, retry=retry)
+    runner = _make_runner(
+        converter=converter,
+        confirm=confirm,
+        retry=retry,
+        auto_select_by_complexity=False,
+    )
     _inject_pipeline(runner, mock_pipeline)
 
     with patch("cli.instant_runner.WorkspaceManager", ws_cls), \

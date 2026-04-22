@@ -23,14 +23,16 @@ import re
 import sys
 from typing import Callable
 
+from agents.roles import resolve_model_for_role
 from cli import interface as ui
 from cli.commands import Action, handle
-from cli.config import find_repo_root, load_config as load_cli_config
+from cli.config import ROLE_MINI_MEETING, find_repo_root, load_config as load_cli_config
 from cli.instant_runner import InstantRunner, RunMode
 from cli.interface import CLIMode, get_current_mode, set_mode
 from cli.interrupt import EscInterruptHandler
 from cli.pipeline_confirm import PipelineConfirmManager
 from cli.retry_prompt import RetryPrompt
+from cli.settings_wizard import run_settings_wizard
 from cli.task_converter import TaskConverter
 from core.config import load_config
 from core.loop import ReactLoop
@@ -200,20 +202,24 @@ def _run_turn(
 
 
 def _build_tdd_runner(repo_root: str, cli_cfg) -> InstantRunner:
-    llm_cfg_fast = LLMConfig(model=cli_cfg.model_fast)
-    llm_cfg_capable = LLMConfig(model=cli_cfg.model_capable)
+    meeting_provider, meeting_model = resolve_model_for_role(
+        role=ROLE_MINI_MEETING,
+        role_models=None,
+        default_role_models=cli_cfg.default_role_models,
+    )
     converter = TaskConverter(
         repo_path=repo_root,
-        llm_config=llm_cfg_capable,
-        provider=cli_cfg.provider,
+        llm_config=LLMConfig(model=meeting_model),
+        provider=meeting_provider,
     )
     return InstantRunner(
         repo_path=repo_root,
         converter=converter,
         confirm=PipelineConfirmManager(),
         retry=RetryPrompt(),
-        llm_config_fast=llm_cfg_fast,
-        llm_config_capable=llm_cfg_capable,
+        default_role_models=cli_cfg.default_role_models,
+        complexity_role_models=cli_cfg.complexity_role_models,
+        auto_select_by_complexity=cli_cfg.auto_select_by_complexity,
         mode=RunMode.FULL_TDD,
     )
 
@@ -262,6 +268,29 @@ def _print_model_list(provider: str, client) -> None:
 
 
 def main() -> None:
+    # ── 터미널 상태 보존 (atexit로 복원 보장) ────────────────────────────────
+    # EscInterruptHandler / _StopController가 tty.setcbreak()로 터미널을
+    # 수정하는 동안 프로세스가 비정상 종료되면 ECHO/ICANON이 꺼진 채 남는다.
+    # atexit에 원본 상태를 등록해두면 Ctrl-C·예외·정상 종료 등 대부분의
+    # 경로에서 터미널이 자동 복원된다 (SIGKILL 제외).
+    import atexit
+    import termios as _termios
+    if sys.stdin.isatty():
+        try:
+            _saved_tty = _termios.tcgetattr(sys.stdin.fileno())
+            def _restore_tty() -> None:
+                try:
+                    _termios.tcsetattr(sys.stdin.fileno(), _termios.TCSANOW, _saved_tty)
+                except Exception:
+                    pass
+            atexit.register(_restore_tty)
+        except Exception:
+            pass
+
+    if len(sys.argv) > 1 and sys.argv[1] == "set":
+        run_settings_wizard(find_repo_root())
+        return
+
     args = _parse_args()
 
     logging.basicConfig(
