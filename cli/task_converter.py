@@ -350,7 +350,7 @@ class TaskConverter:
         repo_path: 프로젝트 루트 (PROJECT_STRUCTURE.md 위치 + @path 해석 기준)
         llm_config: 메인 CLI 세션의 LLMConfig (model/temperature/max_tokens/extra 재사용)
         provider: LLM provider 문자열 (claude/openai/ollama/glm/gemini)
-        client: 사전 빌드된 LLM 클라이언트 (주로 테스트용 DI). None이면 create_client 호출.
+        client: 사전 빌드된 LLM 클라이언트 (주로 테스트용 DI). None이면 첫 convert 시 생성.
         max_turns: 최대 회의 턴 (기본 10). 초과 시 ConversionError.
         input_fn: 사용자 입력 함수 (테스트용 DI). 기본: ui.get_input.
         output_fn: LLM 응답 출력 함수. 기본: ui.print_answer.
@@ -380,7 +380,13 @@ class TaskConverter:
             system_prompt=system_text,
             extra=dict(llm_config.extra),
         )
-        self._client = client if client is not None else create_client(provider, self._config)
+        self._provider = provider
+        self._client = client
+
+    def _get_client(self) -> BaseLLMClient:
+        if self._client is None:
+            self._client = create_client(self._provider, self._config)
+        return self._client
 
     async def convert(
         self,
@@ -438,7 +444,7 @@ class TaskConverter:
             )
 
         for turn in range(1, self.max_turns + 1):
-            resp = await asyncio.to_thread(self._client.chat, messages)
+            resp = await asyncio.to_thread(self._get_client().chat, messages)
             text = _response_to_text(resp)
             raw_json, preamble = _extract_delimited_json(text)
 
@@ -464,7 +470,7 @@ class TaskConverter:
                     f"{_DELIMITER_END} 사이에 유효한 Task JSON만 다시 생성해주세요."
                 )
                 messages.append(Message(role="user", content=retry_prompt))
-                retry_resp = await asyncio.to_thread(self._client.chat, messages)
+                retry_resp = await asyncio.to_thread(self._get_client().chat, messages)
                 retry_text = _response_to_text(retry_resp)
                 retry_raw, _ = _extract_delimited_json(retry_text)
                 messages.append(Message(role="assistant", content=retry_text))
