@@ -22,6 +22,13 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 from cli import interface as ui
+from cli.interface import (
+    CLIMode,
+    ModeChangeStatus,
+    get_current_mode,
+    get_tdd_unavailable_message,
+    request_mode_change,
+)
 
 if TYPE_CHECKING:
     from core.undo import ChangeTracker
@@ -85,6 +92,12 @@ def handle(
             return _delete(mgr, session)
         case "/undo":
             return _undo(tracker, undo_all=arg.strip().lower() == "all")
+        case "/mode":
+            return _mode(arg)
+        case "/tdd":
+            return _set_mode(CLIMode.TDD)
+        case "/normal":
+            return _set_mode(CLIMode.NORMAL)
         case "/exit" | "/quit":
             return CommandResult(action=Action.EXIT)
         case _:
@@ -107,6 +120,9 @@ def _help() -> CommandResult:
         ("/delete",        "현재 세션 삭제 후 새 세션 시작"),
         ("/undo",          "마지막 파일 변경 되돌리기"),
         ("/undo all",      "이번 세션의 모든 파일 변경 되돌리기"),
+        ("/mode [tdd|normal]", "현재 모드 확인 또는 전환"),
+        ("/tdd",           "TDD 모드로 전환 (Shift+Tab 으로도 가능)"),
+        ("/normal",        "일반 모드로 전환"),
         ("/exit",          "종료"),
         ("",               ""),
     ]
@@ -209,3 +225,30 @@ def _delete(mgr: SessionManager, session: Session) -> CommandResult:
     new_session = mgr.new(model=session.model)
     ui.print_info(f"새 세션 시작: [{new_session.session_id[:8]}]")
     return CommandResult(action=Action.NEW_SESSION, session=new_session)
+
+
+def _mode(arg: str) -> CommandResult:
+    if not arg:
+        current = get_current_mode()
+        ui.print_info(f"현재 모드: {current.value}")
+        ui.print_info("  Shift+Tab 또는 /tdd, /normal 로 전환")
+        return CommandResult(action=Action.NONE)
+
+    v = arg.strip().lower()
+    if v == "tdd":
+        return _set_mode(CLIMode.TDD)
+    if v in ("normal", "일반"):
+        return _set_mode(CLIMode.NORMAL)
+    ui.print_error(f"알 수 없는 모드: {arg}")
+    return CommandResult(action=Action.NONE)
+
+
+def _set_mode(target: CLIMode) -> CommandResult:
+    result = request_mode_change(target)
+    if result.status == ModeChangeStatus.BLOCKED:
+        ui.print_info(get_tdd_unavailable_message())
+    elif result.status == ModeChangeStatus.UNCHANGED:
+        ui.print_info(f"이미 {target.value} 모드입니다.")
+    else:
+        ui.print_mode_changed(result.mode)
+    return CommandResult(action=Action.NONE)
