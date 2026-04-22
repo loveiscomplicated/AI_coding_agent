@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -55,7 +56,21 @@ class CLIMode(Enum):
     TDD = "TDD"
 
 
+class ModeChangeStatus(Enum):
+    CHANGED = "changed"
+    UNCHANGED = "unchanged"
+    BLOCKED = "blocked"
+
+
+@dataclass(frozen=True)
+class ModeChangeResult:
+    status: ModeChangeStatus
+    mode: CLIMode
+
+
 _current_mode: CLIMode = CLIMode.NORMAL
+_tdd_available: bool = True
+_tdd_unavailable_message: str = "git 프로젝트 내에서 실행하세요."
 
 
 def get_current_mode() -> CLIMode:
@@ -67,10 +82,38 @@ def set_mode(mode: CLIMode) -> None:
     _current_mode = mode
 
 
-def toggle_mode() -> CLIMode:
+def configure_tdd_availability(
+    available: bool,
+    message: str = "git 프로젝트 내에서 실행하세요.",
+) -> None:
+    global _tdd_available, _tdd_unavailable_message, _current_mode
+    _tdd_available = available
+    _tdd_unavailable_message = message
+    if not available and _current_mode == CLIMode.TDD:
+        _current_mode = CLIMode.NORMAL
+
+
+def get_tdd_unavailable_message() -> str:
+    return _tdd_unavailable_message
+
+
+def request_mode_change(target: CLIMode) -> ModeChangeResult:
     global _current_mode
-    _current_mode = CLIMode.TDD if _current_mode == CLIMode.NORMAL else CLIMode.NORMAL
-    return _current_mode
+
+    if target == CLIMode.TDD and not _tdd_available:
+        _current_mode = CLIMode.NORMAL
+        return ModeChangeResult(status=ModeChangeStatus.BLOCKED, mode=_current_mode)
+
+    if _current_mode == target:
+        return ModeChangeResult(status=ModeChangeStatus.UNCHANGED, mode=_current_mode)
+
+    _current_mode = target
+    return ModeChangeResult(status=ModeChangeStatus.CHANGED, mode=_current_mode)
+
+
+def toggle_mode() -> ModeChangeResult:
+    target = CLIMode.TDD if _current_mode == CLIMode.NORMAL else CLIMode.NORMAL
+    return request_mode_change(target)
 
 
 # ── 색상 팔레트 ───────────────────────────────────────────────────────────────
@@ -90,6 +133,9 @@ _COMMANDS = [
     "/rename",
     "/delete",
     "/undo",
+    "/mode",
+    "/tdd",
+    "/normal",
     "/exit",
     "/quit",
 ]
@@ -136,8 +182,13 @@ _kb = KeyBindings()
 
 @_kb.add("s-tab", filter=~has_completions)
 def _toggle_mode_handler(event) -> None:
-    new_mode = toggle_mode()
-    print_mode_changed(new_mode)
+    result = toggle_mode()
+    if result.status == ModeChangeStatus.CHANGED:
+        print_mode_changed(result.mode)
+    elif result.status == ModeChangeStatus.UNCHANGED:
+        print_info(f"이미 {result.mode.value} 모드입니다.")
+    else:
+        print_info(get_tdd_unavailable_message())
     event.app.invalidate()
 
 
