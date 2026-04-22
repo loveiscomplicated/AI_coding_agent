@@ -22,7 +22,7 @@ from rich.console import Console
 
 from cli.commands import Action, CommandResult, handle
 from cli import interface as ui
-from cli.interface import _print_diff, ApprovalHandler
+from cli.interface import CLIMode, _print_diff, ApprovalHandler, configure_tdd_availability, set_mode
 from llm.base import Message
 from memory import SessionManager
 
@@ -51,6 +51,15 @@ def mgr(tmp_path):
 @pytest.fixture
 def session(mgr):
     return mgr.new(title="테스트 세션", model="claude-sonnet-4-6")
+
+
+@pytest.fixture(autouse=True)
+def _reset_mode_state():
+    configure_tdd_availability(True)
+    set_mode(CLIMode.NORMAL)
+    yield
+    configure_tdd_availability(True)
+    set_mode(CLIMode.NORMAL)
 
 
 # ── interface: print_banner ────────────────────────────────────────────────────

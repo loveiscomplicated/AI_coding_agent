@@ -146,6 +146,34 @@ def _run(coro):
 # ═════════════════════════════════════════════════════════════════════════════
 
 
+def test_client_is_created_lazily(tmp_path, monkeypatch):
+    (tmp_path / "PROJECT_STRUCTURE.md").write_text("# PROJECT_STRUCTURE\n", encoding="utf-8")
+
+    created: list[tuple[str, str]] = []
+    fake_client = FakeClient([_make_task_response()])
+
+    def _fake_create_client(provider, config):
+        created.append((provider, config.model))
+        return fake_client
+
+    monkeypatch.setattr("cli.task_converter.create_client", _fake_create_client)
+
+    conv = TaskConverter(
+        repo_path=str(tmp_path),
+        llm_config=LLMConfig(model="fake"),
+        provider="claude",
+        input_fn=lambda _: "",
+        output_fn=lambda _: None,
+    )
+
+    assert created == []
+
+    result = _run(conv.convert("샘플 태스크 만들어줘"))
+
+    assert result.task is not None
+    assert created == [("claude", "fake")]
+
+
 def test_single_turn_clear_request(tmp_path):
     """1턴 JSON → turns_used==1, no input prompt."""
     conv, client, outputs = _make_converter(
