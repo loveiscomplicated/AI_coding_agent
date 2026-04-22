@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import difflib
 import re
+import shutil
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -614,6 +616,24 @@ class ApprovalHandler:
             return True
 
         return False
+
+
+def print_user_input(text: str, session_id_short: str) -> None:
+    """
+    prompt_toolkit이 남긴 프롬프트 줄을 회색 배경 메시지로 교체한다.
+
+    입력이 터미널 너비를 넘어 줄바꿈된 경우를 계산해 필요한 만큼 위로 올라간다.
+    """
+    width = shutil.get_terminal_size().columns
+    # "[session_id] ❯ " 에 해당하는 표시 길이 (TDD 모드 접두어 "[TDD] " 포함 가능)
+    prefix_len = len(f"[{session_id_short}] ❯ ")
+    if _current_mode == CLIMode.TDD:
+        prefix_len += len("[TDD] ")
+    # 프롬프트 줄이 몇 행을 차지했는지 계산
+    wrapped_lines = max(1, -(-( prefix_len + len(text)) // width))  # ceiling div
+    sys.stdout.write(f"\033[{wrapped_lines}A\r\033[J")
+    sys.stdout.flush()
+    console.print(f"[bold blue]You[/bold blue] [white on grey23] {text} [/white on grey23]")
 
 
 def get_input(session_id_short: str) -> str:
