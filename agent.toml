@@ -1,0 +1,13 @@
+[llm]
+provider = "claude"
+model_fast = "claude-haiku-4-5-20251001"
+model_capable = "claude-opus-4-6"
+
+[project]
+language = "python"
+test_framework = "pytest"
+base_branch = "main"
+
+[behavior]
+default_mode = "normal"
+auto_push = false
