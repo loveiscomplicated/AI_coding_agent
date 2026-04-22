@@ -9,22 +9,33 @@
 ### 실행
 
 ```bash
-# 기본 (config 파일 또는 Claude Sonnet)
+# 기본 (일반 모드)
 python main.py
 
-# 모델 지정
+# provider / model 지정
 python main.py -p claude  -m claude-opus-4-6
 python main.py -p openai  -m gpt-4o
 python main.py -p ollama  -m devstral:24b
+python main.py -p gemini  -m gemini-2.5-pro-preview-06-05
+python main.py -p glm     -m glm-5.1
+
+# 모델명 prefix로 provider 자동 추론
+python main.py -m glm-5.1
+python main.py -m claude-sonnet-4-6
 
 # 이전 세션 이어하기 (세션 ID 앞 몇 자리만 입력)
 python main.py -s a1b2c3d4
+
+# 사용 가능한 모델 목록 조회
+python main.py --list
+python main.py -p openai --list
 
 # 디버그 로그 출력
 python main.py -v
 ```
 
-CLI 옵션이 없으면 `~/.config/ai_coding_agent/config.toml` 설정을 사용합니다.
+CLI 옵션이 없으면 일반 REPL 설정은 `~/.config/ai_coding_agent/config.toml`을 사용합니다.
+TDD 모드용 설정은 별도의 `agent.toml` 계층을 사용합니다.
 
 ### 종료
 
@@ -35,10 +46,14 @@ CLI 옵션이 없으면 `~/.config/ai_coding_agent/config.toml` 설정을 사용
 
 ## 설정 파일
 
-`~/.config/ai_coding_agent/config.toml` 에 기본값을 저장할 수 있습니다. CLI 인자가 항상 우선합니다.
+CLI에는 두 종류의 설정 파일이 있습니다.
+
+### 1) 일반 REPL 설정: `~/.config/ai_coding_agent/config.toml`
+
+일반 모드의 LLM, 루프 반복 수, 도구 승인 기본값을 제어합니다. CLI 인자가 항상 우선합니다.
 
 ```toml
-provider = "claude"           # claude | openai | ollama
+provider = "claude"           # claude | openai | ollama | gemini | glm
 model = "claude-sonnet-4-6"
 max_iterations = 15
 max_tokens = 4096
@@ -47,21 +62,114 @@ auto_approve = false          # true 이면 모든 도구 자동 승인 (승인 
 
 파일이 없거나 파싱 오류가 나면 기본값으로 동작합니다.
 
+### 2) TDD 모드 설정: `agent.toml`
+
+TDD 모드는 현재 git 프로젝트 루트의 `agent.toml`을 읽습니다. 전역 기본값은
+`~/.config/agent/config.toml`에 둘 수 있습니다.
+
+우선순위는 다음과 같습니다.
+
+1. 환경 변수
+2. 현재 프로젝트의 `agent.toml`
+3. `~/.config/agent/config.toml`
+4. 하드코딩 기본값
+
+지원 환경 변수:
+
+- `LLM_PROVIDER`
+- `LLM_MODEL_FAST`
+- `LLM_MODEL_CAPABLE`
+- `LLM_PROVIDER_FAST`
+- `LLM_PROVIDER_CAPABLE`
+- `LLM_TITLE_MODEL` (`LLM_MODEL_FAST`가 없을 때 fallback)
+- `LLM_DEFAULT_MODEL` (`LLM_MODEL_CAPABLE`가 없을 때 fallback)
+
+예시:
+
+```toml
+[llm]
+provider = "claude"
+model_fast = "claude-haiku-4-5-20251001"
+model_capable = "claude-opus-4-6"
+
+[project]
+language = "python"
+test_framework = "pytest"
+base_branch = "main"
+
+[behavior]
+default_mode = "normal"  # "normal" | "tdd"
+auto_push = false
+```
+
+`agent.toml`이 없으면 기본값으로 계속 진행합니다. 파싱 오류가 나도 프로그램은 종료되지 않고,
+stderr에 경고를 출력한 뒤 기본값으로 fallback 합니다.
+`default_mode = "tdd"`를 설정했더라도 현재 위치가 git 프로젝트 밖이면 일반 모드로 시작합니다.
+
 ---
 
 ## 입력 방식
 
-### 기본 대화
+### 일반 모드
 
-프롬프트에 자연어로 작업을 입력하면 에이전트가 도구를 사용해 처리합니다.
+기본 모드입니다. 프롬프트에 자연어로 작업을 입력하면 ReAct 루프가 도구를 사용해 처리합니다.
 
-```
+```text
 [a1b2c3d4] ❯ main.py에서 TODO 주석 전부 찾아줘
 [a1b2c3d4] ❯ tests/ 디렉토리에 있는 테스트 전부 실행해줘
 [a1b2c3d4] ❯ 방금 만든 함수에 타입 힌트 추가해줘
 ```
 
-응답이 끝나면 사용한 토큰 수(input / output / total)가 자동으로 표시됩니다.
+응답이 끝나면 사용한 토큰 수(`input / output / total`)가 자동으로 표시됩니다.
+
+### TDD 모드
+
+TDD 모드에서는 입력 한 줄이 일반 대화로 가지 않고, 단일 태스크 파이프라인으로 바로 라우팅됩니다.
+
+```text
+[TDD] [a1b2c3d4] ❯ 로그인 실패 케이스에 대한 pytest 추가하고 구현까지 마무리해줘
+```
+
+실행 흐름:
+
+1. 자연어 입력을 TaskConverter가 단일 Task로 정리
+2. 태스크 요약 출력
+3. 사용자 확인
+4. TDD 파이프라인 실행
+5. 결과 카드 출력
+6. 성공 시 로컬 git commit까지 진행
+
+현재 CLI 통합은 `FULL_TDD` 모드로 동작하며, 개념적으로 다음 단계를 거칩니다.
+
+1. TestWriter
+2. DockerTest
+3. Quality Gate
+4. Implementer
+5. DockerTest
+6. Reviewer
+
+TDD 모드는 git 프로젝트 안에서만 사용할 수 있습니다. 현재 디렉토리에서 상위로 `.git`을 찾지 못하면
+TDD 전환이 차단되고 다음 안내가 표시됩니다.
+
+```text
+경고: .git을 찾지 못했습니다. TDD 모드는 git 프로젝트 내에서 실행하세요.
+```
+
+이 상태에서 `/tdd`, `/mode tdd`, `Shift+Tab`은 모두 차단됩니다.
+
+### 모드 전환
+
+- `Shift+Tab`: 일반 ↔ TDD 전환
+- `/tdd`: TDD 모드로 전환
+- `/normal`: 일반 모드로 전환
+- `/mode`: 현재 모드 확인
+- `/mode tdd`
+- `/mode normal`
+
+이미 해당 모드라면 전환하지 않고 안내만 출력합니다.
+
+TDD 모드에서도 슬래시 명령어는 계속 동작합니다. 예를 들어 `/help`, `/sessions`, `/history`,
+`/load`는 모드와 무관하게 사용할 수 있습니다.
 
 ### 이전 입력 불러오기
 
@@ -77,19 +185,18 @@ auto_approve = false          # true 이면 모든 도구 자동 승인 (승인 
 
 ### 파일 첨부
 
-```
+```text
 [a1b2c3d4] ❯ @core/loop.py 이 파일에서 성능 문제가 있을 만한 부분 찾아줘
 [a1b2c3d4] ❯ @src/auth.py @src/models.py 두 파일 사이에 순환 의존성이 있는지 확인해줘
 ```
 
 에이전트에게 전달되는 실제 메시지:
-```
+```text
 이 파일에서 성능 문제가 있을 만한 부분 찾아줘
 
 [파일: core/loop.py]
-```python
+<python file contents>
 ...파일 내용...
-```
 ```
 
 ### 디렉토리 트리 첨부
@@ -139,16 +246,16 @@ auto_approve = false          # true 이면 모든 도구 자동 승인 (승인 
 
 `/` 뒤에 `Tab`을 누르면 사용 가능한 명령어 목록이 표시됩니다.
 
-```
+```text
 [a1b2c3d4] ❯ /[Tab]
-──────────────────────────────
-  /delete    /exit    /help
-  /history   /load    /new
-  /quit      /rename  /sessions
+────────────────────────────────────────────
+  /delete    /exit      /help      /history
+  /load      /mode      /new       /normal
+  /quit      /rename    /sessions  /tdd
   /undo
 ```
 
-```
+```text
 [a1b2c3d4] ❯ /hi[Tab]  →  /history
 ```
 
@@ -169,11 +276,16 @@ auto_approve = false          # true 이면 모든 도구 자동 승인 (승인 
 | `/delete` | 현재 세션 삭제 후 새 세션 시작 |
 | `/undo` | 마지막 파일 변경 되돌리기 |
 | `/undo all` | 이번 세션의 모든 파일 변경 되돌리기 |
+| `/mode` | 현재 모드 확인 |
+| `/mode tdd` | TDD 모드로 전환 |
+| `/mode normal` | 일반 모드로 전환 |
+| `/tdd` | TDD 모드로 전환 |
+| `/normal` | 일반 모드로 전환 |
 | `/exit` | 종료 |
 
 ### 예시
 
-```
+```text
 # 새 세션을 이름 붙여서 시작
 [a1b2c3d4] ❯ /new 리팩토링 작업
 
@@ -191,7 +303,44 @@ auto_approve = false          # true 이면 모든 도구 자동 승인 (승인 
 
 # 이번 세션 전체 파일 변경 되돌리기
 [a1b2c3d4] ❯ /undo all
+
+# TDD 모드 전환
+[a1b2c3d4] ❯ /tdd
+
+# 현재 모드 확인
+[a1b2c3d4] ❯ /mode
 ```
+
+---
+
+## TDD 모드 상세
+
+### 태스크 확인과 재시도
+
+TDD 모드는 일반 도구 승인 프롬프트 대신, 단계별 인라인 선택기를 사용합니다.
+
+- 태스크 검토: 진행 / 이 세션에서 항상 허용 / 취소
+- 태스크가 너무 큰 경우: 진행 / 취소
+- 테스트 실패 시: 재시도 / 힌트 추가해서 재시도 / 중단
+- 리뷰가 `CHANGES_REQUESTED`인 경우: 피드백 반영해서 재시도 / 무시하고 진행 / 중단
+- 파이프라인 오류 시: 재시도 / 중단
+
+### 중단 방법
+
+- `Ctrl-C`: 현재 TDD 파이프라인 중단
+- `Q`: 파이프라인 실행 중 중단 요청
+- 미니 회의나 힌트 입력 프롬프트에서 `Esc` 또는 빈 입력: 취소
+
+### 적합한 작업
+
+TDD 모드는 “단일 태스크를 받아 테스트-구현-리뷰까지 끝내는 흐름”에 적합합니다.
+
+```text
+[TDD] [a1b2c3d4] ❯ user_service.py의 deactivate_user에 대한 실패 테스트 먼저 추가하고 구현해줘
+[TDD] [a1b2c3d4] ❯ 토큰 만료 처리 버그를 재현하는 테스트를 만들고 수정까지 마무리해줘
+```
+
+반대로 긴 탐색형 대화, 구조 설명, 코드 리뷰만 요청하는 경우는 일반 모드가 더 맞습니다.
 
 ---
 
@@ -271,6 +420,7 @@ auto_approve = false          # true 이면 모든 도구 자동 승인 (승인 
 
 - 실행 시 `--session` 옵션으로 이전 세션을 이어갈 수 있습니다.
 - 세션 ID는 8자리 앞자리만 입력해도 됩니다.
+- 세션 관리 명령(`/sessions`, `/load`, `/rename`, `/delete`)은 일반 모드와 TDD 모드에서 모두 사용할 수 있습니다.
 
 ```bash
 # 세션 목록 확인 후 이어하기
