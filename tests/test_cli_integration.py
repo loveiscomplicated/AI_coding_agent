@@ -25,6 +25,7 @@ from cli.config import (
     WORKER_ROLE_KEYS,
     find_repo_root,
     load_config,
+    normalize_default_mode,
 )
 from cli.interface import (
     CLIMode,
@@ -52,10 +53,10 @@ _LLM_ENV_KEYS = (
 def _reset_mode():
     """모드 전역 상태가 테스트 간에 오염되지 않도록 리셋."""
     configure_tdd_availability(True)
-    set_mode(CLIMode.NORMAL)
+    set_mode(CLIMode.INSTANT)
     yield
     configure_tdd_availability(True)
-    set_mode(CLIMode.NORMAL)
+    set_mode(CLIMode.INSTANT)
 
 
 @pytest.fixture
@@ -91,22 +92,172 @@ def test_tdd_mode_runs_instant_runner():
     runner.run.assert_called_once_with("hello")
 
 
-# ── 2) 일반 모드에서는 InstantRunner 호출 안 됨 ────────────────────────────────
+def test_tdd_mode_runs_inside_existing_event_loop():
+    """이미 실행 중인 이벤트 루프가 있어도 TDD 경로가 안전하게 완료되어야 한다."""
+    import asyncio
+    from main import _run_turn
+
+    calls: list[str] = []
+
+    class _Runner:
+        async def run(self, raw: str):
+            calls.append(raw)
+            return MagicMock()
+
+    runner = _Runner()
+    get_runner = MagicMock(return_value=runner)
+
+    async def _invoke():
+        handled = _run_turn("hello", mode=CLIMode.TDD, get_runner=get_runner)
+        assert handled is True
+
+    asyncio.run(_invoke())
+
+    get_runner.assert_called_once_with()
+    assert calls == ["hello"]
 
 
-def test_normal_mode_runs_react_loop():
-    """mode=NORMAL 이면 runner loader를 만들지 않고 False를 반환한다."""
+# ── 2) instant 모드에서는 InstantRunner 호출 안 됨 ───────────────────────────
+
+
+def test_instant_mode_runs_react_loop():
+    """mode=INSTANT 이면 runner loader를 만들지 않고 False를 반환한다."""
     from main import _run_turn
 
     runner = MagicMock()
     runner.run = AsyncMock()
     get_runner = MagicMock(return_value=runner)
 
-    handled = _run_turn("hello", mode=CLIMode.NORMAL, get_runner=get_runner)
+    handled = _run_turn("hello", mode=CLIMode.INSTANT, get_runner=get_runner)
 
     assert handled is False
     get_runner.assert_not_called()
     runner.run.assert_not_called()
+
+
+def test_plan_mode_returns_execution_prompt():
+    from main import _dispatch_mode_turn
+
+    runner = MagicMock()
+    runner.run = AsyncMock(
+        return_value=SimpleNamespace(
+            execution_prompt="planned prompt",
+            user_aborted=False,
+            warnings=[],
+            task=MagicMock(),
+        )
+    )
+    get_plan_runner = MagicMock(return_value=runner)
+
+    result = _dispatch_mode_turn(
+        "hello",
+        mode=CLIMode.PLAN,
+        get_plan_runner=get_plan_runner,
+        get_tdd_runner=None,
+    )
+
+    assert result.handled is False
+    assert result.execute_input == "planned prompt"
+    get_plan_runner.assert_called_once_with()
+
+
+def test_instant_mode_toolset_excludes_raw_git_committers():
+    from main import _instant_allowed_tools
+
+    allowed = set(_instant_allowed_tools())
+    assert "git_add" not in allowed
+    assert "git_commit" not in allowed
+    assert "verified_commit" not in allowed
+    assert "stage_group" in allowed
+    assert "commit_group" in allowed
+
+
+def test_commit_workflow_toolset_is_narrow_and_safe():
+    from main import _commit_workflow_allowed_tools
+
+    allowed = set(_commit_workflow_allowed_tools())
+    assert allowed == {
+        "git_status",
+        "git_diff",
+        "git_log",
+        "analyze_uncommitted_changes",
+        "propose_commit_groups",
+        "stage_group",
+        "commit_group",
+    }
+
+
+def test_instant_mode_commit_request_routes_to_commit_workflow():
+    from main import _dispatch_mode_turn
+
+    result = _dispatch_mode_turn(
+        "아직 커밋하지 않은 변경사항들을 구현 의도별로 나누어 커밋해줘",
+        mode=CLIMode.INSTANT,
+        get_plan_runner=None,
+        get_tdd_runner=None,
+    )
+
+    assert result.handled is False
+    assert result.loop_kind == "commit_workflow"
+
+
+def test_instant_mode_general_request_stays_on_generic_loop():
+    from main import _dispatch_mode_turn
+
+    result = _dispatch_mode_turn(
+        "main.py에서 TODO를 찾아줘",
+        mode=CLIMode.INSTANT,
+        get_plan_runner=None,
+        get_tdd_runner=None,
+    )
+
+    assert result.handled is False
+    assert result.loop_kind == "instant"
+
+
+def test_resume_phrase_keeps_pending_commit_workflow():
+    from main import _dispatch_mode_turn
+
+    result = _dispatch_mode_turn(
+        "다음",
+        mode=CLIMode.INSTANT,
+        get_plan_runner=None,
+        get_tdd_runner=None,
+        pending_loop_kind="commit_workflow",
+    )
+
+    assert result.handled is False
+    assert result.loop_kind == "commit_workflow"
+
+
+def test_resume_phrase_without_pending_state_stays_generic():
+    from main import _dispatch_mode_turn
+
+    result = _dispatch_mode_turn(
+        "계속 이어서 진행하자",
+        mode=CLIMode.INSTANT,
+        get_plan_runner=None,
+        get_tdd_runner=None,
+    )
+
+    assert result.handled is False
+    assert result.loop_kind == "instant"
+
+
+def test_prompt_interrupt_redirect_returns_blank_on_keyboard_interrupt(monkeypatch):
+    from main import _prompt_interrupt_redirect
+
+    monkeypatch.setattr("main.ui.get_input", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    assert _prompt_interrupt_redirect("deadbeef") == ""
+
+
+def test_prompt_interrupt_redirect_uses_ui_input(monkeypatch):
+    from main import _prompt_interrupt_redirect
+
+    monkeypatch.setattr("main.ui.get_input", lambda *_: "keep going")
+
+    assert _prompt_interrupt_redirect("deadbeef") == "keep going"
 
 
 # ── 3) 슬래시 명령어로 모드 전환 ──────────────────────────────────────────────
@@ -121,15 +272,15 @@ def test_mode_toggle_switch(monkeypatch):
     monkeypatch.setattr("cli.interface.print_info", lambda msg: captured.append(msg))
     monkeypatch.setattr("cli.interface.print_mode_changed", lambda m: None)
 
-    # /tdd
-    result = commands.handle("/tdd", mgr, session)
+    # /plan
+    result = commands.handle("/plan", mgr, session)
     assert result is not None
     assert result.action == Action.NONE
-    assert get_current_mode() == CLIMode.TDD
+    assert get_current_mode() == CLIMode.PLAN
 
-    # /normal
-    result = commands.handle("/normal", mgr, session)
-    assert get_current_mode() == CLIMode.NORMAL
+    # /instant
+    result = commands.handle("/instant", mgr, session)
+    assert get_current_mode() == CLIMode.INSTANT
 
     # /mode (인자 없음) — "현재 모드" 메시지 출력
     captured.clear()
@@ -137,7 +288,9 @@ def test_mode_toggle_switch(monkeypatch):
     assert result.action == Action.NONE
     assert any("현재 모드" in m for m in captured)
 
-    # /mode tdd
+    result = commands.handle("/mode plan", mgr, session)
+    assert get_current_mode() == CLIMode.PLAN
+
     result = commands.handle("/mode tdd", mgr, session)
     assert get_current_mode() == CLIMode.TDD
 
@@ -154,21 +307,21 @@ def test_tdd_switches_blocked_without_git(monkeypatch):
     result = commands.handle("/tdd", mgr, session)
     assert result is not None
     assert result.action == Action.NONE
-    assert get_current_mode() == CLIMode.NORMAL
+    assert get_current_mode() == CLIMode.INSTANT
     assert any("git 프로젝트 내에서 실행하세요" in m for m in captured)
 
     captured.clear()
     result = commands.handle("/mode tdd", mgr, session)
     assert result is not None
     assert result.action == Action.NONE
-    assert get_current_mode() == CLIMode.NORMAL
+    assert get_current_mode() == CLIMode.INSTANT
     assert any("git 프로젝트 내에서 실행하세요" in m for m in captured)
 
     captured.clear()
+    commands.handle("/plan", mgr, session)
     event = SimpleNamespace(app=SimpleNamespace(invalidate=lambda: None))
     ui._toggle_mode_handler(event)
-    assert any("git 프로젝트 내에서 실행하세요" in m for m in captured)
-    assert get_current_mode() == CLIMode.NORMAL
+    assert get_current_mode() == CLIMode.INSTANT
 
 
 # ── 4) TOML 로드 ──────────────────────────────────────────────────────────────
@@ -271,6 +424,47 @@ def test_config_missing_toml_uses_defaults(isolated_home, clean_env):
     assert cfg == AgentConfig()  # 하드코딩 기본값과 일치
 
 
+def test_normalize_default_mode_maps_legacy_normal():
+    assert normalize_default_mode("normal") == "instant"
+    assert normalize_default_mode("instant") == "instant"
+    assert normalize_default_mode("plan") == "plan"
+
+
+def test_config_defaults_exclude_claude_for_new_project(isolated_home, clean_env):
+    repo = isolated_home / "repo"
+    repo.mkdir()
+
+    cfg = load_config(str(repo))
+
+    assert cfg.provider == "openai"
+    assert cfg.default_role_models["orchestrator"] == {
+        "provider": "openai",
+        "model": "gpt-5.4",
+    }
+    assert cfg.default_role_models["intervention"] == {
+        "provider": "openai",
+        "model": "gpt-5.4",
+    }
+    assert cfg.default_role_models[ROLE_MINI_MEETING] == {
+        "provider": "openai",
+        "model": "gpt-5.4",
+    }
+    for role in WORKER_ROLE_KEYS:
+        assert cfg.default_role_models[role] == {
+            "provider": "openai",
+            "model": "gpt-5-mini",
+        }
+
+
+def test_settings_wizard_provider_options_exclude_claude():
+    from cli.settings_wizard import _provider_options
+
+    values = [option.value for option in _provider_options()]
+    assert "claude" not in values
+    assert "openai" in values
+    assert "gemini" in values
+
+
 # ── 7) .git 기준 repo root 탐지 ───────────────────────────────────────────────
 
 
@@ -329,5 +523,7 @@ def test_slash_help_includes_tdd_commands(monkeypatch):
     assert result.action == Action.NONE
     blob = "\n".join(captured)
     assert "/mode" in blob
+    assert "/instant" in blob
+    assert "/plan" in blob
     assert "/tdd" in blob
     assert "/normal" in blob

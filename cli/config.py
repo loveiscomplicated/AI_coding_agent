@@ -95,7 +95,7 @@ def _clone_complexity_models(
 @dataclass
 class AgentConfig:
     # legacy/general
-    provider: str = "claude"
+    provider: str = "openai"
 
     # 역할별 모델
     default_role_models: dict[str, dict[str, str]] = field(default_factory=default_role_models)
@@ -109,9 +109,20 @@ class AgentConfig:
     base_branch: str = "main"
 
     # 동작
-    default_mode: str = "normal"   # "normal" | "tdd"
+    default_mode: str = "instant"   # "instant" | "plan" | "tdd"
     auto_push: bool = False
     auto_select_by_complexity: bool = True
+
+
+def normalize_default_mode(value: str | None) -> str:
+    raw = (value or "").strip().lower()
+    if raw in {"", "instant", "normal"}:
+        return "instant"
+    if raw == "plan":
+        return "plan"
+    if raw == "tdd":
+        return "tdd"
+    return "instant"
 
 
 def find_repo_root(start: str | None = None) -> str | None:
@@ -244,7 +255,11 @@ def _apply_toml(cfg: AgentConfig, data: dict) -> None:
         if value is not None:
             setattr(cfg, key, value)
 
-    for key in ("default_mode", "auto_push", "auto_select_by_complexity"):
+    default_mode = behavior_data.get("default_mode")
+    if default_mode is not None:
+        cfg.default_mode = normalize_default_mode(str(default_mode))
+
+    for key in ("auto_push", "auto_select_by_complexity"):
         value = behavior_data.get(key)
         if value is not None:
             setattr(cfg, key, value)
@@ -296,6 +311,7 @@ def load_config(repo_path: str | None = None) -> AgentConfig:
     if repo_path:
         _apply_toml(cfg, _load_toml(default_config_path(repo_path)))
     _apply_env(cfg)
+    cfg.default_mode = normalize_default_mode(cfg.default_mode)
 
     return cfg
 
@@ -303,6 +319,7 @@ def load_config(repo_path: str | None = None) -> AgentConfig:
 def save_config(config: AgentConfig, path: str | Path) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
+    default_mode = normalize_default_mode(config.default_mode)
 
     lines: list[str] = [
         "[llm]",
@@ -340,7 +357,7 @@ def save_config(config: AgentConfig, path: str | Path) -> None:
         f'base_branch = "{config.base_branch}"',
         "",
         "[behavior]",
-        f'default_mode = "{config.default_mode}"',
+        f'default_mode = "{default_mode}"',
         f"auto_push = {'true' if config.auto_push else 'false'}",
         f"auto_select_by_complexity = {'true' if config.auto_select_by_complexity else 'false'}",
         "",

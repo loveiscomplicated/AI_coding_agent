@@ -21,12 +21,11 @@ from cli.config import (
 from cli.selector import SelectOption, inline_select
 from llm import LLMConfig, create_client
 
-_PROVIDERS: tuple[str, ...] = ("ollama", "openai", "claude", "gemini", "glm")
+_PROVIDERS: tuple[str, ...] = ("ollama", "openai", "gemini", "glm")
 _DEFAULT_MODELS: dict[str, str] = {
     "ollama": "devstral:24b",
-    "openai": "gpt-4o",
-    "claude": "claude-sonnet-4-6",
-    "gemini": "gemini-2.5-pro-preview-06-05",
+    "openai": "gpt-5.4",
+    "gemini": "gemini-2.5-pro",
     "glm": "glm-5.1",
 }
 

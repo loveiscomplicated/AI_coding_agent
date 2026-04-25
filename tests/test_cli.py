@@ -22,7 +22,15 @@ from rich.console import Console
 
 from cli.commands import Action, CommandResult, handle
 from cli import interface as ui
-from cli.interface import CLIMode, _print_diff, ApprovalHandler, configure_tdd_availability, set_mode
+from cli.interface import (
+    CLIMode,
+    _print_diff,
+    ApprovalHandler,
+    configure_tdd_availability,
+    prompt_with_stdin_pause,
+    set_mode,
+)
+from core.undo import ChangeTracker
 from llm.base import Message
 from memory import SessionManager
 
@@ -476,14 +484,14 @@ class _FakeTC:
 
 
 class TestApprovalHandler:
-    """ApprovalHandler 는 _prompt_session.prompt 를 패치해서 테스트한다."""
+    """ApprovalHandler 는 inline_select를 패치해서 테스트한다."""
 
     def _make(self):
         return ApprovalHandler()
 
-    def _call(self, handler, tc, answer: str) -> bool:
-        with patch("cli.interface._prompt_session") as mock_session:
-            mock_session.prompt.return_value = answer
+    def _call(self, handler, tc, answer: str | None) -> bool:
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = answer
             return handler(tc)
 
     # edit_file — 승인
@@ -491,22 +499,22 @@ class TestApprovalHandler:
         f = tmp_path / "a.py"
         f.write_text("def foo(): pass\n", encoding="utf-8")
         tc = _FakeTC("edit_file", {"path": str(f), "old_str": "foo", "new_str": "bar"})
-        assert self._call(self._make(), tc, "y") is True
+        assert self._call(self._make(), tc, "proceed") is True
 
     # edit_file — 거부
     def test_edit_file_denied(self, tmp_path, captured):
         f = tmp_path / "b.py"
         f.write_text("x = 1\n", encoding="utf-8")
         tc = _FakeTC("edit_file", {"path": str(f), "old_str": "x", "new_str": "z"})
-        assert self._call(self._make(), tc, "n") is False
+        assert self._call(self._make(), tc, "cancel") is False
 
     # write_file — 기존 파일 덮어쓰기 (diff 표시)
     def test_write_file_existing_shows_diff(self, tmp_path, captured):
         f = tmp_path / "c.py"
         f.write_text("old\n", encoding="utf-8")
         tc = _FakeTC("write_file", {"path": str(f), "content": "new\n"})
-        with patch("cli.interface._prompt_session") as mock_session:
-            mock_session.prompt.return_value = "y"
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = "proceed"
             self._make()(tc)
         out = get_output(captured)
         assert "old" in out or "new" in out
@@ -515,8 +523,8 @@ class TestApprovalHandler:
     def test_write_file_new_shows_content(self, tmp_path, captured):
         path = str(tmp_path / "brand_new.py")
         tc = _FakeTC("write_file", {"path": path, "content": "print('hello')\n"})
-        with patch("cli.interface._prompt_session") as mock_session:
-            mock_session.prompt.return_value = ""
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = "proceed"
             self._make()(tc)
         out = get_output(captured)
         assert "print" in out
@@ -524,16 +532,16 @@ class TestApprovalHandler:
     # append_to_file
     def test_append_to_file_shows_content(self, captured):
         tc = _FakeTC("append_to_file", {"path": "log.txt", "content": "appended line\n"})
-        with patch("cli.interface._prompt_session") as mock_session:
-            mock_session.prompt.return_value = "y"
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = "proceed"
             self._make()(tc)
         assert "appended line" in get_output(captured)
 
     # execute_command — 거부 + 명령어 표시
     def test_execute_command_shows_cmd(self, captured):
         tc = _FakeTC("execute_command", {"command": "rm -rf /"})
-        with patch("cli.interface._prompt_session") as mock_session:
-            mock_session.prompt.return_value = "n"
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = "cancel"
             result = self._make()(tc)
         out = get_output(captured)
         assert "rm -rf /" in out
@@ -542,49 +550,18 @@ class TestApprovalHandler:
     # 알 수 없는 도구
     def test_unknown_tool_shows_args(self, captured):
         tc = _FakeTC("mystery_tool", {"key": "value"})
-        with patch("cli.interface._prompt_session") as mock_session:
-            mock_session.prompt.return_value = "y"
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = "proceed"
             result = self._make()(tc)
         out = get_output(captured)
         assert "mystery_tool" in out
         assert result is True
 
-    # 빈 Enter → True (기본 승인)
-    def test_empty_enter_is_approved(self, tmp_path, captured):
+    def test_edit_file_proceed_is_approved(self, tmp_path, captured):
         f = tmp_path / "d.py"
         f.write_text("pass\n", encoding="utf-8")
         tc = _FakeTC("edit_file", {"path": str(f), "old_str": "pass", "new_str": "..."})
-        assert self._call(self._make(), tc, "") is True
-
-    # "yes" → True
-    def test_yes_is_approved(self, tmp_path, captured):
-        f = tmp_path / "e.py"
-        f.write_text("x\n", encoding="utf-8")
-        tc = _FakeTC("edit_file", {"path": str(f), "old_str": "x", "new_str": "y"})
-        assert self._call(self._make(), tc, "yes") is True
-
-    # "N" → False
-    def test_uppercase_N_is_denied(self, tmp_path, captured):
-        f = tmp_path / "f.py"
-        f.write_text("x\n", encoding="utf-8")
-        tc = _FakeTC("edit_file", {"path": str(f), "old_str": "x", "new_str": "y"})
-        assert self._call(self._make(), tc, "N") is False
-
-    # KeyboardInterrupt → False
-    def test_keyboard_interrupt_returns_false(self, captured):
-        tc = _FakeTC("write_file", {"path": "x.py", "content": ""})
-        with patch("cli.interface._prompt_session") as mock_session:
-            mock_session.prompt.side_effect = KeyboardInterrupt
-            result = self._make()(tc)
-        assert result is False
-
-    # EOFError → False
-    def test_eof_returns_false(self, captured):
-        tc = _FakeTC("append_to_file", {"path": "x.txt", "content": "line"})
-        with patch("cli.interface._prompt_session") as mock_session:
-            mock_session.prompt.side_effect = EOFError
-            result = self._make()(tc)
-        assert result is False
+        assert self._call(self._make(), tc, "proceed") is True
 
     # 파일 읽기 실패해도 크래시 없이 동작
     def test_edit_file_unreadable_path_no_crash(self, captured):
@@ -593,74 +570,126 @@ class TestApprovalHandler:
             "old_str": "foo",
             "new_str": "bar",
         })
-        with patch("cli.interface._prompt_session") as mock_session:
-            mock_session.prompt.return_value = "y"
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = "proceed"
             result = self._make()(tc)
         assert isinstance(result, bool)
 
-    # "a" → True + 이후 같은 도구는 자동 승인
     def test_always_approve_skips_prompt_next_time(self, tmp_path, captured):
         f = tmp_path / "g.py"
         f.write_text("x\n", encoding="utf-8")
         tc = _FakeTC("edit_file", {"path": str(f), "old_str": "x", "new_str": "y"})
         handler = self._make()
 
-        # 첫 번째 호출 — "a" 입력
-        with patch("cli.interface._prompt_session") as mock_session:
-            mock_session.prompt.return_value = "a"
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = "always"
             result1 = handler(tc)
 
-        # 두 번째 호출 — prompt가 불리지 않아야 함
-        with patch("cli.interface._prompt_session") as mock_session:
+        with patch("cli.interface.inline_select") as mock_select:
             result2 = handler(tc)
-            mock_session.prompt.assert_not_called()
+            mock_select.assert_not_called()
 
         assert result1 is True
         assert result2 is True
 
-    # "always" (영어) → 항상 승인
-    def test_always_english_keyword(self, tmp_path, captured):
+    def test_execute_command_always_is_prefix_scoped(self, captured):
+        handler = self._make()
+        tc_pytest_v = _FakeTC("execute_command", {"command": ["pytest", "-v"]})
+        tc_pytest_q = _FakeTC("execute_command", {"command": ["pytest", "-q"]})
+        tc_python = _FakeTC("execute_command", {"command": ["python", "main.py"]})
+
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = "always"
+            assert handler(tc_pytest_v) is True
+
+        with patch("cli.interface.inline_select") as mock_select:
+            assert handler(tc_pytest_q) is True
+            mock_select.assert_not_called()
+
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = "cancel"
+            assert handler(tc_python) is False
+            mock_select.assert_called_once()
+
+    def test_execute_command_uv_run_pytest_always_is_prefix_scoped(self, captured):
+        handler = self._make()
+        tc1 = _FakeTC("execute_command", {"command": ["uv", "run", "pytest", "tests/", "-q"]})
+        tc2 = _FakeTC("execute_command", {"command": ["uv", "run", "pytest", "-x"]})
+        tc3 = _FakeTC("execute_command", {"command": ["uv", "run", "python", "scripts/foo.py"]})
+
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = "always"
+            assert handler(tc1) is True
+
+        with patch("cli.interface.inline_select") as mock_select:
+            assert handler(tc2) is True
+            mock_select.assert_not_called()
+
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = "cancel"
+            assert handler(tc3) is False
+            mock_select.assert_called_once()
+
+    def test_always_approve_is_per_tool(self, tmp_path, captured):
         f = tmp_path / "h.py"
         f.write_text("a\n", encoding="utf-8")
-        tc = _FakeTC("edit_file", {"path": str(f), "old_str": "a", "new_str": "b"})
         handler = self._make()
-        assert self._call(handler, tc, "always") is True
-        # 이후 자동 승인 확인
-        with patch("cli.interface._prompt_session") as mock_session:
-            handler(tc)
-            mock_session.prompt.assert_not_called()
-
-    # 도구 종류별로 독립적인 항상 승인 (write_file을 always해도 edit_file은 여전히 묻는다)
-    def test_always_approve_is_per_tool(self, tmp_path, captured):
-        f = tmp_path / "i.py"
-        f.write_text("a\n", encoding="utf-8")
-        handler = self._make()
-
-        # write_file → always
         tc_write = _FakeTC("write_file", {"path": str(f), "content": "b\n"})
-        with patch("cli.interface._prompt_session") as mock_session:
-            mock_session.prompt.return_value = "a"
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = "always"
             handler(tc_write)
 
-        # edit_file → 여전히 묻는다
         tc_edit = _FakeTC("edit_file", {"path": str(f), "old_str": "a", "new_str": "b"})
-        with patch("cli.interface._prompt_session") as mock_session:
-            mock_session.prompt.return_value = "y"
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = "proceed"
             handler(tc_edit)
-            mock_session.prompt.assert_called_once()  # 프롬프트가 불려야 함
+            mock_select.assert_called_once()
 
-    # 자동 승인 메시지가 출력된다
     def test_auto_approve_prints_message(self, tmp_path, captured):
         f = tmp_path / "j.py"
         f.write_text("x\n", encoding="utf-8")
         tc = _FakeTC("edit_file", {"path": str(f), "old_str": "x", "new_str": "z"})
         handler = self._make()
-        handler._always.add("edit_file")  # 직접 주입
+        handler._always_tools.add("edit_file")
 
-        with patch("cli.interface._prompt_session"):
+        with patch("cli.interface.inline_select"):
             handler(tc)
 
         assert "자동 승인" in get_output(captured)
+
+    def test_execute_command_scope_detail_is_rendered(self, captured):
+        tc = _FakeTC("execute_command", {"command": ["pytest", "-v"]})
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = "cancel"
+            self._make()(tc)
+
+        _, kwargs = mock_select.call_args
+        assert "pytest" in kwargs["detail"]
+
+    def test_execute_command_tracks_tree_for_undo(self, tmp_path, captured, monkeypatch):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        existing = repo / "data.txt"
+        existing.write_text("before\n", encoding="utf-8")
+        monkeypatch.chdir(repo)
+
+        tracker = ChangeTracker()
+        handler = ApprovalHandler(tracker=tracker)
+        tc = _FakeTC("execute_command", {"command": ["pytest", "-q"]})
+
+        with patch("cli.interface.inline_select") as mock_select:
+            mock_select.return_value = "proceed"
+            assert handler(tc) is True
+
+        existing.write_text("after\n", encoding="utf-8")
+        created = repo / "new.txt"
+        created.write_text("new\n", encoding="utf-8")
+
+        path, ok = tracker.undo_last()
+        assert ok is True
+        assert path == str(repo)
+        assert existing.read_text(encoding="utf-8") == "before\n"
+        assert created.exists() is False
 
 
 # ── interface: AgentCompleter ─────────────────────────────────────────────────
@@ -692,3 +721,49 @@ class TestAgentCompleter:
     def test_no_completions_for_empty(self):
         results = self._complete("")
         assert results == []
+
+    def test_at_basename_completes_nested_file(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / "src" / "data_loader" / "get_raw_ohlcv_yfinance.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("", encoding="utf-8")
+
+        results = self._complete("@get_raw_ohlcv_yfinance")
+
+        assert "src/data_loader/get_raw_ohlcv_yfinance.py" in results
+
+    def test_at_basename_completes_directory(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "nested" / "data_loader").mkdir(parents=True)
+
+        results = self._complete("@data_loader")
+
+        assert "nested/data_loader/" in results
+
+    def test_at_path_prefix_keeps_path_completion(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / "src" / "data_loader" / "get_raw_ohlcv_yfinance.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("", encoding="utf-8")
+
+        results = self._complete("@src/data_loader/g")
+
+        assert any("et_raw_ohlcv_yfinance.py" in r for r in results)
+
+
+class TestPromptWrappers:
+    def test_prompt_with_stdin_pause_uses_guard(self, monkeypatch):
+        events: list[str] = []
+
+        class _Guard:
+            def __enter__(self):
+                events.append("enter")
+
+            def __exit__(self, exc_type, exc, tb):
+                events.append("exit")
+
+        monkeypatch.setattr("cli.interrupt.stdin_readers_paused", lambda: _Guard())
+        monkeypatch.setattr(ui._prompt_session, "prompt", lambda *args, **kwargs: "typed")
+
+        assert prompt_with_stdin_pause("msg") == "typed"
+        assert events == ["enter", "exit"]

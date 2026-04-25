@@ -17,9 +17,11 @@ cli/interface.py — 입출력, 색상, 포맷팅 (rich + prompt_toolkit)
 from __future__ import annotations
 
 import difflib
+import os
 import re
 import shutil
 import sys
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -38,6 +40,7 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.filters import has_completions
 from prompt_toolkit.key_binding import KeyBindings
+from cli.selector import SelectOption, inline_select
 
 if TYPE_CHECKING:
     from core.loop import ToolCall, ToolResult
@@ -54,7 +57,9 @@ console = Console()
 
 
 class CLIMode(Enum):
-    NORMAL = "일반"
+    INSTANT = "Instant"
+    NORMAL = "Instant"
+    PLAN = "Plan"
     TDD = "TDD"
 
 
@@ -70,7 +75,7 @@ class ModeChangeResult:
     mode: CLIMode
 
 
-_current_mode: CLIMode = CLIMode.NORMAL
+_current_mode: CLIMode = CLIMode.INSTANT
 _tdd_available: bool = True
 _tdd_unavailable_message: str = "git 프로젝트 내에서 실행하세요."
 
@@ -92,7 +97,7 @@ def configure_tdd_availability(
     _tdd_available = available
     _tdd_unavailable_message = message
     if not available and _current_mode == CLIMode.TDD:
-        _current_mode = CLIMode.NORMAL
+        _current_mode = CLIMode.INSTANT
 
 
 def get_tdd_unavailable_message() -> str:
@@ -103,7 +108,7 @@ def request_mode_change(target: CLIMode) -> ModeChangeResult:
     global _current_mode
 
     if target == CLIMode.TDD and not _tdd_available:
-        _current_mode = CLIMode.NORMAL
+        _current_mode = CLIMode.INSTANT
         return ModeChangeResult(status=ModeChangeStatus.BLOCKED, mode=_current_mode)
 
     if _current_mode == target:
@@ -114,7 +119,15 @@ def request_mode_change(target: CLIMode) -> ModeChangeResult:
 
 
 def toggle_mode() -> ModeChangeResult:
-    target = CLIMode.TDD if _current_mode == CLIMode.NORMAL else CLIMode.NORMAL
+    cycle = [CLIMode.INSTANT, CLIMode.PLAN]
+    if _tdd_available:
+        cycle.append(CLIMode.TDD)
+
+    try:
+        idx = cycle.index(_current_mode)
+    except ValueError:
+        idx = 0
+    target = cycle[(idx + 1) % len(cycle)]
     return request_mode_change(target)
 
 
@@ -136,6 +149,8 @@ _COMMANDS = [
     "/delete",
     "/undo",
     "/mode",
+    "/instant",
+    "/plan",
     "/tdd",
     "/normal",
     "/exit",
@@ -154,6 +169,86 @@ class AgentCompleter(Completer):
     """
 
     _path_completer = PathCompleter(expanduser=True)
+    _SEARCH_SKIP_DIRS = {".git", ".venv", "__pycache__", "node_modules", ".pytest_cache"}
+    _MAX_MENTION_RESULTS = 40
+    _CACHE_TTL_SEC = 2.0
+
+    def __init__(self) -> None:
+        self._mention_cache_root: Path | None = None
+        self._mention_cache_built_at: float = 0.0
+        self._mention_cache_entries: list[tuple[str, str, bool]] = []
+
+    def _should_use_path_completion(self, query: str) -> bool:
+        return (
+            not query
+            or "/" in query
+            or query.startswith(".")
+            or query.startswith("~")
+            or query.startswith("/")
+        )
+
+    def _mention_entries(self) -> list[tuple[str, str, bool]]:
+        root = Path.cwd()
+        now = time.monotonic()
+        if (
+            self._mention_cache_root == root
+            and now - self._mention_cache_built_at < self._CACHE_TTL_SEC
+        ):
+            return self._mention_cache_entries
+
+        entries: list[tuple[str, str, bool]] = []
+        for current_root, dirs, files in os.walk(root):
+            dirs[:] = [
+                d for d in dirs
+                if d not in self._SEARCH_SKIP_DIRS
+            ]
+            current_path = Path(current_root)
+
+            for dirname in dirs:
+                path = current_path / dirname
+                rel = path.relative_to(root).as_posix()
+                entries.append((dirname.lower(), f"{rel}/", True))
+
+            for filename in files:
+                path = current_path / filename
+                rel = path.relative_to(root).as_posix()
+                entries.append((filename.lower(), rel, False))
+
+        self._mention_cache_root = root
+        self._mention_cache_built_at = now
+        self._mention_cache_entries = entries
+        return entries
+
+    def _basename_completions(self, query: str) -> list[Completion]:
+        q = query.lower()
+        ranked: list[tuple[tuple[int, int, int, str], Completion]] = []
+        seen: set[str] = set()
+
+        for basename, rel_path, is_dir in self._mention_entries():
+            if q not in basename:
+                continue
+            if rel_path in seen:
+                continue
+            seen.add(rel_path)
+            rank = (
+                0 if basename == q else 1 if basename.startswith(q) else 2,
+                0 if is_dir else 1,
+                len(rel_path),
+                rel_path,
+            )
+            ranked.append((
+                rank,
+                Completion(
+                    text=rel_path,
+                    start_position=-len(query),
+                    display=rel_path,
+                ),
+            ))
+            if len(ranked) >= self._MAX_MENTION_RESULTS * 3:
+                break
+
+        ranked.sort(key=lambda item: item[0])
+        return [completion for _, completion in ranked[:self._MAX_MENTION_RESULTS]]
 
     def get_completions(self, document: Document, complete_event):
         text = document.text_before_cursor
@@ -162,8 +257,11 @@ class AgentCompleter(Completer):
         at_match = re.search(r"@(\S*)$", text)
         if at_match:
             path_prefix = at_match.group(1)
-            path_doc = Document(path_prefix, len(path_prefix))
-            yield from self._path_completer.get_completions(path_doc, complete_event)
+            if self._should_use_path_completion(path_prefix):
+                path_doc = Document(path_prefix, len(path_prefix))
+                yield from self._path_completer.get_completions(path_doc, complete_event)
+            else:
+                yield from self._basename_completions(path_prefix)
             return
 
         # / 슬래시 명령어 자동완성 (입력이 /로만 이루어진 경우)
@@ -220,6 +318,12 @@ def print_banner() -> None:
 def print_mode_changed(mode: CLIMode) -> None:
     """모드 전환 시 알림을 한 줄로 출력."""
     console.print(f"  [dim magenta]✓ {mode.value} 모드로 전환[/dim magenta]")
+
+
+def _mode_prefix(mode: CLIMode) -> str:
+    if mode == CLIMode.INSTANT:
+        return ""
+    return f"[{mode.value}] "
 
 
 # ── 답변 ──────────────────────────────────────────────────────────────────────
@@ -552,70 +656,134 @@ def _show_tool_preview(tc: ToolCall) -> None:
 
 
 _FILE_MODIFYING_TOOLS = {"write_file", "edit_file", "append_to_file"}
+_COMMAND_ALWAYS_OPTIONS = (
+    SelectOption(label="이번만 승인", value="proceed"),
+    SelectOption(label="이 세션에서 자동 승인", value="always"),
+    SelectOption(label="거부", value="cancel"),
+)
 
 
 class ApprovalHandler:
     """
     도구 실행 승인을 관리합니다.
 
-    세션 동안 "항상 승인" 상태를 기억하며, 같은 도구가 다시 요청되면
-    묻지 않고 자동 승인합니다.
-
-    선택지:
-        Y / Enter — 이번 한 번 승인
-        n         — 거부
-        a         — 항상 승인 (이후 같은 도구는 자동 실행)
+    세션 동안 자동 승인 상태를 기억하며, 같은 요청이 다시 오면 묻지 않고
+    실행한다. 파일 수정 도구는 도구 단위, execute_command는 command prefix
+    단위로 자동 승인 범위를 구분한다.
     """
 
     def __init__(self, tracker: ChangeTracker | None = None) -> None:
-        self._always: set[str] = set()
+        self._always_tools: set[str] = set()
+        self._always_command_prefixes: set[tuple[str, ...]] = set()
         self._tracker = tracker
+
+    def _command_tokens(self, tc: ToolCall) -> tuple[str, ...]:
+        import shlex
+
+        raw = tc.input.get("command", tc.input.get("cmd", ()))
+        if isinstance(raw, (list, tuple)):
+            return tuple(str(part) for part in raw if str(part))
+        if isinstance(raw, str):
+            try:
+                parts = tuple(shlex.split(raw))
+            except ValueError:
+                parts = (raw,)
+            return tuple(part for part in parts if part)
+        return ()
+
+    def _command_prefix(self, tc: ToolCall) -> tuple[str, ...]:
+        tokens = self._command_tokens(tc)
+        if len(tokens) >= 3 and tokens[:2] == ("uv", "run"):
+            return tokens[:3]
+        if tokens:
+            return tokens[:1]
+        return ("<empty-command>",)
+
+    def _scope_label(self, tc: ToolCall) -> str:
+        if tc.name == "execute_command":
+            return " ".join(self._command_prefix(tc))
+        return tc.name
+
+    def _scope_detail(self, tc: ToolCall) -> str:
+        label = self._scope_label(tc)
+        if tc.name == "execute_command":
+            return (
+                f"`이 세션에서 자동 승인`은 `{label}` prefix에만 적용됩니다."
+            )
+        return f"`이 세션에서 자동 승인`은 `{label}` 도구에만 적용됩니다."
+
+    def _is_auto_approved(self, tc: ToolCall) -> bool:
+        if tc.name == "execute_command":
+            return self._command_prefix(tc) in self._always_command_prefixes
+        return tc.name in self._always_tools
+
+    def _remember_auto_approval(self, tc: ToolCall) -> None:
+        if tc.name == "execute_command":
+            self._always_command_prefixes.add(self._command_prefix(tc))
+            return
+        self._always_tools.add(tc.name)
 
     def _record(self, tc: ToolCall) -> None:
         """파일 수정 도구 실행 전 원본을 tracker에 기록합니다."""
-        if self._tracker and tc.name in _FILE_MODIFYING_TOOLS:
+        if not self._tracker:
+            return
+        if tc.name in _FILE_MODIFYING_TOOLS:
             path = tc.input.get("path", "")
             if path:
                 self._tracker.record(path)
+            return
+        if tc.name == "execute_command":
+            self._tracker.record_tree(os.getcwd())
 
     def __call__(self, tc: ToolCall) -> bool:
         # 항상 승인으로 등록된 도구는 묻지 않고 바로 실행
-        if tc.name in self._always:
+        if self._is_auto_approved(tc):
+            scope = self._scope_label(tc)
             console.print(
-                f"  [{_C_INFO}]✓ 자동 승인 ({tc.name})[/{_C_INFO}]"
+                f"  [{_C_INFO}]✓ 자동 승인 ({scope})[/{_C_INFO}]"
             )
             self._record(tc)
             return True
 
         _show_tool_preview(tc)
-
-        from cli.selector import SelectOption, inline_select
-
-        options = [
-            SelectOption(label="승인", value="yes"),
-            SelectOption(label="항상 승인", value="always"),
-            SelectOption(label="거부", value="no"),
-        ]
-        try:
-            selected = inline_select(options)
-        except (KeyboardInterrupt, EOFError):
-            console.print()
-            console.print(f"[{_C_INFO}]취소되었습니다.[/{_C_INFO}]")
+        selected = inline_select(
+            list(_COMMAND_ALWAYS_OPTIONS),
+            message="[bold yellow]승인할까요?[/bold yellow]",
+            detail=self._scope_detail(tc),
+        )
+        if selected in {None, "cancel"}:
             return False
 
+        if selected == "proceed":
+            self._record(tc)
+            return True
+
         if selected == "always":
-            self._always.add(tc.name)
+            self._remember_auto_approval(tc)
+            scope = self._scope_label(tc)
             console.print(
-                f"  [{_C_INFO}]{tc.name} 은(는) 이후 자동 승인됩니다.[/{_C_INFO}]"
+                f"  [{_C_INFO}]{scope} 은(는) 이후 자동 승인됩니다.[/{_C_INFO}]"
             )
             self._record(tc)
             return True
 
-        if selected == "yes":
-            self._record(tc)
-            return True
-
         return False
+
+
+def prompt_with_stdin_pause(message, **kwargs):
+    """prompt_toolkit 입력 중에는 백그라운드 stdin 리더를 멈춘다."""
+    from cli.interrupt import stdin_readers_paused
+
+    with stdin_readers_paused():
+        return _prompt_session.prompt(message, **kwargs)
+
+
+async def prompt_with_stdin_pause_async(message, **kwargs):
+    """비동기 prompt에서도 stdin 리더와 입력 경합이 없도록 한다."""
+    from cli.interrupt import stdin_readers_paused
+
+    with stdin_readers_paused():
+        return await _prompt_session.prompt_async(message, **kwargs)
 
 
 def print_user_input(text: str, session_id_short: str) -> None:
@@ -625,10 +793,9 @@ def print_user_input(text: str, session_id_short: str) -> None:
     입력이 터미널 너비를 넘어 줄바꿈된 경우를 계산해 필요한 만큼 위로 올라간다.
     """
     width = shutil.get_terminal_size().columns
-    # "[session_id] ❯ " 에 해당하는 표시 길이 (TDD 모드 접두어 "[TDD] " 포함 가능)
+    # "[session_id] ❯ " 에 해당하는 표시 길이 (모드 접두어 포함 가능)
     prefix_len = len(f"[{session_id_short}] ❯ ")
-    if _current_mode == CLIMode.TDD:
-        prefix_len += len("[TDD] ")
+    prefix_len += len(_mode_prefix(_current_mode))
     # 프롬프트 줄이 몇 행을 차지했는지 계산
     wrapped_lines = max(1, -(-( prefix_len + len(text)) // width))  # ceiling div
     sys.stdout.write(f"\033[{wrapped_lines}A\r\033[J")
@@ -641,21 +808,47 @@ def get_input(session_id_short: str) -> str:
     사용자 입력을 받아 반환합니다.
 
     - Tab: 자동완성 (@경로, /명령어)
-    - Shift+Tab: 일반/TDD 모드 토글
+    - Shift+Tab: Instant/Plan/TDD 모드 순환
     - ↑↓ 방향키: 이전 입력 히스토리
     - Ctrl-C: KeyboardInterrupt (종료)
     - Ctrl-D / EOF: 빈 문자열 반환
     """
     def _prompt_message():
+        mode = get_current_mode()
+        prefix = _mode_prefix(mode)
         prefix_html = ""
-        if get_current_mode() == CLIMode.TDD:
-            prefix_html = "<ansimagenta><b>[TDD] </b></ansimagenta>"
+        if prefix:
+            prefix_html = f"<ansimagenta><b>{prefix}</b></ansimagenta>"
         return HTML(
             f"{prefix_html}"
             f"<ansiblue><b>[{session_id_short}] ❯ </b></ansiblue>"
         )
 
     try:
-        return _prompt_session.prompt(_prompt_message)
+        return prompt_with_stdin_pause(_prompt_message)
+    except EOFError:
+        return ""
+
+
+async def get_input_async(session_id_short: str) -> str:
+    """
+    사용자 입력을 비동기 방식으로 받아 반환합니다.
+
+    TDD 파이프라인처럼 이미 asyncio 이벤트 루프 안에서 prompt_toolkit 입력이
+    필요한 경로에서 사용한다.
+    """
+    def _prompt_message():
+        mode = get_current_mode()
+        prefix = _mode_prefix(mode)
+        prefix_html = ""
+        if prefix:
+            prefix_html = f"<ansimagenta><b>{prefix}</b></ansimagenta>"
+        return HTML(
+            f"{prefix_html}"
+            f"<ansiblue><b>[{session_id_short}] ❯ </b></ansiblue>"
+        )
+
+    try:
+        return await prompt_with_stdin_pause_async(_prompt_message)
     except EOFError:
         return ""

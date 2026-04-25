@@ -71,6 +71,30 @@ class PipelineConfirmManager:
             return True
         return False
 
+    async def async_confirm(
+        self,
+        confirm_type: ConfirmType,
+        message: str,
+        detail: str | None = None,
+    ) -> bool:
+        """asyncio 루프 내부에서 안전하게 확인 프롬프트를 띄운다."""
+        if confirm_type in self._always_allowed:
+            return True
+
+        is_skippable = confirm_type in _SKIPPABLE
+        options = _SKIPPABLE_OPTIONS if is_skippable else _NON_SKIPPABLE_OPTIONS
+
+        from cli.selector import inline_select_async
+
+        selected = await inline_select_async(options, message=message, detail=detail)
+
+        if selected == "always" and is_skippable:
+            self._always_allowed.add(confirm_type)
+            return True
+        if selected == "proceed":
+            return True
+        return False
+
     def is_always_allowed(self, confirm_type: ConfirmType) -> bool:
         return confirm_type in self._always_allowed
 

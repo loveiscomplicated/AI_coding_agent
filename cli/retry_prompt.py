@@ -64,8 +64,46 @@ class RetryPrompt:
             return RetryDecision(action="retry")
         return RetryDecision(action="quit")
 
+    async def ask_on_test_failure_async(
+        self,
+        failure_summary: str,
+        auto_retry_count: int = 0,
+    ) -> RetryDecision:
+        from cli.selector import inline_select_async
+
+        message = f"❌ 테스트 실패 (자동 재시도 {auto_retry_count}회 소진)"
+        selected = await inline_select_async(
+            _TEST_FAILURE_OPTIONS,
+            message=message,
+            detail=failure_summary,
+        )
+
+        if selected == "retry_with_hint":
+            hint = await self._get_hint_async()
+            if hint is None:
+                return RetryDecision(action="quit")
+            return RetryDecision(action="retry_with_hint", hint=hint)
+        if selected == "retry":
+            return RetryDecision(action="retry")
+        return RetryDecision(action="quit")
+
     def ask_on_review_rejected(self, reviewer_feedback: str) -> RetryDecision:
         selected = inline_select(
+            _REVIEW_REJECTED_OPTIONS,
+            message="⚠️  Reviewer: CHANGES_REQUESTED",
+            detail=reviewer_feedback,
+        )
+
+        if selected == "retry":
+            return RetryDecision(action="retry")
+        if selected == "ignore":
+            return RetryDecision(action="ignore")
+        return RetryDecision(action="quit")
+
+    async def ask_on_review_rejected_async(self, reviewer_feedback: str) -> RetryDecision:
+        from cli.selector import inline_select_async
+
+        selected = await inline_select_async(
             _REVIEW_REJECTED_OPTIONS,
             message="⚠️  Reviewer: CHANGES_REQUESTED",
             detail=reviewer_feedback,
@@ -88,8 +126,21 @@ class RetryPrompt:
             return RetryDecision(action="retry")
         return RetryDecision(action="quit")
 
+    async def ask_on_pipeline_error_async(self, error_message: str) -> RetryDecision:
+        from cli.selector import inline_select_async
+
+        selected = await inline_select_async(
+            _PIPELINE_ERROR_OPTIONS,
+            message="⛔ 파이프라인 오류",
+            detail=error_message,
+        )
+
+        if selected == "retry":
+            return RetryDecision(action="retry")
+        return RetryDecision(action="quit")
+
     def _get_hint(self) -> str | None:
-        from cli.interface import _prompt_session, console
+        from cli.interface import console, prompt_with_stdin_pause
         from prompt_toolkit.formatted_text import HTML
         from prompt_toolkit.key_binding import KeyBindings
 
@@ -102,9 +153,35 @@ class RetryPrompt:
 
         for _ in range(3):
             try:
-                hint = _prompt_session.prompt(
+                hint = prompt_with_stdin_pause(
                     HTML("<ansiyellow><b>  힌트 ❯ </b></ansiyellow>"),
                     key_bindings=hint_kb,
+                ).strip()
+                if hint:
+                    return hint
+                console.print("[dim]  힌트를 입력해주세요.[/dim]")
+            except (KeyboardInterrupt, EOFError):
+                return None
+        return None
+
+    async def _get_hint_async(self) -> str | None:
+        from cli.interface import console, prompt_with_stdin_pause_async
+        from prompt_toolkit.formatted_text import HTML
+        from prompt_toolkit.key_binding import KeyBindings
+
+        hint_kb = KeyBindings()
+
+        @hint_kb.add("escape")
+        def _esc(event):
+            event.app.exit(exception=EOFError())
+
+        for _ in range(3):
+            try:
+                hint = (
+                    await prompt_with_stdin_pause_async(
+                        HTML("<ansiyellow><b>  힌트 ❯ </b></ansiyellow>"),
+                        key_bindings=hint_kb,
+                    )
                 ).strip()
                 if hint:
                     return hint

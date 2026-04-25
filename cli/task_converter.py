@@ -1,11 +1,12 @@
 """
-cli/task_converter.py — 자연어 입력을 단일 Task 객체로 변환하는 미니 회의 레이어.
+cli/task_converter.py — 자연어 입력을 단일 Task 객체로 변환하는 플래닝 레이어.
 
 흐름:
-  1. 사용자 자연어 + (있으면) PROJECT_STRUCTURE.md + @파일 내용을 조립
-  2. LLM과 멀티턴 대화로 의도 정렬
-  3. LLM이 충분히 이해하면 구분자로 감싼 Task JSON 출력
-  4. JSON 파싱 후 Task 객체로 변환
+  1. read-only 탐색으로 관련 파일/구조를 수집 (선택적)
+  2. 사용자 자연어 + PROJECT_STRUCTURE.md + 탐색 메모 + @파일 내용을 조립
+  3. LLM과 멀티턴 대화로 의도 정렬
+  4. LLM이 충분히 이해하면 구분자로 감싼 Task JSON 출력
+  5. JSON 파싱 후 Task 객체로 변환
 
 핵심 원칙:
   - 의도 정렬이 주목적. 태스크 생성은 그 다음의 기계적 단계.
@@ -13,7 +14,7 @@ cli/task_converter.py — 자연어 입력을 단일 Task 객체로 변환하는
   - max_turns(기본 10) 초과 시 ConversionError — 무한 대화 방지 안전장치.
   - ConversionError는 JSON 2연속 파싱 실패 또는 턴 한도 초과 시 발생.
 
-진입점: `TaskConverter.convert(user_input, file_contents=None)` (async)
+진입점: `PlanLoop.plan(user_input, file_contents=None)` (async)
 """
 
 from __future__ import annotations
@@ -24,13 +25,15 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, TYPE_CHECKING
+from typing import Awaitable, Callable, TYPE_CHECKING
 
 from cli import interface as ui
+from core.loop import ReactLoop
 from llm import BaseLLMClient, LLMConfig, Message, create_client
 from orchestrator.complexity import compute_complexity, normalize_complexity
 from orchestrator.task import LANGUAGE_TEST_FRAMEWORK_MAP, Task
 from orchestrator.task_utils import sanitize_task_draft
+from tools.registry import get_tools_schema, make_tool_caller
 
 if TYPE_CHECKING:
     from llm.base import LLMResponse
@@ -45,9 +48,25 @@ _DEFAULT_MAX_TURNS = 10
 
 _PROJECT_STRUCTURE_CACHE_SECONDS = 300
 _MAX_FILE_BYTES = 500_000
+_DISCOVERY_MAX_ITERATIONS = 6
 
 _FILE_REFERENCE_PATTERN = re.compile(r"@(\S+)")
-_SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "instant_task_system.md"
+_PLAN_SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "instant_task_system.md"
+_DISCOVERY_PROMPT_PATH = Path(__file__).parent / "prompts" / "plan_discovery_system.md"
+
+_READ_ONLY_TOOL_NAMES: tuple[str, ...] = (
+    "read_file",
+    "read_file_lines",
+    "list_directory",
+    "search_in_file",
+    "search_files",
+    "get_imports",
+    "get_outline",
+    "get_function_src",
+    "git_status",
+    "git_diff",
+    "git_log",
+)
 
 _BINARY_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico",
@@ -314,12 +333,18 @@ def _build_initial_user_message(
     structure_md: str,
     user_text: str,
     file_refs: dict[str, str],
+    planner_notes: str = "",
 ) -> str:
     parts: list[str] = []
 
     if structure_md.strip():
         parts.append("# 프로젝트 구조\n")
         parts.append(structure_md.rstrip())
+        parts.append("")
+
+    if planner_notes.strip():
+        parts.append("# planner 탐색 메모\n")
+        parts.append(planner_notes.rstrip())
         parts.append("")
 
     if file_refs:
@@ -338,21 +363,34 @@ def _build_initial_user_message(
     return "\n".join(parts)
 
 
-# ── TaskConverter ─────────────────────────────────────────────────────────────
+# ── PlanLoop ─────────────────────────────────────────────────────────────────
 
-class TaskConverter:
-    """미니 회의를 통한 자연어 → 단일 Task 객체 변환기.
+def _schema_provider(provider: str) -> str:
+    if provider in {"openai", "glm", "gemini"}:
+        return "openai"
+    if provider == "claude":
+        return "anthropic"
+    if provider == "ollama":
+        return "ollama"
+    raise ValueError(f"지원하지 않는 planner provider: {provider}")
+
+
+class PlanLoop:
+    """미니 회의를 통한 자연어 → 단일 Task 객체 플래너.
 
     메인 CLI 세션의 provider/model을 재사용하지만, system_prompt는
-    미니 회의용으로 교체한다.
+    플래닝용으로 교체한다.
 
     Args:
         repo_path: 프로젝트 루트 (PROJECT_STRUCTURE.md 위치 + @path 해석 기준)
         llm_config: 메인 CLI 세션의 LLMConfig (model/temperature/max_tokens/extra 재사용)
         provider: LLM provider 문자열 (claude/openai/ollama/glm/gemini)
         client: 사전 빌드된 LLM 클라이언트 (주로 테스트용 DI). None이면 첫 convert 시 생성.
+        discovery_client: read-only 탐색용 LLM 클라이언트. None이면 필요 시 지연 생성.
+        enable_read_only_tools: True면 플래닝 전 read-only 도구 탐색을 수행한다.
         max_turns: 최대 회의 턴 (기본 10). 초과 시 ConversionError.
         input_fn: 사용자 입력 함수 (테스트용 DI). 기본: ui.get_input.
+        input_async_fn: 비동기 사용자 입력 함수. 기본: ui.get_input_async.
         output_fn: LLM 응답 출력 함수. 기본: ui.print_answer.
     """
 
@@ -363,16 +401,38 @@ class TaskConverter:
         provider: str,
         *,
         client: BaseLLMClient | None = None,
+        discovery_client: BaseLLMClient | None = None,
+        enable_read_only_tools: bool = True,
         max_turns: int = _DEFAULT_MAX_TURNS,
         input_fn: Callable[[str], str] | None = None,
+        input_async_fn: Callable[[str], Awaitable[str]] | None = None,
         output_fn: Callable[[str], None] | None = None,
+        on_tool_call: Callable | None = None,
+        on_tool_result: Callable | None = None,
     ) -> None:
         self.repo_path = Path(repo_path).resolve()
         self.max_turns = max_turns
-        self._input_fn = input_fn or (lambda prompt: ui.get_input(prompt))
+        self.enable_read_only_tools = enable_read_only_tools and (
+            discovery_client is not None or client is None
+        )
+        sync_input = input_fn or (lambda prompt: ui.get_input(prompt))
+        self._input_fn = sync_input
+        if input_async_fn is not None:
+            self._input_async_fn = input_async_fn
+        else:
+            async def _default_input_async(prompt: str) -> str:
+                return await ui.get_input_async(prompt)
+
+            async def _wrapped_sync_input(prompt: str) -> str:
+                return sync_input(prompt)
+
+            self._input_async_fn = (
+                _default_input_async if input_fn is None else _wrapped_sync_input
+            )
         self._output_fn = output_fn or (lambda text: ui.print_answer(text))
 
-        system_text = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+        system_text = _PLAN_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+        discovery_text = _DISCOVERY_PROMPT_PATH.read_text(encoding="utf-8")
         self._config = LLMConfig(
             model=llm_config.model,
             temperature=llm_config.temperature,
@@ -380,20 +440,81 @@ class TaskConverter:
             system_prompt=system_text,
             extra=dict(llm_config.extra),
         )
+        self._discovery_config = LLMConfig(
+            model=llm_config.model,
+            temperature=llm_config.temperature,
+            max_tokens=llm_config.max_tokens,
+            system_prompt=discovery_text,
+            extra=dict(llm_config.extra),
+        )
         self._provider = provider
         self._client = client
+        self._discovery_client = discovery_client
+        self._on_tool_call = on_tool_call or ui.print_tool_call
+        self._on_tool_result = on_tool_result or ui.print_tool_result
 
     def _get_client(self) -> BaseLLMClient:
         if self._client is None:
             self._client = create_client(self._provider, self._config)
         return self._client
 
-    async def convert(
+    def _get_discovery_client(self) -> BaseLLMClient:
+        if self._discovery_client is None:
+            self._discovery_client = self._get_client()
+        return self._discovery_client
+
+    def _discover_context(self, user_input: str) -> str:
+        if not self.enable_read_only_tools:
+            return ""
+
+        discovery_client = self._get_discovery_client()
+        if not hasattr(discovery_client, "build_messages"):
+            return ""
+
+        original_prompt = getattr(discovery_client.config, "system_prompt", "")
+        discovery_prompt_text = self._discovery_config.system_prompt
+        if original_prompt == discovery_prompt_text:
+            restore_prompt = False
+        else:
+            discovery_client.config.system_prompt = discovery_prompt_text
+            restore_prompt = True
+
+        try:
+            schema = get_tools_schema(
+                _schema_provider(self._provider),
+                allowed_names=_READ_ONLY_TOOL_NAMES,
+            )
+            loop = ReactLoop(
+                llm=discovery_client,
+                max_iterations=_DISCOVERY_MAX_ITERATIONS,
+                on_tool_call=self._on_tool_call,
+                on_tool_result=self._on_tool_result,
+                tools_schema=schema,
+                tool_caller=make_tool_caller(_READ_ONLY_TOOL_NAMES),
+                role_name="planner",
+            )
+            discovery_prompt = (
+                f"repo_path: {self.repo_path}\n\n"
+                "사용자 요청을 구현 태스크로 좁히기 위해 관련 코드만 읽고 요약하세요.\n"
+                "git 관련 요청이면 git 상태도 직접 확인하세요.\n\n"
+                f"# 사용자 요청\n{user_input}"
+            )
+            result = loop.run(discovery_prompt)
+            if not result.succeeded:
+                raise ConversionError(
+                    f"planner discovery 실패: {result.stop_reason.value}: {result.answer}"
+                )
+            return result.answer.strip()
+        finally:
+            if restore_prompt:
+                discovery_client.config.system_prompt = original_prompt
+
+    async def plan(
         self,
         user_input: str,
         file_contents: dict[str, str] | None = None,
     ) -> ConversionResult:
-        """미니 회의를 실행하고 Task 객체를 반환한다.
+        """플래닝 회의를 실행하고 Task 객체를 반환한다.
 
         Args:
             user_input: 사용자 자연어 입력 (@파일 참조 포함 가능)
@@ -420,8 +541,21 @@ class TaskConverter:
 
         warnings: list[str] = list(fwarnings)
         structure_token_count = len(structure_md) // 4
+        planner_notes = ""
+        if self.enable_read_only_tools:
+            try:
+                planner_notes = await asyncio.to_thread(
+                    self._discover_context, cleaned_input
+                )
+            except ConversionError as exc:
+                warnings.append(str(exc))
 
-        first_msg = _build_initial_user_message(structure_md, cleaned_input, file_refs)
+        first_msg = _build_initial_user_message(
+            structure_md,
+            cleaned_input,
+            file_refs,
+            planner_notes=planner_notes,
+        )
         messages: list[Message] = [Message(role="user", content=first_msg)]
 
         def _build_history() -> list[Message]:
@@ -453,7 +587,7 @@ class TaskConverter:
                 self._output_fn(text)
                 messages.append(Message(role="assistant", content=text))
 
-                reply = self._input_fn("instant")
+                reply = await self._input_async_fn("instant")
                 if not reply.strip():
                     return _abort(turn, "사용자가 빈 입력으로 중단")
 
@@ -502,3 +636,13 @@ class TaskConverter:
         raise ConversionError(
             f"미니 회의가 최대 {self.max_turns}턴을 초과했습니다."
         )
+
+    async def convert(
+        self,
+        user_input: str,
+        file_contents: dict[str, str] | None = None,
+    ) -> ConversionResult:
+        return await self.plan(user_input, file_contents=file_contents)
+
+
+TaskConverter = PlanLoop

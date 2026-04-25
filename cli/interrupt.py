@@ -14,11 +14,14 @@ context manager로 사용:
 
 from __future__ import annotations
 
+import os
 import select
 import sys
 import threading
+from contextlib import contextmanager
 
 _ESC = "\x1b"
+_ESC_SEQUENCE_TIMEOUT = 0.03
 
 # ── 전역 stdin 리더 레지스트리 ────────────────────────────────────────────────
 # pause() / resume() 인터페이스를 가진 백그라운드 stdin 리더 목록.
@@ -55,6 +58,49 @@ def resume_stdin_readers() -> None:
         readers = list(_stdin_readers)
     for reader in readers:
         reader.resume()
+
+
+@contextmanager
+def stdin_readers_paused():
+    """백그라운드 stdin 리더를 일시정지한 상태로 블록을 실행한다."""
+    pause_stdin_readers()
+    try:
+        yield
+    finally:
+        resume_stdin_readers()
+
+
+def _is_standalone_escape(
+    fd: int,
+    *,
+    read_fn=None,
+    select_fn=None,
+    timeout: float = _ESC_SEQUENCE_TIMEOUT,
+) -> bool:
+    """
+    ESC 뒤에 추가 바이트가 즉시 따라오지 않을 때만 단독 ESC로 본다.
+
+    방향키/기능키 등의 ANSI 시퀀스는 ESC로 시작하므로, 후속 바이트가 감지되면
+    시퀀스를 짧게 drain하고 인터럽트로 처리하지 않는다.
+    """
+    if read_fn is None:
+        read_fn = os.read
+    if select_fn is None:
+        select_fn = select.select
+
+    ready, _, _ = select_fn([fd], [], [], timeout)
+    if not ready:
+        return True
+
+    # 추가 바이트가 있으면 ANSI/Alt 시퀀스로 간주하고 짧게 비운다.
+    while True:
+        chunk = read_fn(fd, 1)
+        if not chunk:
+            break
+        ready, _, _ = select_fn([fd], [], [], timeout)
+        if not ready:
+            break
+    return False
 
 
 class EscInterruptHandler:
@@ -108,9 +154,15 @@ class EscInterruptHandler:
 
     def pause(self) -> None:
         """백그라운드 스레드가 터미널을 반환할 때까지 블록하며 일시정지한다."""
+        if self._thread is None or not self._thread.is_alive():
+            return
         self._yielded.clear()
         self._paused.set()
-        self._yielded.wait(timeout=0.3)
+        while not self._yielded.wait(timeout=0.05):
+            if self._stop_listener.is_set():
+                break
+            if self._thread is None or not self._thread.is_alive():
+                break
 
     def resume(self) -> None:
         """일시정지를 해제한다."""
@@ -154,8 +206,8 @@ class EscInterruptHandler:
                 # 100ms 주기로 폴링 — CPU 점유 최소화
                 ready, _, _ = select.select([sys.stdin], [], [], 0.1)
                 if ready:
-                    ch = sys.stdin.read(1)
-                    if ch == _ESC:
+                    ch = os.read(fd, 1)
+                    if ch == _ESC.encode() and _is_standalone_escape(fd):
                         self._interrupted.set()
                         break
         except Exception:

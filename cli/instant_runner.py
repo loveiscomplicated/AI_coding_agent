@@ -1,7 +1,7 @@
 """
 cli/instant_runner.py — CLI 전용 단일 태스크 파이프라인 러너
 
-자연어 한 줄 → 미니 회의(TaskConverter) → 확인(PipelineConfirmManager) →
+자연어 한 줄 → 플래너(PlanLoop) → 확인(PipelineConfirmManager) →
 TDDPipeline 실행 → 재시도(RetryPrompt) → GitWorkflow 로컬 커밋 → 결과 출력.
 
 진입점: `InstantRunner.run(user_input)` (async)
@@ -19,7 +19,7 @@ from agents.roles import ROLE_INTERVENTION, ROLE_TEST_WRITER, ROLE_IMPLEMENTER, 
 from cli.interface import print_pipeline_result, print_task_summary
 from cli.pipeline_confirm import ConfirmType, PipelineConfirmManager
 from cli.retry_prompt import RetryDecision, RetryPrompt
-from cli.task_converter import ConversionError, TaskConverter
+from cli.task_converter import ConversionError, PlanLoop
 from llm import LLMConfig, create_client
 from orchestrator.escalation import TIER_INTERNAL_MAX_RETRIES, resolve_tier_chain, should_escalate_tier
 from orchestrator.git_workflow import GitWorkflow
@@ -86,9 +86,15 @@ class _StopController:
 
     def pause(self) -> None:
         """백그라운드 스레드가 터미널을 반환할 때까지 블록하며 일시정지한다."""
+        if self._thread is None or not self._thread.is_alive():
+            return
         self._yielded.clear()
         self._paused.set()
-        self._yielded.wait(timeout=0.3)
+        while not self._yielded.wait(timeout=0.05):
+            if self._stopped:
+                break
+            if self._thread is None or not self._thread.is_alive():
+                break
 
     def resume(self) -> None:
         """일시정지를 해제한다."""
@@ -145,7 +151,7 @@ class InstantRunner:
     CLI에서 단일 태스크를 TDD 파이프라인으로 실행한다.
 
     전체 흐름:
-      1. TaskConverter로 미니 회의 → Task 생성 (Esc 중단 가능)
+      1. PlanLoop로 미니 회의 → Task 생성 (Esc 중단 가능)
       2. PipelineConfirmManager로 태스크 확인 (TASK_REVIEW, 스킵 가능)
       3. 태스크 크기 초과 검사 (target_files >= 5)
       4. TDDPipeline 실행 (mode에 따라 skip_test_writer 결정)
@@ -159,16 +165,20 @@ class InstantRunner:
     def __init__(
         self,
         repo_path: str,
-        converter: TaskConverter,
         confirm: PipelineConfirmManager,
         retry: RetryPrompt,
         default_role_models: dict[str, dict[str, str]],
         complexity_role_models: dict[str, dict[str, dict[str, str]]],
+        *,
+        planner: PlanLoop | None = None,
+        converter: PlanLoop | None = None,
         auto_select_by_complexity: bool = True,
         mode: RunMode = RunMode.FULL_TDD,
     ):
         self.repo_path = repo_path
-        self.converter = converter
+        self.planner = planner or converter
+        if self.planner is None:
+            raise ValueError("planner 또는 converter 중 하나는 필요합니다.")
         self.confirm = confirm
         self.retry = retry
         self.default_role_models = default_role_models
@@ -180,10 +190,10 @@ class InstantRunner:
         """자연어 입력을 받아 전체 흐름을 실행한다."""
         # ── 1. 미니 회의 ─────────────────────────────────────────────────────
         try:
-            conversion = await self.converter.convert(user_input)
+            conversion = await self.planner.plan(user_input)
         except ConversionError as exc:
             logger.warning("미니 회의 오류: %s", exc)
-            decision = self.retry.ask_on_pipeline_error(str(exc))
+            decision = await self.retry.ask_on_pipeline_error_async(str(exc))
             if decision.action == "retry":
                 return await self.run(user_input)
             return InstantRunResult(
@@ -203,7 +213,7 @@ class InstantRunner:
         print_task_summary(task, warnings=conversion.warnings or [])
 
         # ── 2. TASK_REVIEW 확인 (스킵 가능) ──────────────────────────────────
-        if not self.confirm.confirm(
+        if not await self.confirm.async_confirm(
             ConfirmType.TASK_REVIEW,
             "태스크를 확인하세요.",
             detail=f"대상 파일: {', '.join(task.target_files) or '(없음)'}",
@@ -215,7 +225,7 @@ class InstantRunner:
 
         # ── 2.5. 태스크 크기 초과 검사 ───────────────────────────────────────
         if len(task.target_files) >= 5:
-            if not self.confirm.confirm(
+            if not await self.confirm.async_confirm(
                 ConfirmType.TASK_TOO_LARGE,
                 f"⚠️  target_files가 {len(task.target_files)}개입니다. "
                 "이 작업은 멀티 에이전트 파이프라인이 더 적합할 수 있습니다.",
@@ -248,13 +258,13 @@ class InstantRunner:
                 orch_attempt = 0
                 while True:
                     try:
-                        result = self._run_pipeline_once(task, pipeline, tier=current_tier)
+                        result = await self._run_pipeline_once(task, pipeline, tier=current_tier)
                     except KeyboardInterrupt:
                         user_aborted = True
                         break
                     except Exception as exc:
                         logger.exception("파이프라인 실행 중 예외 발생: %s", exc)
-                        decision = self.retry.ask_on_pipeline_error(str(exc))
+                        decision = await self.retry.ask_on_pipeline_error_async(str(exc))
                         if decision.action == "retry":
                             manual_retry_count += 1
                             manual_restart = True
@@ -348,9 +358,9 @@ class InstantRunner:
                 or "(알 수 없는 오류)"
             )
             if any(failure.startswith(p) for p in _INFRA_PREFIXES):
-                decision = self.retry.ask_on_pipeline_error(failure)
+                decision = await self.retry.ask_on_pipeline_error_async(failure)
             else:
-                decision = self.retry.ask_on_test_failure(
+                decision = await self.retry.ask_on_test_failure_async(
                     failure, auto_retry_count=total_auto_retries,
                 )
 
@@ -423,7 +433,7 @@ class InstantRunner:
         # CLI TDD에서는 intervention 자체는 항상 capable 계열을 유지한다.
         set_complexity_routing(False, None)
 
-    def _run_pipeline_once(
+    async def _run_pipeline_once(
         self,
         task: Task,
         pipeline: TDDPipeline,
@@ -445,7 +455,7 @@ class InstantRunner:
                 workspace.cleanup()
             else:
                 if result.succeeded:
-                    ok = self._check_post_pipeline(
+                    ok = await self._check_post_pipeline(
                         task, workspace, result, initial_src_snapshot
                     )
                     if ok:
@@ -459,7 +469,7 @@ class InstantRunner:
         assert last_result is not None
         return last_result
 
-    def _check_post_pipeline(
+    async def _check_post_pipeline(
         self,
         task: Task,
         workspace: WorkspaceManager,
@@ -480,7 +490,7 @@ class InstantRunner:
             current_src_snapshot,
         )
         if out_of_scope:
-            if not self.confirm.confirm(
+            if not await self.confirm.async_confirm(
                 ConfirmType.OUT_OF_SCOPE_FILE,
                 "⚠️  태스크 범위 밖 파일이 수정되었습니다.",
                 detail="\n".join(f"  - {f}" for f in out_of_scope),
@@ -490,7 +500,7 @@ class InstantRunner:
         # ── 2. 파일 삭제 감지 (workspace diff 기준) ──────────────────────────
         deleted_files = self._get_deleted_files(initial_src_snapshot, current_src_snapshot)
         if deleted_files:
-            if not self.confirm.confirm(
+            if not await self.confirm.async_confirm(
                 ConfirmType.FILE_DELETION,
                 "⚠️  기존 파일이 삭제되었습니다.",
                 detail="\n".join(f"  - {f}" for f in deleted_files),
@@ -499,7 +509,7 @@ class InstantRunner:
 
         # ── 3. 기존 테스트 깨짐 감지 ─────────────────────────────────────────
         if self._has_broken_existing_tests(pipeline_result, workspace):
-            if not self.confirm.confirm(
+            if not await self.confirm.async_confirm(
                 ConfirmType.EXISTING_TEST_BROKEN,
                 "⚠️  기존 테스트가 깨진 것으로 감지되었습니다.",
                 detail="구현이 기존 테스트 파일을 수정했거나 기존 테스트를 실패시킵니다.",
@@ -509,7 +519,7 @@ class InstantRunner:
         # ── 4. Reviewer CHANGES_REQUESTED ────────────────────────────────────
         verdict = pipeline_result.review.verdict if pipeline_result.review else None
         if verdict == "CHANGES_REQUESTED":
-            if not self.confirm.confirm(
+            if not await self.confirm.async_confirm(
                 ConfirmType.COMMIT_CHANGES_REQUESTED,
                 "⚠️  Reviewer가 변경을 요청했습니다. 그래도 커밋하시겠습니까?",
                 detail=pipeline_result.review.details if pipeline_result.review else None,
@@ -518,7 +528,7 @@ class InstantRunner:
 
         # ── 5. APPROVED 후 커밋 확인 (스킵 가능) ─────────────────────────────
         if verdict in ("APPROVED", "APPROVED_WITH_SUGGESTIONS"):
-            if not self.confirm.confirm(
+            if not await self.confirm.async_confirm(
                 ConfirmType.COMMIT_APPROVED,
                 "✅ Reviewer 승인. 커밋하시겠습니까?",
             ):
