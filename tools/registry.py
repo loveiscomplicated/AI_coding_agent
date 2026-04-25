@@ -26,7 +26,17 @@ from tools.file_tools import (
 )
 from tools.shell_tools import execute_command
 from tools.code_tools import get_imports, get_outline, get_function_src
-from tools.git_tools import git_status, git_diff, git_log, git_add, git_commit
+from tools.git_tools import (
+    analyze_uncommitted_changes,
+    commit_group,
+    git_add,
+    git_commit,
+    git_diff,
+    git_log,
+    git_status,
+    propose_commit_groups,
+    stage_group,
+)
 from tools.hotline_tools import ask_user
 from tools.schemas import ToolResult as SchemaToolResult
 
@@ -269,6 +279,50 @@ TOOL_REGISTRY: dict[str, dict] = {
             "message": ("string", "커밋 메시지", True, None),
         },
     },
+    "analyze_uncommitted_changes": {
+        "fn": analyze_uncommitted_changes,
+        "description": (
+            "미커밋 변경 상태를 구조화해서 반환한다. "
+            "status 엔트리와 staged/unstaged diff stat을 함께 제공한다."
+        ),
+        "params": {
+            "repo_path": ("string", "git 저장소 경로 (기본값: '.')", False, "."),
+        },
+    },
+    "propose_commit_groups": {
+        "fn": propose_commit_groups,
+        "description": (
+            "미커밋 변경 파일을 경로 기반 휴리스틱으로 커밋 그룹 후보로 제안한다."
+        ),
+        "params": {
+            "repo_path": ("string", "git 저장소 경로 (기본값: '.')", False, "."),
+            "max_groups": ("integer", "최대 그룹 수", False, 5),
+        },
+    },
+    "stage_group": {
+        "fn": stage_group,
+        "description": (
+            "명시된 변경 파일만 안전하게 스테이징한다. "
+            "'.' 같은 광범위 경로는 허용하지 않는다. "
+            "replace=true 이면 기존 staged 상태를 비우고 지정 경로만 다시 stage한다."
+        ),
+        "params": {
+            "repo_path": ("string", "git 저장소 경로 (기본값: '.')", False, "."),
+            "paths": ("array", "스테이징할 변경 파일 경로 목록", True, None),
+            "replace": ("boolean", "기존 staged 상태를 비우고 지정 경로만 다시 stage할지 여부", False, False),
+        },
+    },
+    "commit_group": {
+        "fn": commit_group,
+        "description": (
+            "현재 staged 파일이 기대 경로와 일치하는지 검증한 뒤 커밋한다."
+        ),
+        "params": {
+            "repo_path": ("string", "git 저장소 경로 (기본값: '.')", False, "."),
+            "message": ("string", "커밋 메시지", True, None),
+            "expected_paths": ("array", "커밋 직전 기대하는 staged 파일 목록", False, None),
+        },
+    },
     "ask_user": {
         "fn": ask_user,
         "description": (
@@ -400,7 +454,34 @@ TOOLS_SCHEMA_OLLAMA: list[dict] = _build_tools_schema(TOOL_REGISTRY, "ollama")
 # ── 호출 인터페이스 ───────────────────────────────────────────────────────────
 
 
-def call_tool(name: str, **kwargs):
+def get_tool_registry(
+    allowed_names: set[str] | list[str] | tuple[str, ...] | None = None,
+) -> dict[str, dict]:
+    """허용된 이름만 포함한 도구 레지스트리 뷰를 반환한다."""
+    if allowed_names is None:
+        return dict(TOOL_REGISTRY)
+
+    names = set(allowed_names)
+    missing = sorted(name for name in names if name not in TOOL_REGISTRY)
+    if missing:
+        raise ValueError(f"등록되지 않은 도구 이름: {missing}")
+
+    return {
+        name: meta
+        for name, meta in TOOL_REGISTRY.items()
+        if name in names
+    }
+
+
+def get_tools_schema(
+    provider: str,
+    allowed_names: set[str] | list[str] | tuple[str, ...] | None = None,
+) -> list[dict]:
+    """provider별 도구 스키마를 생성한다."""
+    return _build_tools_schema(get_tool_registry(allowed_names), provider)
+
+
+def _call_tool_from_registry(registry: dict[str, dict], name: str, **kwargs):
     """
     이름으로 도구를 호출합니다.
 
@@ -414,12 +495,28 @@ def call_tool(name: str, **kwargs):
     Raises:
         ValueError: 등록되지 않은 도구 이름
     """
-    if name not in TOOL_REGISTRY:
+    if name not in registry:
         raise ValueError(
             f"알 수 없는 도구: '{name}'. "
-            f"사용 가능한 도구: {list(TOOL_REGISTRY.keys())}"
+            f"사용 가능한 도구: {list(registry.keys())}"
         )
-    return TOOL_REGISTRY[name]["fn"](**kwargs)
+    return registry[name]["fn"](**kwargs)
+
+
+def call_tool(name: str, **kwargs):
+    return _call_tool_from_registry(TOOL_REGISTRY, name, **kwargs)
+
+
+def make_tool_caller(
+    allowed_names: set[str] | list[str] | tuple[str, ...] | None = None,
+):
+    """허용된 도구 이름 집합으로 제한된 호출기를 생성한다."""
+    registry = get_tool_registry(allowed_names)
+
+    def _caller(name: str, **kwargs):
+        return _call_tool_from_registry(registry, name, **kwargs)
+
+    return _caller
 
 
 # ── 체인 등록 시스템 (Tool Chaining) ─────────────────────────────────────────
