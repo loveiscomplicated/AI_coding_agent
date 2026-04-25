@@ -19,8 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 _VALID_PROVIDERS = {"claude", "openai", "ollama", "glm", "gemini"}
-_DEFAULT_PROVIDER = "claude"
-_DEFAULT_MODEL = "claude-sonnet-4-6"
+_DEFAULT_PROVIDER = "openai"
+_DEFAULT_MODEL = "gpt-4.1-mini"
 _DEFAULT_MAX_ITERATIONS = 20
 _DEFAULT_MAX_TOKENS = 4096
 _DEFAULT_AUTO_APPROVE = False

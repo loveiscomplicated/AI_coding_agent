@@ -20,6 +20,7 @@ core/loop.py — ReAct 루프 (Reason → Act → Observe → Heal → Replan)
 from __future__ import annotations
 
 import logging
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -43,7 +44,17 @@ from core.compactor import compact_history, estimate_tokens
 logger = logging.getLogger(__name__)
 
 # 실행 전 사용자 승인이 필요한 도구 목록
-_APPROVAL_REQUIRED = {"write_file", "edit_file", "append_to_file", "execute_command", "git_commit"}
+_APPROVAL_REQUIRED = {
+    "write_file",
+    "edit_file",
+    "append_to_file",
+    "execute_command",
+    "git_add",
+    "git_commit",
+    "stage_group",
+    "commit_group",
+    "verified_commit",
+}
 
 # 파일 쓰기 도구 (코드블록 감지 → 도구 사용 유도에 사용)
 _WRITE_TOOLS = frozenset({"write_file", "edit_file", "append_to_file"})
@@ -106,14 +117,56 @@ class HealEvent:
 @dataclass
 class HealAttemptTracker:
     """루프 전체에서 도구별 힐 시도 횟수를 추적한다."""
-    counts: dict[str, int] = field(default_factory=dict)
+    counts: dict[tuple[str, str, str], int] = field(default_factory=dict)
 
-    def increment(self, tool_use_id: str) -> int:
-        self.counts[tool_use_id] = self.counts.get(tool_use_id, 0) + 1
-        return self.counts[tool_use_id]
+    @staticmethod
+    def _normalize_input(tool_input: dict[str, Any]) -> str:
+        try:
+            return json.dumps(
+                tool_input,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except TypeError:
+            return repr(tool_input)
 
-    def get(self, tool_use_id: str) -> int:
-        return self.counts.get(tool_use_id, 0)
+    @staticmethod
+    def _error_signature(error_content: str) -> str:
+        first_line = (error_content or "").strip().splitlines()[0] if error_content else ""
+        if "staged 파일이 기대 경로와 다릅니다" in first_line:
+            return "staged_path_mismatch"
+        return first_line[:160]
+
+    def key_for(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        error_content: str,
+    ) -> tuple[str, str, str]:
+        return (
+            tool_name,
+            self._normalize_input(tool_input),
+            self._error_signature(error_content),
+        )
+
+    def increment(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        error_content: str,
+    ) -> int:
+        key = self.key_for(tool_name, tool_input, error_content)
+        self.counts[key] = self.counts.get(key, 0) + 1
+        return self.counts[key]
+
+    def get(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        error_content: str,
+    ) -> int:
+        return self.counts.get(self.key_for(tool_name, tool_input, error_content), 0)
 
 
 @dataclass
@@ -184,6 +237,8 @@ class ReactLoop:
         compaction_keep_last_n: int = 4,
         compaction_cooldown_iters: int = 2,   # 연쇄 compaction 방지
         role_name: str | None = None,  # call_log 엔트리에 기록되는 역할 태그
+        tools_schema: list[dict] | None = None,  # 기본 스키마 대신 사용할 도구 스키마
+        tool_caller: Callable[..., Any] | None = None,  # 제한된 도구 호출기 주입
     ):
         self.llm: BaseLLMClient = llm
         self.max_iterations = max_iterations
@@ -210,9 +265,14 @@ class ReactLoop:
         self.compaction_keep_last_n = int(compaction_keep_last_n)
         self.compaction_cooldown_iters = int(compaction_cooldown_iters)
         self.role_name = role_name
+        # 기본 경로는 실행 시점의 module-level call_tool 을 사용해, 테스트에서
+        # patch("core.loop.call_tool") 한 값이 반영되도록 둔다.
+        self._tool_caller = tool_caller
         # run 별로 리셋되는 쿨다운 상태 (_maybe_compact 에서만 수정)
         self._last_compaction_iter: int | None = None
-        self.TOOLS_SCHEMA = self.get_tools_schema()
+        self.TOOLS_SCHEMA = (
+            tools_schema if tools_schema is not None else self.get_tools_schema()
+        )
 
     # ── 공개 인터페이스 ────────────────────────────────────────────────────────
 
@@ -250,6 +310,7 @@ class ReactLoop:
         _write_tool_used = False  # 루프 동안 쓰기 도구가 호출되었는지 추적
         _nudge_attempted = False  # 코드블록 감지 → 도구 사용 유도를 이미 시도했는지
         _heal_tracker = HealAttemptTracker()  # [Module 1] 도구별 힐 시도 횟수
+        hard_stop_answer = "도구 실행 중 복구 불가능한 오류가 발생했습니다."
         # run 시작 시 쿨다운 상태 초기화 — 이전 run 의 상태 누수 방지
         self._last_compaction_iter = None
 
@@ -477,7 +538,7 @@ class ReactLoop:
                             break
 
                         if ec == ErrorClass.FIXABLE:
-                            attempt = _heal_tracker.increment(tc.id)
+                            attempt = _heal_tracker.increment(tc.name, tc.input, tr.content)
                             logger.warning(
                                 "[HEAL] '%s' FIXABLE 에러 (attempt %d/%d): %s",
                                 tc.name, attempt, self.max_heal_attempts,
@@ -490,6 +551,22 @@ class ReactLoop:
                                 error_class=ec.value,
                                 error_summary=tr.content[:200],
                             ))
+
+                            if (
+                                tc.name == "commit_group"
+                                and "staged 파일이 기대 경로와 다릅니다" in tr.content
+                                and attempt >= 2
+                            ):
+                                logger.error(
+                                    "[HEAL] '%s' staged mismatch 반복 — 복구 불가 상태로 조기 종료",
+                                    tc.name,
+                                )
+                                hard_stop = True
+                                hard_stop_answer = (
+                                    "commit_group 의 staged 상태 불일치가 반복되었습니다. "
+                                    "현재 스테이징 구성을 먼저 정리해야 합니다."
+                                )
+                                break
 
                             if attempt <= self.max_heal_attempts:
                                 # 부분 tool_results + 힐 프롬프트를 메시지에 주입
@@ -636,7 +713,7 @@ class ReactLoop:
 
             if hard_stop:
                 return LoopResult(
-                    answer="도구 실행 중 복구 불가능한 오류가 발생했습니다.",
+                    answer=hard_stop_answer,
                     stop_reason=StopReason.TOOL_ERROR,
                     iterations=iterations,
                     messages=messages,
@@ -811,7 +888,8 @@ class ReactLoop:
         # ── 도구 실행 ─────────────────────────────────────────────────────────
         logger.debug("도구 실행: %s(%s)", tc.name, tc.input)
         try:
-            result = call_tool(tc.name, **tc.input)
+            tool_caller = self._tool_caller or call_tool
+            result = tool_caller(tc.name, **tc.input)
             if result.success:
                 return ToolResult(
                     tool_use_id=tc.id,
