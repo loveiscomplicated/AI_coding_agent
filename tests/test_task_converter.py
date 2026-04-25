@@ -215,6 +215,34 @@ def test_multi_turn_ambiguous_request(tmp_path):
     assert any(m.role == "user" and "예외 raise" in m.content for m in second_call)
 
 
+def test_multi_turn_prefers_async_input_fn(tmp_path):
+    replies: list[str] = []
+
+    async def _input_async(prompt: str) -> str:
+        replies.append(prompt)
+        return "예외 raise"
+
+    conv = TaskConverter(
+        repo_path=str(tmp_path),
+        llm_config=LLMConfig(model="fake"),
+        provider="claude",
+        client=FakeClient([
+            "중복 발견 시 예외 raise할까요, bool 반환할까요?",
+            _make_task_response(),
+        ]),
+        input_fn=lambda _: pytest.fail("sync input_fn should not be used"),
+        input_async_fn=_input_async,
+        output_fn=lambda _: None,
+    )
+    (tmp_path / "PROJECT_STRUCTURE.md").write_text("# PROJECT_STRUCTURE\n", encoding="utf-8")
+
+    result = _run(conv.convert("이메일 중복 검사 추가"))
+
+    assert result.aborted is False
+    assert result.task is not None
+    assert replies == ["instant"]
+
+
 def test_user_abort_esc(tmp_path):
     """빈 입력(Esc/Ctrl-D) → 즉시 aborted=True, task is None."""
     conv, client, outputs = _make_converter(

@@ -34,13 +34,13 @@ from core.config import AgentConfig, load_config, save_config   # 아직 없음
 
 
 class TestAgentConfigDefaults:
-    def test_default_provider_is_claude(self):
+    def test_default_provider_is_openai(self):
         cfg = AgentConfig()
-        assert cfg.provider == "claude"
+        assert cfg.provider == "openai"
 
-    def test_default_model_is_sonnet(self):
+    def test_default_model_is_gpt_4_1_mini(self):
         cfg = AgentConfig()
-        assert "sonnet" in cfg.model or "claude" in cfg.model
+        assert cfg.model == "gpt-4.1-mini"
 
     def test_default_max_iterations_positive(self):
         cfg = AgentConfig()
@@ -111,7 +111,7 @@ class TestLoadConfig:
         cfg_file = tmp_path / "config.toml"
         cfg_file.write_text('provider = "invalid_provider_xyz"\n', encoding="utf-8")
         cfg = load_config(str(cfg_file))
-        assert cfg.provider in ("claude", "openai", "ollama")
+        assert cfg.provider in ("openai", "ollama", "gemini", "glm")
 
     def test_invalid_toml_returns_defaults(self, tmp_path):
         """파싱 불가 파일이면 기본값 반환."""
@@ -155,7 +155,7 @@ class TestSaveConfig:
 
     def test_overwrites_existing_file(self, tmp_path):
         cfg_file = tmp_path / "config.toml"
-        save_config(AgentConfig(provider="claude"), str(cfg_file))
+        save_config(AgentConfig(provider="openai"), str(cfg_file))
         save_config(AgentConfig(provider="openai"), str(cfg_file))
 
         loaded = load_config(str(cfg_file))
@@ -194,16 +194,16 @@ class TestAgentConfigValidation:
             AgentConfig(max_iterations=0)
 
     def test_valid_providers_accepted(self):
-        for p in ("claude", "openai", "ollama"):
+        for p in ("claude", "openai", "ollama", "gemini", "glm"):
             cfg = AgentConfig(provider=p)
             assert cfg.provider == p
 
     def test_equality(self):
-        cfg1 = AgentConfig(provider="claude", model="sonnet")
-        cfg2 = AgentConfig(provider="claude", model="sonnet")
+        cfg1 = AgentConfig(provider="openai", model="gpt-4.1-mini")
+        cfg2 = AgentConfig(provider="openai", model="gpt-4.1-mini")
         assert cfg1 == cfg2
 
     def test_inequality(self):
-        cfg1 = AgentConfig(provider="claude")
-        cfg2 = AgentConfig(provider="openai")
+        cfg1 = AgentConfig(provider="openai")
+        cfg2 = AgentConfig(provider="gemini")
         assert cfg1 != cfg2

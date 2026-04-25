@@ -2,7 +2,7 @@
 tests/test_instant_runner.py — InstantRunner 단위 테스트
 
 TDDPipeline, WorkspaceManager, GitWorkflow는 모두 mock.
-TaskConverter, PipelineConfirmManager, RetryPrompt는 mock 인스턴스 직접 주입.
+PlanLoop, PipelineConfirmManager, RetryPrompt는 mock 인스턴스 직접 주입.
 _build_pipeline() 은 lambda 오버라이드로 mock pipeline을 주입한다.
 """
 
@@ -20,7 +20,7 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
 from cli.instant_runner import InstantRunner, InstantRunResult, RunMode
 from cli.pipeline_confirm import ConfirmType, PipelineConfirmManager
 from cli.retry_prompt import RetryDecision, RetryPrompt
-from cli.task_converter import ConversionResult, TaskConverter
+from cli.task_converter import ConversionError, ConversionResult, PlanLoop
 from cli.config import default_complexity_role_models, default_role_models
 from orchestrator.pipeline import PipelineMetrics, PipelineResult, ReviewResult
 from orchestrator.task import Task
@@ -86,7 +86,7 @@ def _make_failure_result(task: Task, reason: str = "테스트 실패") -> Pipeli
 
 def _make_runner(
     *,
-    converter: TaskConverter | None = None,
+    converter: PlanLoop | None = None,
     confirm: PipelineConfirmManager | None = None,
     retry: RetryPrompt | None = None,
     auto_select_by_complexity: bool = True,
@@ -94,7 +94,7 @@ def _make_runner(
 ) -> InstantRunner:
     return InstantRunner(
         repo_path="/tmp/repo",
-        converter=converter or MagicMock(spec=TaskConverter),
+        converter=converter or MagicMock(spec=PlanLoop),
         confirm=confirm or MagicMock(spec=PipelineConfirmManager),
         retry=retry or MagicMock(spec=RetryPrompt),
         default_role_models=default_role_models(),
@@ -139,11 +139,11 @@ def _run(coro):
 
 def test_full_tdd_success():
     task = _make_task()
-    converter = MagicMock(spec=TaskConverter)
-    converter.convert = AsyncMock(return_value=_make_conversion(task=task))
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(task=task))
 
     confirm = MagicMock(spec=PipelineConfirmManager)
-    confirm.confirm.return_value = True
+    confirm.async_confirm = AsyncMock(return_value=True)
 
     success_result = _make_success_result(task)
     mock_pipeline = MagicMock()
@@ -176,11 +176,11 @@ def test_full_tdd_success():
 @patch("cli.instant_runner.TDDPipeline")
 def test_no_tdd_skips_test_writer(mock_pipeline_cls, mock_ws_cls, mock_git_cls, mock_create_client):
     task = _make_task()
-    converter = MagicMock(spec=TaskConverter)
-    converter.convert = AsyncMock(return_value=_make_conversion(task=task))
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(task=task))
 
     confirm = MagicMock(spec=PipelineConfirmManager)
-    confirm.confirm.return_value = True
+    confirm.async_confirm = AsyncMock(return_value=True)
 
     success_result = _make_success_result(task)
     mock_pipeline_cls.return_value.run.return_value = success_result
@@ -207,8 +207,8 @@ def test_no_tdd_skips_test_writer(mock_pipeline_cls, mock_ws_cls, mock_git_cls, 
 
 
 def test_mini_meeting_abort():
-    converter = MagicMock(spec=TaskConverter)
-    converter.convert = AsyncMock(return_value=_make_conversion(aborted=True))
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(aborted=True))
 
     mock_pipeline = MagicMock()
     runner = _make_runner(converter=converter)
@@ -221,16 +221,32 @@ def test_mini_meeting_abort():
     mock_pipeline.run.assert_not_called()
 
 
+def test_conversion_error_uses_async_pipeline_retry_prompt():
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(side_effect=ConversionError("broken json"))
+
+    retry = MagicMock(spec=RetryPrompt)
+    retry.ask_on_pipeline_error_async = AsyncMock(return_value=RetryDecision(action="quit"))
+
+    runner = _make_runner(converter=converter, retry=retry)
+    runner._configure_intervention_llms = lambda: None
+
+    result = _run(runner.run("foo 기능 구현"))
+
+    assert result.user_aborted is True
+    retry.ask_on_pipeline_error_async.assert_called_once_with("broken json")
+
+
 # ── 테스트 4: 자동 재시도 소진 → RetryPrompt 호출 → retry → 성공 ──────────────
 
 
 def test_auto_retry_then_user_retry():
     task = _make_task()
-    converter = MagicMock(spec=TaskConverter)
-    converter.convert = AsyncMock(return_value=_make_conversion(task=task))
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(task=task))
 
     confirm = MagicMock(spec=PipelineConfirmManager)
-    confirm.confirm.return_value = True
+    confirm.async_confirm = AsyncMock(return_value=True)
 
     failure_result = _make_failure_result(task)
     success_result = _make_success_result(task)
@@ -242,7 +258,7 @@ def test_auto_retry_then_user_retry():
     mock_git.run.return_value = ""
 
     retry = MagicMock(spec=RetryPrompt)
-    retry.ask_on_test_failure.return_value = RetryDecision(action="retry")
+    retry.ask_on_test_failure_async = AsyncMock(return_value=RetryDecision(action="retry"))
 
     runner = _make_runner(
         converter=converter,
@@ -260,7 +276,7 @@ def test_auto_retry_then_user_retry():
 
     assert result.success is True
     assert result.retry_count == 1
-    retry.ask_on_test_failure.assert_called_once()
+    retry.ask_on_test_failure_async.assert_called_once()
 
 
 # ── 테스트 5: retry_with_hint → task.description에 힌트 주입 ─────────────────
@@ -268,11 +284,11 @@ def test_auto_retry_then_user_retry():
 
 def test_user_hint_injected():
     task = _make_task()
-    converter = MagicMock(spec=TaskConverter)
-    converter.convert = AsyncMock(return_value=_make_conversion(task=task))
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(task=task))
 
     confirm = MagicMock(spec=PipelineConfirmManager)
-    confirm.confirm.return_value = True
+    confirm.async_confirm = AsyncMock(return_value=True)
 
     failure_result = _make_failure_result(task)
     success_result = _make_success_result(task)
@@ -284,9 +300,9 @@ def test_user_hint_injected():
     mock_git.run.return_value = ""
 
     retry = MagicMock(spec=RetryPrompt)
-    retry.ask_on_test_failure.return_value = RetryDecision(
+    retry.ask_on_test_failure_async = AsyncMock(return_value=RetryDecision(
         action="retry_with_hint", hint="힌트텍스트"
-    )
+    ))
 
     runner = _make_runner(
         converter=converter,
@@ -311,11 +327,11 @@ def test_user_hint_injected():
 
 def test_user_quit_aborts():
     task = _make_task()
-    converter = MagicMock(spec=TaskConverter)
-    converter.convert = AsyncMock(return_value=_make_conversion(task=task))
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(task=task))
 
     confirm = MagicMock(spec=PipelineConfirmManager)
-    confirm.confirm.return_value = True
+    confirm.async_confirm = AsyncMock(return_value=True)
 
     failure_result = _make_failure_result(task)
     mock_pipeline = MagicMock()
@@ -324,7 +340,7 @@ def test_user_quit_aborts():
     ws_cls, _ = _stub_workspace_cls()
 
     retry = MagicMock(spec=RetryPrompt)
-    retry.ask_on_test_failure.return_value = RetryDecision(action="quit")
+    retry.ask_on_test_failure_async = AsyncMock(return_value=RetryDecision(action="quit"))
 
     runner = _make_runner(converter=converter, confirm=confirm, retry=retry)
     _inject_pipeline(runner, mock_pipeline)
@@ -342,12 +358,14 @@ def test_user_quit_aborts():
 
 def test_out_of_scope_file_blocks():
     task = _make_task(target_files=["src/foo.py"])
-    converter = MagicMock(spec=TaskConverter)
-    converter.convert = AsyncMock(return_value=_make_conversion(task=task))
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(task=task))
 
     # TASK_REVIEW → True, OUT_OF_SCOPE_FILE → False
     confirm = MagicMock(spec=PipelineConfirmManager)
-    confirm.confirm.side_effect = lambda ct, msg, detail=None: ct != ConfirmType.OUT_OF_SCOPE_FILE
+    confirm.async_confirm = AsyncMock(
+        side_effect=lambda ct, msg, detail=None: ct != ConfirmType.OUT_OF_SCOPE_FILE
+    )
 
     success_result = _make_success_result(task)
     mock_pipeline = MagicMock()
@@ -371,7 +389,7 @@ def test_out_of_scope_file_blocks():
          patch("cli.instant_runner.print_task_summary"):
         result = _run(runner.run("foo"))
 
-    confirm_calls = [c.args[0] for c in confirm.confirm.call_args_list]
+    confirm_calls = [c.args[0] for c in confirm.async_confirm.call_args_list]
     assert ConfirmType.OUT_OF_SCOPE_FILE in confirm_calls
     mock_git.run.assert_not_called()
 
@@ -381,12 +399,14 @@ def test_out_of_scope_file_blocks():
 
 def test_task_too_large_warning():
     task = _make_task(target_files=[f"src/f{i}.py" for i in range(5)])
-    converter = MagicMock(spec=TaskConverter)
-    converter.convert = AsyncMock(return_value=_make_conversion(task=task))
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(task=task))
 
     # TASK_REVIEW → True, TASK_TOO_LARGE → False (취소)
     confirm = MagicMock(spec=PipelineConfirmManager)
-    confirm.confirm.side_effect = lambda ct, msg, detail=None: ct != ConfirmType.TASK_TOO_LARGE
+    confirm.async_confirm = AsyncMock(
+        side_effect=lambda ct, msg, detail=None: ct != ConfirmType.TASK_TOO_LARGE
+    )
 
     mock_pipeline = MagicMock()
     runner = _make_runner(converter=converter, confirm=confirm)
@@ -395,7 +415,7 @@ def test_task_too_large_warning():
     with patch("cli.instant_runner.print_task_summary"):
         result = _run(runner.run("대형 작업"))
 
-    confirm_calls = [c.args[0] for c in confirm.confirm.call_args_list]
+    confirm_calls = [c.args[0] for c in confirm.async_confirm.call_args_list]
     assert ConfirmType.TASK_TOO_LARGE in confirm_calls
     mock_pipeline.run.assert_not_called()
 
@@ -405,11 +425,11 @@ def test_task_too_large_warning():
 
 def test_changes_requested_ignore():
     task = _make_task()
-    converter = MagicMock(spec=TaskConverter)
-    converter.convert = AsyncMock(return_value=_make_conversion(task=task))
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(task=task))
 
     confirm = MagicMock(spec=PipelineConfirmManager)
-    confirm.confirm.return_value = True
+    confirm.async_confirm = AsyncMock(return_value=True)
 
     cr_result = PipelineResult(
         task=task,
@@ -435,7 +455,7 @@ def test_changes_requested_ignore():
          patch("cli.instant_runner.print_task_summary"):
         result = _run(runner.run("foo"))
 
-    confirm_calls = [c.args[0] for c in confirm.confirm.call_args_list]
+    confirm_calls = [c.args[0] for c in confirm.async_confirm.call_args_list]
     assert ConfirmType.COMMIT_CHANGES_REQUESTED in confirm_calls
     mock_git.run.assert_called_once()
 
@@ -445,12 +465,14 @@ def test_changes_requested_ignore():
 
 def test_existing_test_broken_blocks():
     task = _make_task()
-    converter = MagicMock(spec=TaskConverter)
-    converter.convert = AsyncMock(return_value=_make_conversion(task=task))
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(task=task))
 
     # TASK_REVIEW → True, EXISTING_TEST_BROKEN → False
     confirm = MagicMock(spec=PipelineConfirmManager)
-    confirm.confirm.side_effect = lambda ct, msg, detail=None: ct != ConfirmType.EXISTING_TEST_BROKEN
+    confirm.async_confirm = AsyncMock(
+        side_effect=lambda ct, msg, detail=None: ct != ConfirmType.EXISTING_TEST_BROKEN
+    )
 
     # TestWriter가 생성한 파일은 test_new.py 하나지만
     # workspace에는 test_old.py(기존 파일)도 존재
@@ -478,7 +500,7 @@ def test_existing_test_broken_blocks():
          patch("cli.instant_runner.print_task_summary"):
         result = _run(runner.run("foo"))
 
-    confirm_calls = [c.args[0] for c in confirm.confirm.call_args_list]
+    confirm_calls = [c.args[0] for c in confirm.async_confirm.call_args_list]
     assert ConfirmType.EXISTING_TEST_BROKEN in confirm_calls
     mock_git.run.assert_not_called()
 
@@ -489,11 +511,11 @@ def test_existing_test_broken_blocks():
 def test_preexisting_out_of_scope_file_is_ignored_when_unchanged():
     """비대상 파일이 원래 있었더라도 변경이 없으면 out-of-scope로 보지 않는다."""
     task = _make_task(target_files=["src/foo.py"])
-    converter = MagicMock(spec=TaskConverter)
-    converter.convert = AsyncMock(return_value=_make_conversion(task=task))
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(task=task))
 
     confirm = MagicMock(spec=PipelineConfirmManager)
-    confirm.confirm.return_value = True
+    confirm.async_confirm = AsyncMock(return_value=True)
 
     success_result = _make_success_result(task)
     mock_pipeline = MagicMock()
@@ -523,7 +545,7 @@ def test_preexisting_out_of_scope_file_is_ignored_when_unchanged():
          patch("cli.instant_runner.print_task_summary"):
         result = _run(runner.run("foo"))
 
-    confirm_calls = [c.args[0] for c in confirm.confirm.call_args_list]
+    confirm_calls = [c.args[0] for c in confirm.async_confirm.call_args_list]
     assert ConfirmType.OUT_OF_SCOPE_FILE not in confirm_calls
     mock_git.run.assert_called_once()
     assert result.success is True
@@ -532,11 +554,13 @@ def test_preexisting_out_of_scope_file_is_ignored_when_unchanged():
 def test_modified_preexisting_out_of_scope_file_blocks():
     """기존 비대상 파일의 내용이 바뀌면 out-of-scope 확인이 트리거된다."""
     task = _make_task(target_files=["src/foo.py"])
-    converter = MagicMock(spec=TaskConverter)
-    converter.convert = AsyncMock(return_value=_make_conversion(task=task))
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(task=task))
 
     confirm = MagicMock(spec=PipelineConfirmManager)
-    confirm.confirm.side_effect = lambda ct, msg, detail=None: ct != ConfirmType.OUT_OF_SCOPE_FILE
+    confirm.async_confirm = AsyncMock(
+        side_effect=lambda ct, msg, detail=None: ct != ConfirmType.OUT_OF_SCOPE_FILE
+    )
 
     success_result = _make_success_result(task)
     mock_pipeline = MagicMock()
@@ -565,7 +589,7 @@ def test_modified_preexisting_out_of_scope_file_blocks():
          patch("cli.instant_runner.print_task_summary"):
         _run(runner.run("foo"))
 
-    confirm_calls = [c.args[0] for c in confirm.confirm.call_args_list]
+    confirm_calls = [c.args[0] for c in confirm.async_confirm.call_args_list]
     assert ConfirmType.OUT_OF_SCOPE_FILE in confirm_calls
     mock_git.run.assert_not_called()
 
@@ -576,11 +600,13 @@ def test_modified_preexisting_out_of_scope_file_blocks():
 def test_deleted_file_blocks():
     """초기에 있던 파일이 파이프라인 실행 후 사라지면 FILE_DELETION 확인이 트리거된다."""
     task = _make_task(target_files=["src/foo.py"])
-    converter = MagicMock(spec=TaskConverter)
-    converter.convert = AsyncMock(return_value=_make_conversion(task=task))
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(task=task))
 
     confirm = MagicMock(spec=PipelineConfirmManager)
-    confirm.confirm.side_effect = lambda ct, msg, detail=None: ct != ConfirmType.FILE_DELETION
+    confirm.async_confirm = AsyncMock(
+        side_effect=lambda ct, msg, detail=None: ct != ConfirmType.FILE_DELETION
+    )
 
     success_result = _make_success_result(task)
     mock_pipeline = MagicMock()
@@ -603,7 +629,7 @@ def test_deleted_file_blocks():
          patch("cli.instant_runner.print_task_summary"):
         _run(runner.run("foo"))
 
-    confirm_calls = [c.args[0] for c in confirm.confirm.call_args_list]
+    confirm_calls = [c.args[0] for c in confirm.async_confirm.call_args_list]
     assert ConfirmType.FILE_DELETION in confirm_calls
     mock_git.run.assert_not_called()
 
@@ -641,11 +667,11 @@ def test_real_workspace_python_target_does_not_flag_auto_init(tmp_path):
 def test_aborted_result_returns_user_aborted():
     """pipeline.run()이 [ABORTED] 결과를 반환하면 user_aborted=True로 즉시 반환된다."""
     task = _make_task()
-    converter = MagicMock(spec=TaskConverter)
-    converter.convert = AsyncMock(return_value=_make_conversion(task=task))
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(task=task))
 
     confirm = MagicMock(spec=PipelineConfirmManager)
-    confirm.confirm.return_value = True
+    confirm.async_confirm = AsyncMock(return_value=True)
 
     aborted_result = PipelineResult(
         task=task,
@@ -669,8 +695,8 @@ def test_aborted_result_returns_user_aborted():
     assert result.user_aborted is True
     assert result.success is False
     # RetryPrompt는 호출되지 않아야 한다
-    retry.ask_on_test_failure.assert_not_called()
-    retry.ask_on_pipeline_error.assert_not_called()
+    retry.ask_on_test_failure_async.assert_not_called()
+    retry.ask_on_pipeline_error_async.assert_not_called()
 
 
 # ── 테스트 14: [REVIEWER_INFRA_ERROR] → ask_on_pipeline_error 라우팅 ─────────────
@@ -679,11 +705,11 @@ def test_aborted_result_returns_user_aborted():
 def test_infra_error_routes_to_pipeline_error_prompt():
     """[REVIEWER_INFRA_ERROR] 실패는 ask_on_test_failure가 아닌 ask_on_pipeline_error로 간다."""
     task = _make_task()
-    converter = MagicMock(spec=TaskConverter)
-    converter.convert = AsyncMock(return_value=_make_conversion(task=task))
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(task=task))
 
     confirm = MagicMock(spec=PipelineConfirmManager)
-    confirm.confirm.return_value = True
+    confirm.async_confirm = AsyncMock(return_value=True)
 
     infra_result = PipelineResult(
         task=task,
@@ -696,7 +722,7 @@ def test_infra_error_routes_to_pipeline_error_prompt():
 
     ws_cls, _ = _stub_workspace_cls()
     retry = MagicMock(spec=RetryPrompt)
-    retry.ask_on_pipeline_error.return_value = RetryDecision(action="quit")
+    retry.ask_on_pipeline_error_async = AsyncMock(return_value=RetryDecision(action="quit"))
 
     runner = _make_runner(converter=converter, confirm=confirm, retry=retry)
     _inject_pipeline(runner, mock_pipeline)
@@ -705,6 +731,6 @@ def test_infra_error_routes_to_pipeline_error_prompt():
          patch("cli.instant_runner.print_task_summary"):
         result = _run(runner.run("foo"))
 
-    retry.ask_on_pipeline_error.assert_called_once()
-    retry.ask_on_test_failure.assert_not_called()
+    retry.ask_on_pipeline_error_async.assert_called_once()
+    retry.ask_on_test_failure_async.assert_not_called()
     assert result.user_aborted is True

@@ -423,6 +423,32 @@ class TestReactLoopRun:
         assert result.stop_reason == StopReason.TOOL_ERROR
         assert result.succeeded is False
 
+    def test_repeated_commit_group_staged_mismatch_stops_early(self):
+        llm = _SequentialMockLLM(
+            [
+                _tool_response("id1", "commit_group", {"message": "m", "expected_paths": ["a.py"]}),
+                _tool_response("id2", "commit_group", {"message": "m", "expected_paths": ["a.py"]}),
+                _text_response("never reached"),
+            ]
+        )
+        loop = ReactLoop(llm=llm, max_iterations=5)
+
+        with patch("core.loop.call_tool") as mock_call:
+            mock_schema = MagicMock()
+            mock_schema.success = False
+            mock_schema.output = ""
+            mock_schema.error = (
+                "staged 파일이 기대 경로와 다릅니다. "
+                "expected=['a.py'] actual=['a.py', 'b.py']"
+            )
+            mock_call.return_value = mock_schema
+            result = loop.run("커밋해")
+
+        assert result.stop_reason == StopReason.TOOL_ERROR
+        assert result.succeeded is False
+        assert len(result.iterations) == 2
+        assert "staged 상태 불일치" in result.answer
+
     def test_non_fatal_tool_error_continues_loop(self, tmp_path):
         """file not found 같은 비치명 오류는 루프를 계속 진행"""
         llm = _SequentialMockLLM(
@@ -600,6 +626,31 @@ class TestOnToolApproval:
 
         # read_file은 _APPROVAL_REQUIRED에 없으므로 콜백이 불리지 않아야 함
         assert "read_file" not in approval_calls
+
+    def test_git_add_requires_approval(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess = __import__("subprocess")
+        subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+        (repo / "a.py").write_text("x\n", encoding="utf-8")
+
+        approval_calls: list[str] = []
+
+        def approve(tc: ToolCall) -> bool:
+            approval_calls.append(tc.name)
+            return False
+
+        llm = _SequentialMockLLM(
+            [
+                _tool_response("id1", "git_add", {"repo_path": str(repo), "paths": ["a.py"]}),
+                _text_response("취소"),
+            ]
+        )
+        loop = ReactLoop(llm=llm, on_tool_approval=approve)
+
+        loop.run("stage 해줘")
+
+        assert "git_add" in approval_calls
 
     # 한 턴에 여러 도구가 있을 때 각각 독립적으로 승인/거부
     def test_mixed_approval_in_same_turn(self, tmp_path):

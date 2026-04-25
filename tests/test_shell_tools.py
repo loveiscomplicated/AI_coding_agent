@@ -158,3 +158,19 @@ class TestExecuteCommand:
 
         assert result.success is False
         assert "custom_error" in str(result.error)
+
+    def test_calledprocess_error_falls_back_to_exception_message_when_stderr_empty(self):
+        exc = subprocess.CalledProcessError(returncode=2, cmd=["python3", "-c", "raise SystemExit(2)"], stderr="")
+        with patch("subprocess.run", side_effect=exc):
+            result = execute_command(["python3", "-c", "raise SystemExit(2)"])
+
+        assert result.success is False
+        assert "returned non-zero exit status 2" in str(result.error)
+
+    def test_timeout_error_falls_back_to_exception_message_when_no_streams(self):
+        exc = subprocess.TimeoutExpired(cmd=["sleep", "5"], timeout=1.0)
+        with patch("subprocess.run", side_effect=exc):
+            result = execute_command(["sleep", "5"], timeout=1.0)
+
+        assert result.success is False
+        assert "timed out" in str(result.error).lower()

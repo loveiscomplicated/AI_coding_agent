@@ -22,12 +22,12 @@ def _role_model(provider: str, model: str) -> dict[str, str]:
 
 
 DEFAULT_ROLE_MODEL_MAP: dict[str, dict[str, str]] = {
-    ROLE_TEST_WRITER: _role_model("claude", "claude-haiku-4-5-20251001"),
-    ROLE_IMPLEMENTER: _role_model("claude", "claude-haiku-4-5-20251001"),
-    ROLE_REVIEWER: _role_model("claude", "claude-haiku-4-5-20251001"),
-    ROLE_MERGE_AGENT: _role_model("claude", "claude-haiku-4-5-20251001"),
-    ROLE_ORCHESTRATOR: _role_model("claude", "claude-opus-4-6"),
-    ROLE_INTERVENTION: _role_model("claude", "claude-opus-4-6"),
+    ROLE_TEST_WRITER: _role_model("openai", "gpt-5-mini"),
+    ROLE_IMPLEMENTER: _role_model("openai", "gpt-5-mini"),
+    ROLE_REVIEWER: _role_model("openai", "gpt-5-mini"),
+    ROLE_MERGE_AGENT: _role_model("openai", "gpt-5-mini"),
+    ROLE_ORCHESTRATOR: _role_model("openai", "gpt-5.4"),
+    ROLE_INTERVENTION: _role_model("openai", "gpt-5.4"),
 }
 
 

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cli.selector import SelectOption, inline_select
+from cli.selector import SelectOption, _preferred_widget_height, inline_select
 
 
 # prompt_toolkit이 'enter' → Keys.ControlM(value='c-m')으로 정규화하므로
@@ -104,3 +104,19 @@ def test_down_at_bottom_stays(monkeypatch, options):
     assert _run_with_keys(
         monkeypatch, options, ["down", "down", "down", "down", "enter"]
     ) == "c"
+
+
+def test_preferred_height_is_capped_by_terminal(monkeypatch):
+    monkeypatch.setattr("cli.selector.shutil.get_terminal_size", lambda fallback=(80, 24): (80, 8))
+    options = [SelectOption(label=f"opt-{i}", value=str(i)) for i in range(20)]
+    assert _preferred_widget_height(options) == 3
+
+
+def test_preferred_height_matches_content_when_terminal_is_large(monkeypatch):
+    monkeypatch.setattr("cli.selector.shutil.get_terminal_size", lambda fallback=(80, 24): (80, 40))
+    options = [
+        SelectOption(label="첫째", value="a"),
+        SelectOption(label="둘째", value="b", description="설명 한 줄"),
+        SelectOption(label="셋째", value="c"),
+    ]
+    assert _preferred_widget_height(options) == 4

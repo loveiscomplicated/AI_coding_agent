@@ -30,11 +30,15 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from tools.git_tools import (   # 아직 없음
+    analyze_uncommitted_changes,
+    commit_group,
     git_add,
     git_commit,
     git_diff,
     git_log,
     git_status,
+    propose_commit_groups,
+    stage_group,
 )
 
 
@@ -72,6 +76,11 @@ def repo_with_commit(repo):
 
 
 class TestGitStatus:
+    def test_default_repo_path_is_dot(self, repo_with_commit, monkeypatch):
+        monkeypatch.chdir(repo_with_commit)
+        result = git_status()
+        assert result.success is True
+
     def test_clean_repo_shows_clean(self, repo_with_commit):
         result = git_status(str(repo_with_commit))
         assert result.success is True
@@ -193,6 +202,12 @@ class TestGitLog:
 
 
 class TestGitAdd:
+    def test_default_repo_path_is_dot(self, repo, monkeypatch):
+        (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+        monkeypatch.chdir(repo)
+        result = git_add(paths=["a.py"])
+        assert result.success is True
+
     def test_add_single_file(self, repo):
         f = repo / "a.py"
         f.write_text("x = 1\n", encoding="utf-8")
@@ -238,6 +253,15 @@ class TestGitAdd:
 
 
 class TestGitCommit:
+    def test_default_repo_path_is_dot(self, repo, monkeypatch):
+        f = repo / "a.py"
+        f.write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "a.py"], check=True,
+                       capture_output=True, cwd=str(repo))
+        monkeypatch.chdir(repo)
+        result = git_commit(message="feat: default repo path")
+        assert result.success is True
+
     def test_commit_staged_changes(self, repo):
         f = repo / "a.py"
         f.write_text("x = 1\n", encoding="utf-8")
@@ -287,4 +311,80 @@ class TestGitCommit:
                        capture_output=True, cwd=str(repo))
 
         result = git_commit(str(repo), message="feat: title\n\nbody description")
+        assert result.success is True
+
+
+class TestCommitGroupingTools:
+    def test_analyze_uncommitted_changes_returns_json(self, repo_with_commit):
+        (repo_with_commit / "hello.py").write_text("print('changed')\n", encoding="utf-8")
+        (repo_with_commit / "tests").mkdir()
+        (repo_with_commit / "tests" / "test_hello.py").write_text("def test_x(): pass\n", encoding="utf-8")
+
+        result = analyze_uncommitted_changes(str(repo_with_commit))
+
+        assert result.success is True
+        assert "hello.py" in result.output
+        assert "test_hello.py" in result.output
+
+    def test_propose_commit_groups_returns_group_candidates(self, repo_with_commit):
+        (repo_with_commit / "cli").mkdir()
+        (repo_with_commit / "cli" / "interface.py").write_text("x = 1\n", encoding="utf-8")
+        (repo_with_commit / "tests").mkdir(exist_ok=True)
+        (repo_with_commit / "tests" / "test_cli.py").write_text("def test_x(): pass\n", encoding="utf-8")
+
+        result = propose_commit_groups(str(repo_with_commit))
+
+        assert result.success is True
+        assert "groups" in result.output
+        assert "cli/interface.py" in result.output
+
+    def test_stage_group_rejects_dot(self, repo):
+        (repo / "a.py").write_text("x\n", encoding="utf-8")
+        result = stage_group(str(repo), paths=["."])
+        assert result.success is False
+        assert result.error is not None
+
+    def test_stage_group_only_allows_changed_paths(self, repo):
+        (repo / "a.py").write_text("x\n", encoding="utf-8")
+        result = stage_group(str(repo), paths=["ghost.py"])
+        assert result.success is False
+        assert "ghost.py" in (result.error or "")
+
+    def test_stage_group_stages_explicit_paths(self, repo):
+        (repo / "a.py").write_text("x\n", encoding="utf-8")
+        result = stage_group(str(repo), paths=["a.py"])
+        assert result.success is True
+
+    def test_stage_group_replace_resets_previous_staging(self, repo_with_commit):
+        (repo_with_commit / "a.py").write_text("a\n", encoding="utf-8")
+        (repo_with_commit / "b.py").write_text("b\n", encoding="utf-8")
+        assert stage_group(str(repo_with_commit), paths=["a.py"]).success is True
+
+        result = stage_group(str(repo_with_commit), paths=["b.py"], replace=True)
+
+        assert result.success is True
+        staged = subprocess.run(
+            ["git", "diff", "--staged", "--name-only"],
+            check=True, capture_output=True, text=True, cwd=str(repo_with_commit)
+        )
+        assert staged.stdout.splitlines() == ["b.py"]
+
+    def test_commit_group_checks_expected_paths(self, repo):
+        (repo / "a.py").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "add", "a.py"], check=True,
+                       capture_output=True, cwd=str(repo))
+
+        result = commit_group(str(repo), message="feat: add a", expected_paths=["b.py"])
+
+        assert result.success is False
+        assert "expected" in (result.error or "")
+        assert "replace=True" in (result.error or "")
+
+    def test_commit_group_commits_when_expected_matches(self, repo):
+        (repo / "a.py").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "add", "a.py"], check=True,
+                       capture_output=True, cwd=str(repo))
+
+        result = commit_group(str(repo), message="feat: add a", expected_paths=["a.py"])
+
         assert result.success is True

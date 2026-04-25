@@ -240,11 +240,47 @@ class TestReactLoopSelfHealing:
         """HealAttemptTracker 가 올바르게 카운트를 추적하는지."""
         from core.loop import HealAttemptTracker
         tracker = HealAttemptTracker()
-        assert tracker.get("t1") == 0
-        assert tracker.increment("t1") == 1
-        assert tracker.increment("t1") == 2
-        assert tracker.get("t1") == 2
-        assert tracker.get("t2") == 0  # 다른 ID는 독립적
+        input_a = {"path": "a.py"}
+        error_a = "old_str not found in file"
+        input_b = {"path": "b.py"}
+        assert tracker.get("edit_file", input_a, error_a) == 0
+        assert tracker.increment("edit_file", input_a, error_a) == 1
+        assert tracker.increment("edit_file", input_a, error_a) == 2
+        assert tracker.get("edit_file", input_a, error_a) == 2
+        assert tracker.get("edit_file", input_b, error_a) == 0
+
+    def test_heal_attempt_tracker_normalizes_input_order(self):
+        from core.loop import HealAttemptTracker
+        tracker = HealAttemptTracker()
+        err = "same error"
+
+        assert tracker.increment(
+            "commit_group",
+            {"message": "m", "expected_paths": ["a.py"]},
+            err,
+        ) == 1
+        assert tracker.increment(
+            "commit_group",
+            {"expected_paths": ["a.py"], "message": "m"},
+            err,
+        ) == 2
+
+    def test_heal_attempt_tracker_commit_group_mismatch_is_distinct_per_input(self):
+        from core.loop import HealAttemptTracker
+        tracker = HealAttemptTracker()
+        err_a = "도구 오류 [commit_group]: staged 파일이 기대 경로와 다릅니다. expected=['a.py'] actual=['a.py', 'b.py']"
+        err_b = "도구 오류 [commit_group]: staged 파일이 기대 경로와 다릅니다. expected=['b.py'] actual=['a.py', 'b.py']"
+
+        assert tracker.increment(
+            "commit_group",
+            {"message": "m1", "expected_paths": ["a.py"]},
+            err_a,
+        ) == 1
+        assert tracker.increment(
+            "commit_group",
+            {"message": "m2", "expected_paths": ["b.py"]},
+            err_b,
+        ) == 1
 
     def test_loop_phase_enum(self):
         """LoopPhase 열거형 값 확인."""

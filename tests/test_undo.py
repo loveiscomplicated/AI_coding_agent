@@ -213,3 +213,23 @@ class TestChangeTrackerErrors:
         path, ok = tracker.undo_last()
         assert ok is True
         assert f.read_text(encoding="utf-8") == original
+
+    def test_record_tree_restores_modified_and_new_files(self, tmp_path):
+        root = tmp_path / "repo"
+        root.mkdir()
+        existing = root / "src.py"
+        existing.write_text("before\n", encoding="utf-8")
+
+        tracker = ChangeTracker()
+        tracker.record_tree(str(root))
+
+        existing.write_text("after\n", encoding="utf-8")
+        created = root / "new.py"
+        created.write_text("created\n", encoding="utf-8")
+
+        path, ok = tracker.undo_last()
+
+        assert ok is True
+        assert path == str(root)
+        assert existing.read_text(encoding="utf-8") == "before\n"
+        assert created.exists() is False
