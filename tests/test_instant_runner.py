@@ -237,6 +237,35 @@ def test_conversion_error_uses_async_pipeline_retry_prompt():
     retry.ask_on_pipeline_error_async.assert_called_once_with("broken json")
 
 
+def test_repo_question_still_goes_through_planner():
+    task = _make_task()
+    converter = MagicMock(spec=PlanLoop)
+    converter.plan = AsyncMock(return_value=_make_conversion(task=task))
+
+    confirm = MagicMock(spec=PipelineConfirmManager)
+    confirm.async_confirm = AsyncMock(return_value=True)
+
+    success_result = _make_success_result(task)
+    mock_pipeline = MagicMock()
+    mock_pipeline.run.return_value = success_result
+
+    ws_cls, _ = _stub_workspace_cls()
+    mock_git = MagicMock()
+    mock_git.run.return_value = ""
+
+    runner = _make_runner(converter=converter, confirm=confirm)
+    _inject_pipeline(runner, mock_pipeline)
+
+    with patch("cli.instant_runner.WorkspaceManager", ws_cls), \
+         patch("cli.instant_runner.GitWorkflow", return_value=mock_git), \
+         patch("cli.instant_runner.print_pipeline_result"), \
+         patch("cli.instant_runner.print_task_summary"):
+        result = _run(runner.run("gatedfusion 분석 코드가 어디에 있는지 알려줘"))
+
+    assert result.success is True
+    converter.plan.assert_awaited_once()
+
+
 # ── 테스트 4: 자동 재시도 소진 → RetryPrompt 호출 → retry → 성공 ──────────────
 
 

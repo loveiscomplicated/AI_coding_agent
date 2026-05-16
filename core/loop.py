@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from collections.abc import Collection
 
 from typing import Any, Callable
 
@@ -239,6 +240,7 @@ class ReactLoop:
         role_name: str | None = None,  # call_log 엔트리에 기록되는 역할 태그
         tools_schema: list[dict] | None = None,  # 기본 스키마 대신 사용할 도구 스키마
         tool_caller: Callable[..., Any] | None = None,  # 제한된 도구 호출기 주입
+        allowed_tool_names: Collection[str] | None = None,  # 현재 루프에서 실제 허용된 도구명 집합
     ):
         self.llm: BaseLLMClient = llm
         self.max_iterations = max_iterations
@@ -268,6 +270,11 @@ class ReactLoop:
         # 기본 경로는 실행 시점의 module-level call_tool 을 사용해, 테스트에서
         # patch("core.loop.call_tool") 한 값이 반영되도록 둔다.
         self._tool_caller = tool_caller
+        self.allowed_tool_names = (
+            frozenset(allowed_tool_names)
+            if allowed_tool_names is not None
+            else None
+        )
         # run 별로 리셋되는 쿨다운 상태 (_maybe_compact 에서만 수정)
         self._last_compaction_iter: int | None = None
         self.TOOLS_SCHEMA = (
@@ -404,6 +411,7 @@ class ReactLoop:
                     not _write_tool_used
                     and not _nudge_attempted
                     and _has_code_block(final_text)
+                    and self._can_write_in_current_loop()
                     and self.TOOLS_SCHEMA  # 도구가 제공되었을 때만
                 ):
                     _nudge_attempted = True
@@ -481,10 +489,16 @@ class ReactLoop:
                     "tool_use stop_reason이지만 tool_use 블록이 없음 — 재시도 힌트 전달 (반복 %d)", i + 1
                 )
                 messages.append(Message(role="assistant", content=response.content or []))
+                followup = (
+                    "도구를 호출하려고 했지만 tool_use 블록이 전달되지 않았습니다. "
+                )
+                if self._can_write_in_current_loop():
+                    followup += "write_file 등 필요한 도구를 명시적으로 호출해 주세요."
+                else:
+                    followup += "허용된 읽기/분석 도구를 명시적으로 호출해 주세요."
                 messages.append(Message(
                     role="user",
-                    content="도구를 호출하려고 했지만 tool_use 블록이 전달되지 않았습니다. "
-                            "write_file 등 필요한 도구를 명시적으로 호출해 주세요.",
+                    content=followup,
                 ))
                 continue
 
@@ -911,6 +925,12 @@ class ReactLoop:
             msg = f"도구 실행 중 예외 [{tc.name}]: {type(exc).__name__}: {exc}"
             logger.error(msg, exc_info=True)
             return ToolResult(tool_use_id=tc.id, content=msg, is_error=True)
+
+    def _can_write_in_current_loop(self) -> bool:
+        """현재 루프가 실제로 쓰기 도구를 사용할 수 있는지 반환한다."""
+        if self.allowed_tool_names is None:
+            return True
+        return bool(self.allowed_tool_names & _WRITE_TOOLS)
 
     def get_tools_schema(self):
         llm_client = type(self.llm).__name__

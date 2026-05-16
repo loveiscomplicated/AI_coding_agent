@@ -96,6 +96,8 @@ def handle(
             return _mode(arg)
         case "/instant" | "/normal":
             return _set_mode(CLIMode.INSTANT)
+        case "/readonly":
+            return _set_mode(CLIMode.READ_ONLY)
         case "/plan":
             return _set_mode(CLIMode.PLAN)
         case "/tdd":
@@ -122,8 +124,9 @@ def _help() -> CommandResult:
         ("/delete",        "현재 세션 삭제 후 새 세션 시작"),
         ("/undo",          "마지막 파일 변경 되돌리기"),
         ("/undo all",      "이번 세션의 모든 파일 변경 되돌리기"),
-        ("/mode [instant|plan|tdd]", "현재 모드 확인 또는 전환"),
+        ("/mode [instant|readonly|plan|tdd]", "현재 모드 확인 또는 전환"),
         ("/instant",       "범용 로컬 에이전트 모드"),
+        ("/readonly",      "읽기/분석 전용 모드"),
         ("/plan",          "planner 후 executor로 넘기는 모드"),
         ("/tdd",           "planner 후 TDD 파이프라인 실행"),
         ("/normal",        "legacy alias for /instant"),
@@ -235,12 +238,14 @@ def _mode(arg: str) -> CommandResult:
     if not arg:
         current = get_current_mode()
         ui.print_info(f"현재 모드: {current.value}")
-        ui.print_info("  Shift+Tab 또는 /instant, /plan, /tdd 로 전환")
+        ui.print_info("  Shift+Tab 또는 /instant, /readonly, /plan, /tdd 로 전환")
         return CommandResult(action=Action.NONE)
 
     v = arg.strip().lower()
     if v in ("instant", "normal", "일반"):
         return _set_mode(CLIMode.INSTANT)
+    if v in ("readonly", "read-only", "read_only", "읽기전용", "읽기-전용"):
+        return _set_mode(CLIMode.READ_ONLY)
     if v == "plan":
         return _set_mode(CLIMode.PLAN)
     if v == "tdd":

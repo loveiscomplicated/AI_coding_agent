@@ -37,6 +37,7 @@ from cli.config import (
 )
 from cli.instant_runner import InstantRunner, RunMode
 from cli.plan_runner import PlanRunner
+from cli.read_only_runner import ReadOnlyRunner
 from cli.interface import CLIMode, get_current_mode, set_mode
 from cli.interrupt import EscInterruptHandler
 from cli.pipeline_confirm import PipelineConfirmManager
@@ -91,6 +92,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="사용 가능한 모델 목록 출력 후 종료 (-p 로 provider 지정 가능)",
     )
+    parser.add_argument(
+        "--mode",
+        default=None,
+        help="시작 모드 (instant|readonly|plan|tdd)",
+    )
     return parser.parse_args()
 
 
@@ -98,7 +104,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 _DEFAULT_MODELS: dict[str, str] = {
-    "ollama": "kimi-k2.5:cloud",
+    "ollama": "qwen2.5-coder:14b",
     "openai": "gpt-4.1-mini",
     "claude": "claude-sonnet-4-6",
     "gemini": "gemini-2.5-pro-preview-06-05",
@@ -224,17 +230,11 @@ def _tool_schema_provider(provider: str) -> str:
 
 
 def _instant_allowed_tools() -> tuple[str, ...]:
-    return tuple(
-        name for name in TOOL_REGISTRY
-        if name not in _INSTANT_TOOL_EXCLUDES
-    )
+    return tuple(name for name in TOOL_REGISTRY if name not in _INSTANT_TOOL_EXCLUDES)
 
 
 def _commit_workflow_allowed_tools() -> tuple[str, ...]:
-    return tuple(
-        name for name in TOOL_REGISTRY
-        if name in _COMMIT_WORKFLOW_TOOL_NAMES
-    )
+    return tuple(name for name in TOOL_REGISTRY if name in _COMMIT_WORKFLOW_TOOL_NAMES)
 
 
 def _looks_like_commit_workflow_request(raw: str) -> bool:
@@ -380,7 +380,10 @@ def _build_plan_runner(repo_root: str, cli_cfg) -> PlanRunner:
     )
 
 
-def _build_commit_workflow_loop(provider: str, model: str, agent_cfg, approval_handler) -> ReactLoop:
+def _build_commit_workflow_loop(
+    provider: str, model: str, agent_cfg, approval_handler
+) -> ReactLoop:
+    allowed_tools = _commit_workflow_allowed_tools()
     commit_client = create_client(
         provider=provider,
         config=LLMConfig(model=model, system_prompt=_COMMIT_WORKFLOW_SYSTEM),
@@ -394,9 +397,10 @@ def _build_commit_workflow_loop(provider: str, model: str, agent_cfg, approval_h
         on_tool_approval=approval_handler,
         tools_schema=get_tools_schema(
             _tool_schema_provider(provider),
-            allowed_names=_commit_workflow_allowed_tools(),
+            allowed_names=allowed_tools,
         ),
-        tool_caller=make_tool_caller(_commit_workflow_allowed_tools()),
+        tool_caller=make_tool_caller(allowed_tools),
+        allowed_tool_names=allowed_tools,
     )
 
 
@@ -453,6 +457,21 @@ def _make_plan_runner_loader(repo_root: str, cli_cfg) -> Callable[[], PlanRunner
     return _get_runner
 
 
+def _make_read_only_runner_loader(cli_cfg, agent_cfg) -> Callable[[], ReadOnlyRunner]:
+    runner: ReadOnlyRunner | None = None
+
+    def _get_runner() -> ReadOnlyRunner:
+        nonlocal runner
+        if runner is None:
+            runner = ReadOnlyRunner(
+                default_role_models=cli_cfg.default_role_models,
+                max_iterations=agent_cfg.max_iterations,
+            )
+        return runner
+
+    return _get_runner
+
+
 @dataclass
 class _DispatchResult:
     handled: bool
@@ -464,6 +483,7 @@ def _dispatch_mode_turn(
     raw: str,
     *,
     mode: CLIMode,
+    get_read_only_runner: Callable[[], ReadOnlyRunner] | None,
     get_plan_runner: Callable[[], PlanRunner] | None,
     get_tdd_runner: Callable[[], InstantRunner] | None,
     pending_loop_kind: str | None = None,
@@ -490,6 +510,20 @@ def _dispatch_mode_turn(
         if result.user_aborted or not result.execution_prompt:
             return _DispatchResult(handled=True)
         return _DispatchResult(handled=False, execute_input=result.execution_prompt)
+
+    if mode == CLIMode.READ_ONLY and get_read_only_runner is not None:
+        try:
+            runner = get_read_only_runner()
+            answer = _run_async_blocking(runner.run, raw)
+        except KeyboardInterrupt:
+            ui.print_info("ReadOnly 모드 중단됨.")
+            return _DispatchResult(handled=True)
+        except Exception as e:
+            ui.print_error(f"ReadOnly 실행 오류: {e}")
+            return _DispatchResult(handled=True)
+
+        ui.print_answer(answer)
+        return _DispatchResult(handled=True)
 
     if mode == CLIMode.INSTANT:
         return _DispatchResult(
@@ -646,6 +680,7 @@ def main() -> None:
     approval_handler = (
         None if agent_cfg.auto_approve else ui.ApprovalHandler(tracker=tracker)
     )
+    instant_allowed_tools = _instant_allowed_tools()
     loop = ReactLoop(
         llm=client,
         max_iterations=agent_cfg.max_iterations,
@@ -654,9 +689,10 @@ def main() -> None:
         on_tool_approval=approval_handler,
         tools_schema=get_tools_schema(
             _tool_schema_provider(provider),
-            allowed_names=_instant_allowed_tools(),
+            allowed_names=instant_allowed_tools,
         ),
-        tool_caller=make_tool_caller(_instant_allowed_tools()),
+        tool_caller=make_tool_caller(instant_allowed_tools),
+        allowed_tool_names=instant_allowed_tools,
     )
     commit_loop: ReactLoop | None = None
 
@@ -684,6 +720,9 @@ def main() -> None:
     get_plan_runner: Callable[[], PlanRunner] | None = _make_plan_runner_loader(
         planning_root, cli_cfg
     )
+    get_read_only_runner: Callable[[], ReadOnlyRunner] | None = _make_read_only_runner_loader(
+        cli_cfg, agent_cfg
+    )
     get_tdd_runner: Callable[[], InstantRunner] | None = None
     if repo_root is None:
         ui.print_info(
@@ -692,11 +731,13 @@ def main() -> None:
     else:
         get_tdd_runner = _make_tdd_runner_loader(repo_root, cli_cfg)
 
-    default_mode = normalize_default_mode(cli_cfg.default_mode)
+    default_mode = normalize_default_mode(args.mode or cli_cfg.default_mode)
     if default_mode == "tdd" and get_tdd_runner is None:
         set_mode(CLIMode.INSTANT)
     elif default_mode == "tdd":
         set_mode(CLIMode.TDD)
+    elif default_mode == "readonly":
+        set_mode(CLIMode.READ_ONLY)
     elif default_mode == "plan":
         set_mode(CLIMode.PLAN)
     else:
@@ -753,6 +794,7 @@ def main() -> None:
         dispatch = _dispatch_mode_turn(
             raw,
             mode=get_current_mode(),
+            get_read_only_runner=get_read_only_runner,
             get_plan_runner=get_plan_runner,
             get_tdd_runner=get_tdd_runner,
             pending_loop_kind=pending_loop_kind,
@@ -768,9 +810,7 @@ def main() -> None:
             else expand_at_mentions(raw)
         )
         active_loop = (
-            _get_commit_loop()
-            if dispatch.loop_kind == "commit_workflow"
-            else loop
+            _get_commit_loop() if dispatch.loop_kind == "commit_workflow" else loop
         )
 
         esc_handler.reset()
@@ -802,9 +842,7 @@ def main() -> None:
                 pending_loop_kind=pending_loop_kind,
             )
             redirect_loop = (
-                _get_commit_loop()
-                if redirect_loop_kind == "commit_workflow"
-                else loop
+                _get_commit_loop() if redirect_loop_kind == "commit_workflow" else loop
             )
             esc_handler.reset()
             redirect_loop.stop_check = esc_handler.is_interrupted

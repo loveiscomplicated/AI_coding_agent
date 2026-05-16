@@ -3,7 +3,7 @@ structure.updater 모듈의 테스트
 """
 import pytest
 from pathlib import Path
-from structure.updater import parse_module, scan_directory, generate_markdown, update, parse_file
+from structure.updater import parse_module, scan_directory, generate_markdown, update, parse_file, _load_gitignore, _is_gitignored
 
 
 class TestParseModule:
@@ -634,6 +634,56 @@ class TestParseFileGo:
         f.write_text("package main\nfunc Add(a, b int) int { return a + b }\n", encoding="utf-8")
         result = parse_file(f)
         assert any(fn["name"] == "Add" for fn in result["functions"])
+
+
+class TestGitignoreFilter:
+    """_load_gitignore, _is_gitignored, scan_directory gitignore 통합 테스트"""
+
+    def test_load_gitignore_returns_empty_when_missing(self, tmp_path):
+        assert _load_gitignore(tmp_path) == []
+
+    def test_load_gitignore_parses_patterns(self, tmp_path):
+        (tmp_path / ".gitignore").write_text("*.npy\n# comment\n\ndata/\n", encoding="utf-8")
+        patterns = _load_gitignore(tmp_path)
+        assert "*.npy" in patterns
+        assert "data/" in patterns
+        assert "# comment" not in patterns
+        assert "" not in patterns
+
+    def test_is_gitignored_extension_pattern(self):
+        assert _is_gitignored("data/foo/bar.npy", ["*.npy"])
+        assert not _is_gitignored("data/foo/bar.py", ["*.npy"])
+
+    def test_is_gitignored_directory_pattern(self):
+        assert _is_gitignored("data/foo/bar.py", ["data/"])
+        assert _is_gitignored("data/nested/deep/file.py", ["data/"])
+        assert not _is_gitignored("src/main.py", ["data/"])
+
+    def test_is_gitignored_anchored_pattern(self):
+        assert _is_gitignored("build/out.js", ["/build"])
+        assert not _is_gitignored("src/build/out.js", ["/build"])
+
+    def test_is_gitignored_path_pattern(self):
+        assert _is_gitignored("src/gen/foo.py", ["src/gen/"])
+        assert not _is_gitignored("src/main.py", ["src/gen/"])
+
+    def test_is_gitignored_skips_negation(self):
+        assert not _is_gitignored("important.py", ["!important.py"])
+
+    def test_scan_directory_respects_gitignore(self, tmp_path):
+        (tmp_path / ".gitignore").write_text("*.npy\ndata/\n", encoding="utf-8")
+        (tmp_path / "main.py").write_text("def ok(): pass\n", encoding="utf-8")
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "3.npy").write_bytes(b"\x93NUMPY")
+        (data_dir / "extra.py").write_text("x = 1\n", encoding="utf-8")
+
+        result = scan_directory(tmp_path)
+        paths = [m["path"] for m in result]
+
+        assert any("main.py" in p for p in paths)
+        assert not any(".npy" in p for p in paths)
+        assert not any("data" in p for p in paths)
 
 
 class TestParseFileJava:

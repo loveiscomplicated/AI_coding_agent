@@ -101,6 +101,7 @@ class ScopedReactLoop(ReactLoop):
             )
         # call_log 에 role 태그를 심어 TaskReport 집계가 가능하도록 한다.
         kwargs.setdefault("role_name", role.name)
+        kwargs.setdefault("allowed_tool_names", role.allowed_tools)
         super().__init__(llm=llm, max_iterations=max_iterations, write_deadline=write_deadline, stop_check=stop_check, **kwargs)
         self._role = role
         self._workspace_dir = Path(workspace_dir).resolve()

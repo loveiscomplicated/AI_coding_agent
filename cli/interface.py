@@ -60,6 +60,7 @@ class CLIMode(Enum):
     INSTANT = "Instant"
     NORMAL = "Instant"
     PLAN = "Plan"
+    READ_ONLY = "ReadOnly"
     TDD = "TDD"
 
 
@@ -119,7 +120,7 @@ def request_mode_change(target: CLIMode) -> ModeChangeResult:
 
 
 def toggle_mode() -> ModeChangeResult:
-    cycle = [CLIMode.INSTANT, CLIMode.PLAN]
+    cycle = [CLIMode.INSTANT, CLIMode.READ_ONLY, CLIMode.PLAN]
     if _tdd_available:
         cycle.append(CLIMode.TDD)
 
@@ -150,6 +151,7 @@ _COMMANDS = [
     "/undo",
     "/mode",
     "/instant",
+    "/readonly",
     "/plan",
     "/tdd",
     "/normal",

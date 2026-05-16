@@ -18,6 +18,7 @@ PROJECT_STRUCTURE.md 파일을 자동 생성한다.
         tree-sitter-go tree-sitter-java
 """
 
+import fnmatch as _fnmatch
 import logging
 from pathlib import Path
 from typing import Optional
@@ -760,6 +761,55 @@ def parse_file(filepath: Path) -> dict:
     return result_base
 
 
+# ── .gitignore 필터 ──────────────────────────────────────────────────────────
+
+def _load_gitignore(root: Path) -> list[str]:
+    """root/.gitignore 에서 유효한 패턴 목록을 반환한다."""
+    gi = root / ".gitignore"
+    if not gi.exists():
+        return []
+    patterns = []
+    for line in gi.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            patterns.append(line)
+    return patterns
+
+
+def _is_gitignored(rel_path: str, patterns: list[str]) -> bool:
+    """
+    rel_path (루트 기준, / 구분자) 가 gitignore 패턴 중 하나라도 매칭되면 True.
+
+    지원 패턴:
+    - *.ext, dirname/          → 경로의 각 컴포넌트에 대해 매칭
+    - /anchored, path/to/pat   → 루트 기준 경로에 대해 fnmatch
+    - **                       → fnmatch의 * 가 / 를 포함하므로 자동 처리
+    """
+    rel_path = rel_path.replace("\\", "/")
+    parts = rel_path.split("/")
+
+    for pat in patterns:
+        if pat.startswith("!"):
+            continue
+        p = pat.rstrip("/")
+        if p.startswith("/"):
+            # 루트 앵커 패턴: 루트 기준으로만 매칭
+            p = p.lstrip("/")
+            if _fnmatch.fnmatch(rel_path, p) or _fnmatch.fnmatch(rel_path, p + "/*"):
+                return True
+        elif "/" not in p:
+            # 단순 패턴: 경로의 모든 컴포넌트에 대해 매칭
+            for part in parts:
+                if _fnmatch.fnmatch(part, p):
+                    return True
+        else:
+            # 슬래시 포함 패턴: 루트 기준 경로에 매칭 (fnmatch의 *는 /도 포함)
+            if _fnmatch.fnmatch(rel_path, p) or _fnmatch.fnmatch(rel_path, p + "/*"):
+                return True
+
+    return False
+
+
 # ── 디렉토리 스캔 ─────────────────────────────────────────────────────────────
 
 def scan_directory(root: Path, exclude_dirs: Optional[list] = None) -> list[dict]:
@@ -775,21 +825,29 @@ def scan_directory(root: Path, exclude_dirs: Optional[list] = None) -> list[dict
         exclude_dirs: 추가로 제외할 디렉토리 이름 목록
     """
     exclude = _EXCLUDE_DIRS | set(exclude_dirs or [])
+    gitignore_patterns = _load_gitignore(root)
     results: list[dict] = []
 
     for filepath in sorted(root.rglob("*")):
         if not filepath.is_file():
             continue
-        # 제외 디렉토리 필터
-        if any(part in exclude for part in filepath.relative_to(root).parts):
-            continue
-
-        ext = filepath.suffix.lower()
 
         try:
             rel_path = str(filepath.relative_to(root))
         except ValueError:
             rel_path = str(filepath)
+
+        rel_path_posix = rel_path.replace("\\", "/")
+
+        # 제외 디렉토리 필터
+        if any(part in exclude for part in filepath.relative_to(root).parts):
+            continue
+
+        # .gitignore 필터
+        if gitignore_patterns and _is_gitignored(rel_path_posix, gitignore_patterns):
+            continue
+
+        ext = filepath.suffix.lower()
 
         if ext in _LANG_MAP:
             # 지원 언어: Tree-sitter 파싱

@@ -152,6 +152,7 @@ def test_plan_mode_returns_execution_prompt():
     result = _dispatch_mode_turn(
         "hello",
         mode=CLIMode.PLAN,
+        get_read_only_runner=None,
         get_plan_runner=get_plan_runner,
         get_tdd_runner=None,
     )
@@ -159,6 +160,26 @@ def test_plan_mode_returns_execution_prompt():
     assert result.handled is False
     assert result.execute_input == "planned prompt"
     get_plan_runner.assert_called_once_with()
+
+
+def test_readonly_mode_runs_read_only_runner():
+    from main import _dispatch_mode_turn
+
+    runner = MagicMock()
+    runner.run = AsyncMock(return_value="analysis answer")
+    get_read_only_runner = MagicMock(return_value=runner)
+
+    result = _dispatch_mode_turn(
+        "main.py 구조를 분석해줘",
+        mode=CLIMode.READ_ONLY,
+        get_read_only_runner=get_read_only_runner,
+        get_plan_runner=None,
+        get_tdd_runner=None,
+    )
+
+    assert result.handled is True
+    get_read_only_runner.assert_called_once_with()
+    runner.run.assert_called_once_with("main.py 구조를 분석해줘")
 
 
 def test_instant_mode_toolset_excludes_raw_git_committers():
@@ -193,6 +214,7 @@ def test_instant_mode_commit_request_routes_to_commit_workflow():
     result = _dispatch_mode_turn(
         "아직 커밋하지 않은 변경사항들을 구현 의도별로 나누어 커밋해줘",
         mode=CLIMode.INSTANT,
+        get_read_only_runner=None,
         get_plan_runner=None,
         get_tdd_runner=None,
     )
@@ -207,6 +229,7 @@ def test_instant_mode_general_request_stays_on_generic_loop():
     result = _dispatch_mode_turn(
         "main.py에서 TODO를 찾아줘",
         mode=CLIMode.INSTANT,
+        get_read_only_runner=None,
         get_plan_runner=None,
         get_tdd_runner=None,
     )
@@ -221,6 +244,7 @@ def test_resume_phrase_keeps_pending_commit_workflow():
     result = _dispatch_mode_turn(
         "다음",
         mode=CLIMode.INSTANT,
+        get_read_only_runner=None,
         get_plan_runner=None,
         get_tdd_runner=None,
         pending_loop_kind="commit_workflow",
@@ -236,6 +260,7 @@ def test_resume_phrase_without_pending_state_stays_generic():
     result = _dispatch_mode_turn(
         "계속 이어서 진행하자",
         mode=CLIMode.INSTANT,
+        get_read_only_runner=None,
         get_plan_runner=None,
         get_tdd_runner=None,
     )
@@ -282,6 +307,9 @@ def test_mode_toggle_switch(monkeypatch):
     result = commands.handle("/instant", mgr, session)
     assert get_current_mode() == CLIMode.INSTANT
 
+    result = commands.handle("/readonly", mgr, session)
+    assert get_current_mode() == CLIMode.READ_ONLY
+
     # /mode (인자 없음) — "현재 모드" 메시지 출력
     captured.clear()
     result = commands.handle("/mode", mgr, session)
@@ -290,6 +318,9 @@ def test_mode_toggle_switch(monkeypatch):
 
     result = commands.handle("/mode plan", mgr, session)
     assert get_current_mode() == CLIMode.PLAN
+
+    result = commands.handle("/mode readonly", mgr, session)
+    assert get_current_mode() == CLIMode.READ_ONLY
 
     result = commands.handle("/mode tdd", mgr, session)
     assert get_current_mode() == CLIMode.TDD
@@ -427,6 +458,7 @@ def test_config_missing_toml_uses_defaults(isolated_home, clean_env):
 def test_normalize_default_mode_maps_legacy_normal():
     assert normalize_default_mode("normal") == "instant"
     assert normalize_default_mode("instant") == "instant"
+    assert normalize_default_mode("read-only") == "readonly"
     assert normalize_default_mode("plan") == "plan"
 
 

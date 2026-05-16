@@ -9,6 +9,7 @@ TDDPipeline 실행 → 재시도(RetryPrompt) → GitWorkflow 로컬 커밋 → 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from dataclasses import dataclass
@@ -38,7 +39,6 @@ _INFRA_PREFIXES = (
     "[REVIEWER_INFRA_ERROR]",
     "[DEPENDENCY_MISSING]",
 )
-
 
 class RunMode(Enum):
     FULL_TDD = "tdd"    # TestWriter → DockerTest → Quality Gate → Implementer → DockerTest → Reviewer

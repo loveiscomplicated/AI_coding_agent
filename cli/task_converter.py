@@ -491,6 +491,7 @@ class PlanLoop:
                 on_tool_result=self._on_tool_result,
                 tools_schema=schema,
                 tool_caller=make_tool_caller(_READ_ONLY_TOOL_NAMES),
+                allowed_tool_names=_READ_ONLY_TOOL_NAMES,
                 role_name="planner",
             )
             discovery_prompt = (

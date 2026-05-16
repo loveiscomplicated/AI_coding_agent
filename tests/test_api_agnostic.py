@@ -246,6 +246,35 @@ class TestHotlineTools:
         assert calls[1][0][1].system_prompt == _SUMMARIZE_SYSTEM
         assert calls[1][0][1].max_tokens == 512
 
+    def test_ask_via_stdin_pauses_background_stdin_readers(self):
+        from contextlib import contextmanager
+        import tools.hotline_tools as ht
+
+        calls: list[str] = []
+
+        @contextmanager
+        def fake_pause():
+            calls.append("enter")
+            try:
+                yield
+            finally:
+                calls.append("exit")
+
+        with patch("cli.interrupt.stdin_readers_paused", fake_pause), \
+             patch("builtins.input", side_effect=["알아서 해"]):
+            answer = ht._ask_via_stdin("질문")
+
+        assert "건너뛰었습니다" in answer
+        assert calls == ["enter", "exit"]
+
+    def test_ask_via_stdin_retries_after_unicode_decode_error(self):
+        import tools.hotline_tools as ht
+
+        with patch("builtins.input", side_effect=[UnicodeDecodeError("utf-8", b"\xb7", 0, 1, "invalid start byte"), "알아서 해"]):
+            answer = ht._ask_via_stdin("질문")
+
+        assert "건너뛰었습니다" in answer
+
 
 # ── _extract_text 헬퍼 테스트 ──────────────────────────────────────────────────
 

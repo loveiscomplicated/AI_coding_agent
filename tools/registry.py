@@ -24,7 +24,7 @@ from tools.file_tools import (
     search_in_file,
     write_file,
 )
-from tools.shell_tools import execute_command
+from tools.shell_tools import execute_command, execute_readonly_command
 from tools.code_tools import get_imports, get_outline, get_function_src
 from tools.git_tools import (
     analyze_uncommitted_changes,
@@ -236,6 +236,19 @@ TOOL_REGISTRY: dict[str, dict] = {
         ),
         "params": {
             "command": ("array", "실행할 명령어 토큰 배열 (예: [\"python\", \"main.py\"])", True, None),
+            "input_": ("string", "표준 입력으로 전달할 문자열", False, None),
+            "timeout": ("number", "타임아웃 (초 단위). 초과 시 오류 반환", False, None),
+        },
+    },
+    "execute_readonly_command": {
+        "fn": execute_readonly_command,
+        "description": (
+            "읽기 전용 셸 명령어만 실행. "
+            "허용: ls/find/rg/cat/head/tail/wc 및 git status/diff/log. "
+            "쓰기/파괴 명령과 셸 제어 토큰은 거부된다."
+        ),
+        "params": {
+            "command": ("array", "실행할 읽기 전용 명령어 토큰 배열", True, None),
             "input_": ("string", "표준 입력으로 전달할 문자열", False, None),
             "timeout": ("number", "타임아웃 (초 단위). 초과 시 오류 반환", False, None),
         },

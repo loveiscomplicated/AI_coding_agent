@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import threading
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
@@ -839,7 +840,12 @@ def _ask_via_stdin(question: str) -> str:
     conversation: list[dict] = []
     while True:
         try:
-            user_input = input(">>> ").strip()
+            with _stdin_readers_paused_if_available():
+                user_input = input(">>> ").strip()
+        except UnicodeDecodeError as e:
+            logger.warning("[ask_user] stdin 디코딩 오류, 재입력 요청: %s", e)
+            print("입력 디코딩 오류가 발생했습니다. 한 번 더 입력해주세요.")
+            continue
         except (EOFError, KeyboardInterrupt):
             break
 
@@ -863,3 +869,17 @@ def _ask_via_stdin(question: str) -> str:
         print(f"\n오케스트레이터: {response}\n")
 
     return "사용자가 입력을 중단했습니다. 최선의 판단으로 진행하세요."
+
+
+def _stdin_readers_paused_if_available():
+    """
+    CLI의 백그라운드 stdin 리더가 있으면 잠시 멈춘다.
+
+    Instant 모드에서는 ESC/Q 감시 스레드가 cbreak로 stdin 바이트를 직접 읽는다.
+    이 상태에서 input()과 동시에 읽으면 UTF-8 멀티바이트 문자가 찢어질 수 있다.
+    """
+    try:
+        from cli.interrupt import stdin_readers_paused
+    except Exception:
+        return nullcontext()
+    return stdin_readers_paused()

@@ -109,7 +109,7 @@ class AgentConfig:
     base_branch: str = "main"
 
     # 동작
-    default_mode: str = "instant"   # "instant" | "plan" | "tdd"
+    default_mode: str = "instant"   # "instant" | "readonly" | "plan" | "tdd"
     auto_push: bool = False
     auto_select_by_complexity: bool = True
 
@@ -118,6 +118,8 @@ def normalize_default_mode(value: str | None) -> str:
     raw = (value or "").strip().lower()
     if raw in {"", "instant", "normal"}:
         return "instant"
+    if raw in {"readonly", "read-only", "read_only"}:
+        return "readonly"
     if raw == "plan":
         return "plan"
     if raw == "tdd":

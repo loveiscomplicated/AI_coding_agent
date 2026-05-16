@@ -88,6 +88,10 @@ class _SequentialMockLLM:
         return next(self._responses)
 
 
+def _code_block_response(text: str = "```python\nprint('hi')\n```"):
+    return _text_response(text)
+
+
 # ── autouse 픽스처: get_tools_schema 패치 ────────────────────────────────────
 
 
@@ -269,6 +273,40 @@ class TestReactLoopRun:
         assert result.stop_reason == StopReason.END_TURN
         assert result.answer == "완료했습니다."
         assert result.iterations == []
+
+    def test_code_block_end_turn_nudges_again_when_write_tools_allowed(self):
+        llm = _SequentialMockLLM(
+            [
+                _code_block_response(),
+                _text_response("실제 파일을 생성했습니다."),
+            ]
+        )
+        loop = ReactLoop(
+            llm=llm,
+            tools_schema=[{"name": "write_file"}],
+            allowed_tool_names=("write_file", "read_file"),
+        )
+
+        result = loop.run("파일 만들어줘")
+
+        assert result.succeeded is True
+        assert result.answer == "실제 파일을 생성했습니다."
+        assert len(result.messages) == 3
+        assert "반드시 `write_file` 도구를 호출" in result.messages[-1].content
+
+    def test_code_block_end_turn_does_not_nudge_when_write_tools_disallowed(self):
+        llm = _SequentialMockLLM([_code_block_response()])
+        loop = ReactLoop(
+            llm=llm,
+            tools_schema=[{"name": "read_file"}],
+            allowed_tool_names=("read_file",),
+        )
+
+        result = loop.run("코드를 읽어서 설명해줘")
+
+        assert result.succeeded is True
+        assert result.answer == "```python\nprint('hi')\n```"
+        assert result.messages == [Message(role="user", content="코드를 읽어서 설명해줘")]
 
     def test_one_tool_call_then_end_turn(self, tmp_path):
         """파일 읽기 1회 후 종료"""
@@ -492,6 +530,32 @@ class TestReactLoopRun:
         result = loop.run("비정상 응답 테스트")
 
         assert result.stop_reason == StopReason.END_TURN
+
+    def test_missing_tool_use_hint_mentions_write_tool_when_writable(self):
+        llm = _SequentialMockLLM([_empty_tool_response(), _text_response("done")])
+        loop = ReactLoop(
+            llm=llm,
+            tools_schema=[{"name": "write_file"}],
+            allowed_tool_names=("write_file",),
+        )
+
+        result = loop.run("파일 생성해줘")
+
+        assert result.succeeded is True
+        assert "write_file 등 필요한 도구" in result.messages[-1].content
+
+    def test_missing_tool_use_hint_mentions_read_tools_when_non_writable(self):
+        llm = _SequentialMockLLM([_empty_tool_response(), _text_response("done")])
+        loop = ReactLoop(
+            llm=llm,
+            tools_schema=[{"name": "read_file"}],
+            allowed_tool_names=("read_file",),
+        )
+
+        result = loop.run("분석해줘")
+
+        assert result.succeeded is True
+        assert "허용된 읽기/분석 도구" in result.messages[-1].content
 
     # ── 콜백 훅 ──────────────────────────────────────────────────────────
 
